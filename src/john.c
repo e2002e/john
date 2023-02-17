@@ -106,7 +106,6 @@ static int john_omp_threads_new;
 #include "subsets.h"
 #include "external.h"
 #include "batch.h"
-#include "dynamic.h"
 #include "dynamic_compiler.h"
 #include "fake_salts.h"
 #include "listconf.h"
@@ -140,6 +139,8 @@ static int john_omp_threads_new;
 #endif
 #endif
 #include "omp_autotune.h"
+
+extern int dynamic_Register_formats(struct fmt_main **ptr);
 
 #if CPU_DETECT
 extern int CPU_detect(void);
@@ -189,6 +190,7 @@ uint64_t john_max_cands;
 static int children_ok = 1;
 
 static struct db_main database;
+static int loaded_extra_pots;
 static struct fmt_main dummy_format;
 
 static char *mode_exit_message = "";
@@ -353,7 +355,7 @@ static void john_omp_init(void)
 		john_omp_threads_orig = john_omp_threads_new;
 }
 
-#if OMP_FALLBACK
+#if OMP_FALLBACK || defined(OMP_FALLBACK_BINARY)
 #if defined(__DJGPP__)
 #error OMP_FALLBACK is incompatible with the current DOS code
 #endif
@@ -650,19 +652,22 @@ static void john_set_mpi(void)
 
 static void john_wait(void)
 {
+	log_flush();
+
+	/* Tell our friends there is nothing more to crack! */
+	if (!database.password_count && !options.reload_at_crack &&
+	    cfg_get_bool(SECTION_OPTIONS, NULL, "ReloadAtDone", 1))
+		raise(SIGUSR2);
+
+	if (!john_main_process)
+		return;
+
 	int waiting_for = john_child_count;
 
 	log_event("Waiting for %d child%s to terminate",
 	    waiting_for, waiting_for == 1 ? "" : "ren");
 	fprintf(stderr, "Waiting for %d child%s to terminate\n",
 	    waiting_for, waiting_for == 1 ? "" : "ren");
-
-	log_flush();
-
-	/* Tell our friends there is nothing more to crack! */
-	if (!database.password_count && !options.reload_at_crack &&
-	    cfg_get_bool(SECTION_OPTIONS, NULL, "ReloadAtDone", 0))
-		raise(SIGUSR2);
 
 /*
  * Although we may block on wait(2), we still have signal handlers and a timer
@@ -959,6 +964,8 @@ static void load_extra_pots(struct db_main *db, void (*process_file)(struct db_m
 		struct stat s;
 		char *name = (char*)path_expand(line->data);
 
+		loaded_extra_pots = 1;
+
 		if (!stat(name, &s) && s.st_mode & S_IFREG)
 			process_file(db, name);
 #if HAVE_DIRENT_H && HAVE_SYS_TYPES_H
@@ -1232,6 +1239,15 @@ static void john_load(void)
 		if (database.password_count && options.regen_lost_salts)
 			build_fake_salts_for_regen_lost(&database);
 
+		if (john_main_process && database.password_count < total) {
+			int count = total - database.password_count;
+			printf("Cracked %d password hash%s%s%s%s, use \"--show\"\n",
+			    count, count != 1 ? "es" : "",
+			    loaded_extra_pots ? "" : (count != 1 ? " (are in " : " (is in "),
+			    loaded_extra_pots ? "" : path_expand(options.activepot),
+			    loaded_extra_pots ? "" : ")");
+		}
+
 		if (!database.password_count) {
 			log_discard();
 			if (john_main_process)
@@ -1249,24 +1265,21 @@ static void john_load(void)
 		for ( ; i < FMT_TUNABLE_COSTS &&
 			      database.format->methods.tunable_cost_value[i] != NULL; i++) {
 			if (database.min_cost[i] < database.max_cost[i]) {
-				log_event("Loaded hashes with cost %d (%s)"
-				          " varying from %u to %u",
-				          i+1, database.format->params.tunable_cost_name[i],
+				const char *loaded = database.password_count < total ? "Remaining" : "Loaded";
+				log_event("%s hashes with cost %d (%s) varying from %u to %u",
+				          loaded, i+1, database.format->params.tunable_cost_name[i],
 				          database.min_cost[i], database.max_cost[i]);
-					printf("Loaded hashes with cost %d (%s)"
-					       " varying from %u to %u\n",
-					       i+1, database.format->params.tunable_cost_name[i],
-					        database.min_cost[i], database.max_cost[i]);
+				printf("%s hashes with cost %d (%s) varying from %u to %u\n",
+				       loaded, i+1, database.format->params.tunable_cost_name[i],
+				       database.min_cost[i], database.max_cost[i]);
 			}
 			else {	// if (database.min_cost[i] == database.max_cost[i]) {
-				log_event("Cost %d (%s) is %u for all loaded hashes",
-				          i+1, database.format->params.tunable_cost_name[i],
-				          database.min_cost[i]);
+				const char *loaded = database.password_count < total ? "remaining" : "loaded";
+				log_event("Cost %d (%s) is %u for all %s hashes",
+				          i+1, database.format->params.tunable_cost_name[i], database.min_cost[i], loaded);
 				if (options.verbosity >= VERB_DEFAULT)
-				printf("Cost %d (%s) is %u for all loaded "
-				       "hashes\n", i+1,
-				       database.format->params.tunable_cost_name[i],
-				       database.min_cost[i]);
+				printf("Cost %d (%s) is %u for all %s hashes\n",
+				       i+1, database.format->params.tunable_cost_name[i], database.min_cost[i], loaded);
 			}
 		}
 
@@ -1438,7 +1451,7 @@ static void CPU_detect_or_fallback(char **argv, int make_check)
 	if (!getenv("CPUID_DISABLE"))
 	if (!CPU_detect()) {
 #if CPU_REQ
-#if CPU_FALLBACK
+#if CPU_FALLBACK || defined(CPU_FALLBACK_BINARY)
 #if defined(__DJGPP__)
 #error CPU_FALLBACK is incompatible with the current DOS code
 #endif
@@ -1848,7 +1861,7 @@ static void john_run(void)
 			mask_destroy();
 
 #if OS_FORK
-		if (options.fork && john_main_process)
+		if (options.fork)
 			john_wait();
 #endif
 
@@ -2012,7 +2025,7 @@ int main(int argc, char **argv)
 	}
 #endif
 
-#if CPU_FALLBACK || OMP_FALLBACK
+#if CPU_FALLBACK || OMP_FALLBACK || defined(CPU_FALLBACK_BINARY) || defined(OMP_FALLBACK_BINARY)
 	/* Needed before CPU fallback */
 	path_init(argv);
 #endif
@@ -2057,7 +2070,7 @@ int main(int argc, char **argv)
 		return base64conv(argc, argv);
 	}
 
-#if !(CPU_FALLBACK || OMP_FALLBACK)
+#if !(CPU_FALLBACK || OMP_FALLBACK || defined(CPU_FALLBACK_BINARY) || defined(OMP_FALLBACK_BINARY))
 	path_init(argv);
 #endif
 

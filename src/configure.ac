@@ -269,8 +269,6 @@ fi
    JTR_FLAG_CHECK([-Wunused-but-set-variable], 1)
    dnl JTR_NOWARN_CHECK([unneeded-internal-declaration], 1)
    AS_IF([test "x$JTR_FLAG_Q_CHECK_WORKS" = xyes], [JTR_FLAG_CHECK([-Qunused-arguments],1)])
-   dnl Justified and Ancient (see issue 1093)
-   JTR_FLAG_CHECK([-std=gnu89], 1)
    dnl We like reproducible builds
    JTR_FLAG_CHECK([-Wdate-time], 1)
    JTR_LIST_ADD(CFLAGS_EXTRA, ["$CFLAGS_EX"])
@@ -281,7 +279,7 @@ fi
 
 dnl early check of 64 bit systems.
 case "$host_cpu" in
-  ia64|mips64|mips64eb|mipseb64|mips64el|mipsel64|mips64*|powerpc64*|sparc64|x86_64)
+  ia64|mips64|mips64eb|mipseb64|mips64el|mipsel64|mips64*|powerpc64*|sparc64)
     CFLAGS_EX=""
     JTR_FLAG_CHECK_LINK([-m64], 1)
     if test "x${CFLAGS_EX}" != x ; then
@@ -332,6 +330,7 @@ dnl AC_PROG_EGREP Do not trust this one
 AC_PROG_SED
 dnl AC_PROG_CXX
 AX_CHECK_GNU_MAKE()
+MAKE=$_cv_gnu_make_command
 AC_PROG_MAKE_SET
 AC_PROG_CPP
 AC_PROG_MKDIR_P
@@ -344,9 +343,9 @@ if test "x$PERL" = x ; then
 fi
 AS_IF([test -z "$AS"], [AS="$CC"])
 AS_IF([test -z "$LD"], [LD="$CC"])
-AS_IF([test -z "$AR"], [AC_CHECK_TOOL([AR], [ar])])
-AS_IF([test -z "$STRIP"], [AC_CHECK_TOOL([STRIP], [strip])])
-AS_IF([test -z "$STRINGS"], [AC_CHECK_TOOL([STRINGS], [strings])])
+AS_IF([test -z "$AR"], [AC_PATH_TOOL([AR], [ar], [ar], [$PATH:/usr/ccs/bin])])
+AS_IF([test -z "$STRIP"], [AC_CHECK_TOOL([STRIP], [strip], [strip])])
+AS_IF([test -z "$STRINGS"], [AC_CHECK_TOOL([STRINGS], [strings], [strings])])
 
 dnl Check if we have this at all
 PKG_PROG_PKG_CONFIG

@@ -41,9 +41,9 @@ typedef struct {
 	/* Characters in the range */
 	unsigned char chars[0xFF];
 	/* next active range */
-	unsigned char next;
+	unsigned char next[MAX_NUM_MASK_PLHDR];
 	/* current postion in chars[] while iterating */
-	unsigned char iter;
+	unsigned char iter[MAX_NUM_MASK_PLHDR];
 	/* Number of characters in the range */
 	unsigned char count;
 	/*
@@ -63,7 +63,7 @@ typedef struct {
 	/* Set of mask placeholders for generating password */
 	mask_range ranges[MAX_NUM_MASK_PLHDR + 1];
 	/* Positions in mask for iteration on CPU */
-	int active_positions[MAX_NUM_MASK_PLHDR + 1];
+	int active_positions[MAX_NUM_MASK_PLHDR + 1][MAX_NUM_MASK_PLHDR];
 	/* Postion of the first active range */
 	int ps1;
 	/* Total number of placeholders, cpu + gpu */

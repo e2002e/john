@@ -13,9 +13,10 @@
 #if !(__FreeBSD__ || __APPLE__)
 /* On FreeBSD, defining this precludes the declaration of u_int, which
  * FreeBSD's own <sys/file.h> needs. */
-#if _XOPEN_SOURCE < 500
+#if !AC_BUILT && _XOPEN_SOURCE < 500
 #undef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 500 /* for fdopen(3), fileno(3), fsync(2), ftruncate(2) */
+#define _XPG6
 #endif
 #endif
 
@@ -126,12 +127,11 @@ static void rec_lock(int shared)
 #endif
 
 	if (jtr_lock(rec_fd, cmd, type, path_expand(rec_name))) {
+		const char *msg = "Crash recovery file is locked (maybe use \"--session\"): ";
 #if HAVE_MPI
-		fprintf(stderr, "Node %d@%s: Crash recovery file is locked: %s\n",
-		        NODE, mpi_name, path_expand(rec_name));
+		fprintf(stderr, "Node %d@%s: %s%s\n", NODE, mpi_name, msg, path_expand(rec_name));
 #else
-		fprintf(stderr, "Crash recovery file is locked: %s\n",
-		        path_expand(rec_name));
+		fprintf(stderr, "%s%s\n", msg, path_expand(rec_name));
 #endif
 		error();
 	}

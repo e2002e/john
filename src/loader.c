@@ -37,6 +37,7 @@
 #include "dyna_salt.h"
 #include "loader.h"
 #include "options.h"
+#include "common.h"
 #include "config.h"
 #include "unicode.h"
 #include "dynamic.h"
@@ -49,10 +50,6 @@
 #include "single.h"
 #include "showformats.h"
 #include "mgetl.h"
-
-#ifdef HAVE_CRYPT
-extern struct fmt_main fmt_crypt;
-#endif
 
 /*
  * Jumbo may bump this at runtime
@@ -96,6 +93,15 @@ static int single_skip_login;
 #endif
 
 static int jumbo_split_string;
+
+#ifdef HAVE_CRYPT
+extern struct fmt_main fmt_crypt;
+
+static int is_fmt_crypt_only(const char *ciphertext)
+{
+	return !strncmp(ciphertext, "$y$", 3) || !strncmp(ciphertext, "$gy$", 4);
+}
+#endif
 
 /*
  * There should be legislation against adding a BOM to UTF-8, not to
@@ -603,7 +609,8 @@ static int ldr_split_line(char **login, char **ciphertext,
 	if (SPLFLEN(1) > MAX_CIPHERTEXT_SIZE) {
 		huge_line = 1;
 	}
-	else if (SPLFLEN(2) == 32 || SPLFLEN(3) == 32) {
+	else if ((SPLFLEN(3) == 32 && ishex(fields[3])) ||
+	         (SPLFLEN(2) == 32 && ishex(fields[2]))) {
 		/* PWDUMP */
 		/* user:uid:LMhash:NThash:comment:homedir: */
 		*uid = fields[1];
@@ -699,19 +706,8 @@ find_format:
 			if (alt->params.flags & FMT_WARNED)
 				continue;
 #ifdef HAVE_CRYPT
-#if 1 /* Jumbo has "all" crypt(3) formats implemented */
-			if (alt == &fmt_crypt)
+			if (alt == &fmt_crypt && !is_fmt_crypt_only(*ciphertext))
 				continue;
-#else
-			if (alt == &fmt_crypt &&
-#ifdef __sun
-			    strncmp(*ciphertext, "$md5$", 5) &&
-			    strncmp(*ciphertext, "$md5,", 5) &&
-#endif
-			    strncmp(*ciphertext, "$5$", 3) &&
-			    strncmp(*ciphertext, "$6$", 3))
-				continue;
-#endif
 #endif
 			prepared = alt->methods.prepare(fields, alt);
 			if (alt->methods.valid(prepared, alt)) {
@@ -747,20 +743,10 @@ find_format:
  * those that are only supported in that way.  Avoid the probe in other cases
  * because it may be slow and undesirable (false detection is possible).
  */
-#if 1 /* Jumbo has "all" crypt(3) formats implemented */
-		if (alt == &fmt_crypt && fmt_list != &fmt_crypt)
-			continue;
-#else
 		if (alt == &fmt_crypt &&
 		    fmt_list != &fmt_crypt /* not forced */ &&
-#ifdef __sun
-		    strncmp(*ciphertext, "$md5$", 5) &&
-		    strncmp(*ciphertext, "$md5,", 5) &&
-#endif
-		    strncmp(*ciphertext, "$5$", 3) &&
-		    strncmp(*ciphertext, "$6$", 3))
+		    !is_fmt_crypt_only(*ciphertext))
 			continue;
-#endif
 #endif
 
 		prepared = alt->methods.prepare(fields, alt);
@@ -1388,20 +1374,14 @@ void ldr_load_pot_file(struct db_main *db, char *name)
 static void ldr_init_salts(struct db_main *db)
 {
 	struct db_salt **tail, *current;
-	int hash, ctr = 0;
+	int hash;
 
 	for (hash = 0, tail = &db->salts; hash < SALT_HASH_SIZE; hash++)
 	if ((current = db->salt_hash[hash])) {
 		*tail = current;
-		ctr = 0;
 		do {
-			ctr++;
 			tail = &current->next;
 		} while ((current = current->next));
-#ifdef DEBUG_HASH
-		if (ctr)
-			printf("salt hash %08x, %d salts\n", hash, ctr);
-#endif
 	}
 }
 
@@ -1844,18 +1824,6 @@ static void ldr_init_hash(struct db_main *db)
 
 		current->hash_size = size;
 		ldr_init_hash_for_salt(db, current);
-#ifdef DEBUG_HASH
-		if (current->hash_size > 0)
-			printf("salt %08x, binary hash size 0x%x (%d), "
-			       "num ciphertexts %d\n",
-			       *(unsigned int*)current->salt,
-			       password_hash_sizes[current->hash_size],
-			       current->hash_size, current->count);
-		else
-			printf("salt %08x, no binary hash, "
-			       "num ciphertexts %d\n",
-			       *(unsigned int*)current->salt, current->count);
-#endif
 	} while ((current = current->next));
 }
 

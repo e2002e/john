@@ -1585,19 +1585,27 @@ static cl_ulong gws_test(size_t gws, unsigned int rounds, int sequential_id)
 		                                       NULL),
 		               "clGetEventProfilingInfo end");
 
-		/*
-		 * Work around driver bugs. Problems seen with old AMD and Apple M1.
-		 * If startTime looks b0rken we use submitTime instead
-		 */
-		if (i == main_opencl_event && (endTime - submitTime) > 10 * (endTime - startTime)) {
-			prof_bug = 1;
-
-			startTime = submitTime;
-		}
+		if (i == main_opencl_event && options.verbosity > VERB_MAX)
+			fprintf(stderr, " [%lu, %lu, %lu, %u, %d]", (unsigned long)startTime,
+			        (unsigned long)endTime, (unsigned long)submitTime, rounds, hash_loops);
 
 		/* Work around OSX bug with HD4000 driver */
 		if (endTime == 0)
 			endTime = startTime;
+
+		/*
+		 * Work around driver bugs. Problems seen with old AMD and Apple M1.
+		 * If startTime looks b0rken we use submitTime instead
+		 *
+		 * If the difference of submitTime and startTime is greater than 5s,
+		 * submitTime is b0rken
+		 */
+		if (i == main_opencl_event && (startTime - submitTime < 5000000000ULL) &&
+		   (endTime - submitTime) > 10 * (endTime - startTime)) {
+			prof_bug = 1;
+
+			startTime = submitTime;
+		}
 
 		if ((split_events) && (i == split_events[0] ||
 		                       i == split_events[1] || i == split_events[2])) {
@@ -2393,7 +2401,7 @@ int opencl_prepare_dev(int sequential_id)
 		ocl_always_show_ws = cfg_get_bool(SECTION_OPTIONS, SUBSECTION_OPENCL,
 		                                  "AlwaysShowWorksizes", 0);
 
-#ifndef __APPLE__
+#ifdef __linux__
 	if (gpu_nvidia(device_info[sequential_id])) {
 		opencl_avoid_busy_wait[sequential_id] = cfg_get_bool(SECTION_OPTIONS, SUBSECTION_GPU,
 		                                                     "AvoidBusyWait", 1);

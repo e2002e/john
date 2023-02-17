@@ -37,7 +37,7 @@
  * sub-block), and much less so for YESCRYPT_RW (which uses 2 rounds of Salsa20
  * per block except during pwxform S-box initialization).
  */
-#if 0 /* FIXME */
+#if 0 /* JtR hack */
 #ifdef __XOP__
 #warning "Note: XOP is enabled.  That's great."
 #elif defined(__AVX__)
@@ -49,7 +49,7 @@
 #else
 #warning "Note: building generic code for non-x86.  That's OK."
 #endif
-#endif /* 0 */
+#endif
 
 /*
  * The SSE4 code version has fewer instructions than the generic SSE2 version,
@@ -513,7 +513,7 @@ static volatile uint64_t Smask2var = Smask2;
 /* 64-bit without AVX.  This relies on out-of-order execution and register
  * renaming.  It may actually be fastest on CPUs with AVX(2) as well - e.g.,
  * it runs great on Haswell. */
-#if 0 /* FIXME */
+#if 0 /* JtR hack */
 #warning "Note: using x86-64 inline assembly for YESCRYPT_RW.  That's great."
 #endif
 /* We need a compiler memory barrier between sub-blocks to ensure that none of
@@ -1457,7 +1457,7 @@ int yescrypt_init_shared(yescrypt_shared_t *shared,
 	half2.aligned = (uint8_t *)half2.aligned + half1.aligned_size;
 
 	if (yescrypt_kdf(NULL, &half1,
-	    seed, seedlen, (uint8_t *)"yescrypt-ROMhash", 16, &subparams,
+	    seed, seedlen, (const uint8_t *)"yescrypt-ROMhash", 16, &subparams,
 	    salt, sizeof(salt)))
 		goto fail;
 
