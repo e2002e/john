@@ -1604,16 +1604,15 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
 			template_key[ranges(ps).pos + ranges(ps).offset + loop] = \
 			ranges(ps).chars[ranges(ps).iter[loop]];		\
 			ps = ranges(ps).next; \
-			template_key[ranges(ps).pos + ranges(ps).offset + loop + 1] = '\0'; \
 		}							\
 		else {							\
 			template_key[ranges(ps).pos + ranges(ps).offset + loop] = \
 			      ranges(ps).chars[ranges(ps).iter[loop]];	\
 			\
-			template_key[ranges(ps).pos + ranges(ps).offset + loop + 1] = '\0'; \
 			break;						\
 		}							\
-	}
+	} \
+	template_key[mask_cur_len + loop] = 0; \
 
 #define init_key(ps, loop)							\
 	while (ps < MAX_NUM_MASK_PLHDR) {				\
@@ -1658,26 +1657,28 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 	ps3 = cpu_mask_ctx->ranges[ps2].next;
 	ps4 = cpu_mask_ctx->ranges[ps3].next;
 
-	if (cpu_mask_ctx->cpu_count < 4) {
+	if (1) {
 		ps = ps1;
-
 		/* Initialize the placeholders */
-		init_key(ps, 0);
+		for (i = 0; i < options.eff_maxlength - mask_cur_len; i++)
+			init_key(ps, i);
 
 		while (1) {
-			if (options.node_count &&
-			    !(options.flags & FLG_MASK_STACKED) &&
-			    !(*my_candidates)--)
-				goto done;
+			for (i = 0; i <= options.eff_maxlength - mask_cur_len; i++) {
+				if (options.node_count &&
+					!(options.flags & FLG_MASK_STACKED) &&
+					!(*my_candidates)--)
+					goto done;
 
 #ifdef MASK_DEBUG
-			fprintf(stderr, "process_key(\"%s\")\n", template_key);
+				fprintf(stderr, "process_key(\"%s\")\n", template_key);
 #endif
-			process_key(template_key);
-			ps = ps1;
-			next_state(ps, 0);
-			if (mask_increments_len && ranges(ps).pos + ranges(ps).offset >= mask_cur_len)
-				break;
+				process_key(template_key);
+				ps = ps1;
+				next_state(ps, i);
+				if (mask_increments_len && ranges(ps).pos + ranges(ps).offset + i >= max_keylen)
+					break;
+			}
 		}
 	}
 
