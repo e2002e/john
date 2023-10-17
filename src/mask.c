@@ -1880,7 +1880,18 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 		ps = cpu_mask_ctx->ranges[ps].next[0];
 	}
 
-	total_candidates = offset;
+	uint64_t sub_offset = 1;
+	ps = cpu_mask_ctx->ps1;
+	ps = cpu_mask_ctx->ranges[ps].next[0];
+	while(ps < MAX_NUM_MASK_PLHDR) {
+		if (cpu_mask_ctx->ranges[ps].pos < max_keylen)
+			sub_offset *= cpu_mask_ctx->ranges[ps].count;
+		ps = cpu_mask_ctx->ranges[ps].next[0];
+	}
+
+	offset -= sub_offset;
+
+	total_candidates = offset - sub_offset;
 	offset *= fract;
 	my_candidates = offset;
 	offset = my_candidates * (options.node_min - 1);
@@ -2523,6 +2534,15 @@ static void finalize_mask(int len)
 					if ((options.flags & FLG_MASK_STACKED) ||
 						cpu_mask_ctx.ranges[i].pos < len)
 				cand *= cpu_mask_ctx.ranges[i].count;
+
+			uint64_t sub_cand = 1;
+			for (i = 1; i < cpu_mask_ctx.count; i++)
+				if ((int)(cpu_mask_ctx.active_positions[i][0]))
+					if ((options.flags & FLG_MASK_STACKED) ||
+						cpu_mask_ctx.ranges[i].pos < len)
+				sub_cand *= cpu_mask_ctx.ranges[i].count;
+
+			cand -= sub_cand;
 		}
 	}
 	mask_tot_cand = cand * mask_int_cand.num_int_cand;
@@ -2667,7 +2687,7 @@ int do_mask_crack(const char *extern_key)
 			if (format_cannot_reset)
 				save_restore(&cpu_mask_ctx, 0, RESTORE);
 			else
-				if(mask_cur_len == options.eff_minlength)
+				if(mask_cur_len == options.eff_minlength) //Only set mask once
 					finalize_mask(max_keylen);
 
 			generate_template_key(mask, extern_key, extern_key_len, &parsed_mask,
