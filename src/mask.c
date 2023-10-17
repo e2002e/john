@@ -1400,9 +1400,7 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 		}
 	}
 	cpu_mask_ctx->ranges[i].next[j] = MAX_NUM_MASK_PLHDR;
-
-	for (j = 0; j <= options.eff_maxlength - options.eff_minlength; j++)
-		cpu_mask_ctx->active_positions[i][j] = 1;
+	cpu_mask_ctx->active_positions[i][j] = 1;
 
 	if (restored) {
 		cpu_mask_ctx->count = restored_ctx.count;
@@ -1665,7 +1663,7 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 	ps3 = cpu_mask_ctx->ranges[ps2].next[0];
 	ps4 = cpu_mask_ctx->ranges[ps3].next[0];
 
-	if(1) {
+	if(cpu_mask_ctx->cpu_count < 4) {
 		/* Initialize the placeholders */
 		ps = ps1;
 		for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++)
@@ -1747,7 +1745,7 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
         return 1;                                                   \
     }
 
-	if(1) {
+	if(cpu_mask_ctx->cpu_count < 4) {
 		/* Initialize the placeholders */
 		ps = ps1;
 		for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++)
