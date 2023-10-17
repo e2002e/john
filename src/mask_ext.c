@@ -150,10 +150,8 @@ void mask_ext_calc_combination(mask_cpu_context *ptr, int max_static_range)
 
 	if (mask_skip_ranges[0] != -1) {
 		mask_int_cand.num_int_cand = 1;
-		for (i = 0; i < MASK_FMT_INT_PLHDR &&
-		    mask_skip_ranges[i] != -1; i++)
-			mask_int_cand.num_int_cand *= ptr->
-				ranges[mask_skip_ranges[i]].count;
+		for (i = 0; i < MASK_FMT_INT_PLHDR && mask_skip_ranges[i] != -1; i++)
+			mask_int_cand.num_int_cand *= ptr->ranges[mask_skip_ranges[i]].count;
 	}
 
 	if (mask_int_cand.num_int_cand > 1) {
