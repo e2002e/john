@@ -1745,7 +1745,12 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
         return 1;                                                   \
     }
 
-	if(cpu_mask_ctx->cpu_count < 4) {
+	ps1 = cpu_mask_ctx->ps1;
+	ps2 = cpu_mask_ctx->ranges[ps1].next[0];
+	ps3 = cpu_mask_ctx->ranges[ps2].next[0];
+	ps4 = cpu_mask_ctx->ranges[ps3].next[0];
+
+	if(1) {
 		/* Initialize the placeholders */
 		ps = ps1;
 		for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++)
@@ -1765,7 +1770,7 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
 		}
 	}
 	else if(cpu_mask_ctx->cpu_count >= 4) {
-		ps = ranges(ps4).next[3];
+		ps = ranges(ps4).next[0];
 		/* Initialize the remaining placeholders other than the first two */
 		for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++)
 			init_key(ps, loop);
@@ -1873,7 +1878,7 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 	offset = 1;
 	ps = cpu_mask_ctx->ps1;
 	while(ps < MAX_NUM_MASK_PLHDR) {
-		if (cpu_mask_ctx->ranges[ps].pos < mask_cur_len)
+		if (cpu_mask_ctx->ranges[ps].pos < max_keylen)
 			offset *= cpu_mask_ctx->ranges[ps].count;
 		ps = cpu_mask_ctx->ranges[ps].next[0];
 	}
