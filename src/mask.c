@@ -1487,13 +1487,6 @@ static void truncate_mask(mask_cpu_context *cpu_mask_ctx, int range_idx)
 				break;
 	}
 
-	uint64_t sub_mask_tot_cand = 1;
-	for (i = 0; i <= range_idx - 1; i++)
-		if ((int)(cpu_mask_ctx->active_positions[i][0]))
-			sub_mask_tot_cand *= cpu_mask_ctx->ranges[i].count;
-
-	mask_tot_cand -= sub_mask_tot_cand;
-
 	if (options.node_count && !(options.flags & FLG_MASK_STACKED))
 		mask_tot_cand = mask_tot_cand *
 			(options.node_max + 1 - options.node_min) / options.node_count;
@@ -1554,7 +1547,7 @@ static char *generate_template_key(char *mask, const char *key, int key_len,
 	template_key[k] = '\0';
 
 	if (!mask_has_8bit && !(options.flags & FLG_MASK_STACKED)) {
-		for (i = 0; i < strlen(template_key); i++)
+		for (i = 0; i < max_keylen; i++)
 			if (template_key[i] & 0x80) {
 				mask_has_8bit = 1;
 				break;
@@ -1618,9 +1611,7 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
 		template_key[ranges(ps).pos + ranges(ps).offset] = ranges(ps).chars[ranges(ps).iter[loop]]; \
 		ps = ranges(ps).next[loop]; \
 	} \
-	ps = ps1; \
-	while(ps < mask_cur_len + loop - 1) ps = ranges(ps).next[loop]; \
-	template_key[ranges(ps).pos + ranges(ps).offset + 1] = '\0'; \
+	template_key[mask_cur_len + loop] = '\0'; \
 	int i; \
 	int done = 1; \
 	if(mask_cur_len + loop == options.eff_maxlength) \
@@ -1681,8 +1672,8 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 		while (1) {
 			if(options.node_count && !(options.flags & FLG_MASK_STACKED) && !(*my_candidates)--)
 				goto done;
+			if(loop++ >= options.eff_maxlength - mask_cur_len) loop = 0;
 
-			if(++loop > options.eff_maxlength - mask_cur_len) loop = 0;
 #ifdef MASK_DEBUG
 			fprintf(stderr, "process_key(\"%s\")\n", template_key);
 #endif
@@ -1700,7 +1691,8 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 		while (1) {
 			if(options.node_count && !(options.flags & FLG_MASK_STACKED) && !(*my_candidates)--)
 				goto done;
-		    if(++loop > options.eff_maxlength - mask_cur_len) loop = 0;
+		    if(loop++ >= options.eff_maxlength - mask_cur_len) loop = 0;
+
 			start1 = ranges(ps1).start;
 			start2 = ranges(ps2).start;
 			start3 = ranges(ps3).start;
@@ -2712,8 +2704,7 @@ int do_mask_crack(const char *extern_key)
 	} else {
 		if (old_extern_key_len != extern_key_len) {
 			save_restore(&cpu_mask_ctx, 0, RESTORE);
-			generate_template_key(mask, extern_key, extern_key_len, &parsed_mask,
-			                      &cpu_mask_ctx, max_keylen);
+			generate_template_key(mask, extern_key, extern_key_len, &parsed_mask, &cpu_mask_ctx, max_keylen);
 			old_extern_key_len = extern_key_len;
 		}
 
