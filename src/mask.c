@@ -1663,7 +1663,7 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 	ps3 = cpu_mask_ctx->ranges[ps2].next[0];
 	ps4 = cpu_mask_ctx->ranges[ps3].next[0];
 
-	if(cpu_mask_ctx->cpu_count < 4) {
+	if(1) {
 		/* Initialize the placeholders */
 		ps = ps1;
 		for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++)
@@ -1671,11 +1671,6 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 
 		while (1) {
 		    for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++) {
-				if (options.node_count &&
-			        !(options.flags & FLG_MASK_STACKED) &&
-			        !(*my_candidates)--)
-				    goto done;
-
 #ifdef MASK_DEBUG
 			    fprintf(stderr, "process_key(\"%s\")\n", template_key);
 #endif
@@ -1758,11 +1753,6 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
 
 		while (1) {
 		    for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++) {
-				if (options.node_count &&
-			        !(options.flags & FLG_MASK_STACKED) &&
-			        !(*my_candidates)--)
-				    goto done;
-
 			    process_key(template_key);
 			    ps = ps1;
 			    next_state(ps, loop);
@@ -1883,18 +1873,7 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 		ps = cpu_mask_ctx->ranges[ps].next[0];
 	}
 
-	uint64_t sub_offset = 1;
-	ps = cpu_mask_ctx->ps1;
-	ps = cpu_mask_ctx->ranges[ps].next[0];
-	while(ps < MAX_NUM_MASK_PLHDR) {
-		if (cpu_mask_ctx->ranges[ps].pos < max_keylen)
-			sub_offset *= cpu_mask_ctx->ranges[ps].count;
-		ps = cpu_mask_ctx->ranges[ps].next[0];
-	}
-
-	offset -= sub_offset;
-
-	total_candidates = offset - sub_offset;
+	total_candidates = offset;
 	offset *= fract;
 	my_candidates = offset;
 	offset = my_candidates * (options.node_min - 1);
@@ -2537,15 +2516,6 @@ static void finalize_mask(int len)
 					if ((options.flags & FLG_MASK_STACKED) ||
 						cpu_mask_ctx.ranges[i].pos < len)
 				cand *= cpu_mask_ctx.ranges[i].count;
-
-			uint64_t sub_cand = 1;
-			for (i = 1; i < cpu_mask_ctx.count; i++)
-				if ((int)(cpu_mask_ctx.active_positions[i][0]))
-					if ((options.flags & FLG_MASK_STACKED) ||
-						cpu_mask_ctx.ranges[i].pos < len)
-				sub_cand *= cpu_mask_ctx.ranges[i].count;
-
-			cand -= sub_cand;
 		}
 	}
 	mask_tot_cand = cand * mask_int_cand.num_int_cand;
