@@ -41,7 +41,7 @@ typedef struct {
 	/* Characters in the range */
 	unsigned char chars[0xFF];
 	/* next active range */
-	unsigned char next[MAX_NUM_MASK_PLHDR];
+	unsigned char next;
 	/* current postion in chars[] while iterating */
 	unsigned char iter[MAX_NUM_MASK_PLHDR];
 	/* Number of characters in the range */
