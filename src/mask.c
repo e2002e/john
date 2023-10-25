@@ -1604,10 +1604,10 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
 	int done = 1; \
 	if(mask_cur_len + loop == options.eff_maxlength) \
 	for(i = 0; i < mask_cur_len; i++) { \
-        if(ranges(i).iter[loop] != 0) { \
-            done = 0; \
-            break; \
-        } \
+		if(ranges(i).iter[loop] != 0) { \
+			done = 0; \
+			break; \
+		} \
     } \
     else done = 0; \
     if(done) \
@@ -1690,11 +1690,11 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 #ifdef MASK_DEBUG
 			fprintf(stderr, "process_key(\"%s\")\n", template_key);
 #endif
-				process_key(template_key);
-				ps = ps1;
-				next_state(ps, loop);
+			process_key(template_key);
+			ps = ps1;
+			next_state(ps, loop);
 
-				if (++loop > options.eff_maxlength - mask_cur_len) loop = 0;
+			if (++loop > options.eff_maxlength - mask_cur_len) loop = 0;
 		}
 	}
 	else if(cpu_mask_ctx->cpu_count >= 4) {
@@ -1707,7 +1707,6 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 		loop = 0;
 
 		while (1) {
-			if (bail) goto done;
 			start1 = ranges(ps1).start;
 			start2 = ranges(ps2).start;
 			start3 = ranges(ps3).start;
@@ -1719,13 +1718,22 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 				for (iterate_over(ps3, loop)) {
 					set_template_key(ps3, start3, loop);
 					for (iterate_over(ps2, loop)) {
+				}
+				ranges(ps3).iter[loop] = 0;
+			}
+			ranges(ps4).iter[loop] = 0;
+			ps = ranges(ps4).next;
+			next_state(ps, loop);
+			if (++loop > options.eff_maxlength - mask_cur_len) loop = 0;
 						set_template_key(ps2, start2, loop);
 						for (iterate_over(ps1, loop)) {
+							if (bail) goto done;
 							if (options.node_count &&
 								!(options.flags & FLG_MASK_STACKED) &&
 								!(*my_candidates)--)
 								goto done;
 							set_template_key(ps1, start1, loop);
+							//template_key[mask_cur_len + loop] = '\0';
 							process_key(template_key);
 						}
 						ranges(ps1).iter[loop] = 0;
@@ -1771,31 +1779,34 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
 	if(cpu_mask_ctx->cpu_count < 4) {
 		/* Initialize the placeholders */
 		ps = ps1;
-		for(loop = 0; loop <= options.eff_maxlength - options.eff_maxlength; loop++)
+		for(loop = 0; loop <= options.eff_maxlength - options.eff_minlength; loop++)
 			init_key(ps, loop);
 
+		loop = 0;
+
 		while (1) {
+			if (bail)
+				goto done;
 			if(options.node_count && !(options.flags & FLG_MASK_STACKED) && !(*my_candidates)--)
 				goto done;
-		    if(++loop > options.eff_maxlength - mask_cur_len) loop = 0;
+
 			process_key(template_key);
 			ps = ps1;
 			next_state(ps, loop);
+
+			if (++loop > options.eff_maxlength - mask_cur_len) loop = 0;
 		}
 	}
 	else if(cpu_mask_ctx->cpu_count >= 4) {
 		ps = ranges(ps4).next;
 		/* Initialize the remaining placeholders other than the first two */
-		for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++)
+		for(loop = 0; loop <= options.eff_maxlength - options.eff_minlength; loop++)
 			init_key(ps, loop);
 
 		int bail = 0;
 		loop = 0;
 
 		while (1) {
-			if(options.node_count && !(options.flags & FLG_MASK_STACKED) && !(*my_candidates)--)
-				goto done;
-
 			start1 = ranges(ps1).start;
 			start2 = ranges(ps2).start;
 			start3 = ranges(ps3).start;
@@ -1807,16 +1818,23 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
 				for (iterate_over(ps3, loop)) {
 					set_template_key(ps3, start3, loop);
 					for (iterate_over(ps2, loop)) {
+				}
+				ranges(ps3).iter[loop] = 0;
+			}
+			ranges(ps4).iter[loop] = 0;
+			ps = ranges(ps4).next;
+			next_state(ps, loop);
+			if (++loop > options.eff_maxlength - mask_cur_len) loop = 0;
 						set_template_key(ps2, start2, loop);
 						for (iterate_over(ps1, loop)) {
+							if (bail) goto done;
 							if (options.node_count &&
 								!(options.flags & FLG_MASK_STACKED) &&
 								!(*my_candidates)--)
 								goto done;
 							set_template_key(ps1, start1, loop);
+							//template_key[mask_cur_len + loop] = '\0';
 							process_key(template_key);
-							check_end(loop);
-							if(++loop > options.eff_maxlength - mask_cur_len) loop = 0;
 						}
 						ranges(ps1).iter[loop] = 0;
 					}
@@ -1827,6 +1845,7 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
 			ranges(ps4).iter[loop] = 0;
 			ps = ranges(ps4).next;
 			next_state(ps, loop);
+			if (++loop > options.eff_maxlength - mask_cur_len) loop = 0;
 		}
 	}
 done:
