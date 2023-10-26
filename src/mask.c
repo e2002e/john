@@ -1624,7 +1624,7 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
 	if (cpu_mask_ctx->cpu_count < 4) \
 		ps = ps1; \
 	else ps = ranges(ps4).next; \
-	while(ps < MAX_NUM_MASK_PLHDR) { \
+	while(ps < mask_cur_len + loop) { \
 		template_key[ranges(ps).pos + ranges(ps).offset] = ranges(ps).chars[ranges(ps).iter[loop]]; \
 		ps = ranges(ps).next; \
 	} \
@@ -1633,7 +1633,7 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
 
 
 #define init_key(ps, loop) \
-	while (ps < MAX_NUM_MASK_PLHDR) {				\
+	while (ps < mask_cur_len + loop) {				\
 		template_key[ranges(ps).pos + ranges(ps).offset] = ranges(ps).chars[ranges(ps).iter[loop]]; \
 		ps = ranges(ps).next; \
 	}
@@ -1718,13 +1718,6 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 				for (iterate_over(ps3, loop)) {
 					set_template_key(ps3, start3, loop);
 					for (iterate_over(ps2, loop)) {
-				}
-				ranges(ps3).iter[loop] = 0;
-			}
-			ranges(ps4).iter[loop] = 0;
-			ps = ranges(ps4).next;
-			next_state(ps, loop);
-			if (++loop > options.eff_maxlength - mask_cur_len) loop = 0;
 						set_template_key(ps2, start2, loop);
 						for (iterate_over(ps1, loop)) {
 							if (bail) goto done;
@@ -1818,13 +1811,6 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
 				for (iterate_over(ps3, loop)) {
 					set_template_key(ps3, start3, loop);
 					for (iterate_over(ps2, loop)) {
-				}
-				ranges(ps3).iter[loop] = 0;
-			}
-			ranges(ps4).iter[loop] = 0;
-			ps = ranges(ps4).next;
-			next_state(ps, loop);
-			if (++loop > options.eff_maxlength - mask_cur_len) loop = 0;
 						set_template_key(ps2, start2, loop);
 						for (iterate_over(ps1, loop)) {
 							if (bail) goto done;
