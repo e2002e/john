@@ -1281,7 +1281,7 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 		if (mask_cur_len == options.eff_minlength)
 		for (j = 0; j <= options.eff_maxlength - options.eff_minlength; j++) {
 			cpu_mask_ctx->ranges[i].iter[j] = 0;
-			cpu_mask_ctx->active_positions[i][j] = 0;
+			cpu_mask_ctx->active_positions[i] = 0;
 			cpu_mask_ctx->ranges[i].next = MAX_NUM_MASK_PLHDR;
 		}
 	}
@@ -1395,13 +1395,11 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 	fprintf(stderr, "%s() count is %d\n", __FUNCTION__, cpu_mask_ctx->count);
 #endif
 	for (i = 0; i < cpu_mask_ctx->count - 1; i++) {
-        for (j = 0; j <= options.eff_maxlength - options.eff_minlength; j++) {
-			cpu_mask_ctx->ranges[i].next = i + 1;
-			cpu_mask_ctx->active_positions[i][j] = 1;
-		}
+		cpu_mask_ctx->ranges[i].next = i + 1;
+		cpu_mask_ctx->active_positions[i] = 1;
 	}
 	cpu_mask_ctx->ranges[i].next = MAX_NUM_MASK_PLHDR;
-	cpu_mask_ctx->active_positions[i][j] = 1;
+	cpu_mask_ctx->active_positions[i] = 1;
 
 	if (restored) {
 		cpu_mask_ctx->count = restored_ctx.count;
@@ -1479,7 +1477,7 @@ static void truncate_mask(mask_cpu_context *cpu_mask_ctx, int range_idx)
 	cpu_mask_ctx->cpu_count = 0;
 	cpu_mask_ctx->ps1 = MAX_NUM_MASK_PLHDR;
 	for (i = 0; i <= range_idx; i++)
-		if ((int)(cpu_mask_ctx->active_positions[i][0])) {
+		if ((int)(cpu_mask_ctx->active_positions[i])) {
 			if (!cpu_mask_ctx->cpu_count)
 				cpu_mask_ctx->ps1 = i;
 			cpu_mask_ctx->cpu_count++;
@@ -1850,38 +1848,35 @@ static void skip_position(mask_cpu_context *cpu_mask_ctx, int *arr)
 	int i, loop;
 
 	if (arr != NULL) {
-		for (loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++)
-		{
-			int k = 0;
-			while (k < MASK_FMT_INT_PLHDR && arr[k] >= 0 && arr[k] < cpu_mask_ctx->count) {
-				int j, i, flag1 = 0, flag2 = 0;
-				cpu_mask_ctx->active_positions[arr[k]][loop] = 0;
-				cpu_mask_ctx->ranges[arr[k]].next = MAX_NUM_MASK_PLHDR;
+		int k = 0;
+		while (k < MASK_FMT_INT_PLHDR && arr[k] >= 0 && arr[k] < cpu_mask_ctx->count) {
+			int j, i, flag1 = 0, flag2 = 0;
+			cpu_mask_ctx->active_positions[arr[k]] = 0;
+			cpu_mask_ctx->ranges[arr[k]].next = MAX_NUM_MASK_PLHDR;
 
-				for (j = arr[k] - 1; j >= 0; j--)
-					if ((int)(cpu_mask_ctx->active_positions[j][loop])) {
-						flag1 = 1;
-						break;
-					}
+			for (j = arr[k] - 1; j >= 0; j--)
+				if ((int)(cpu_mask_ctx->active_positions[j])) {
+					flag1 = 1;
+					break;
+				}
 
-				for (i = arr[k] + 1; i < cpu_mask_ctx->count; i++)
-					if ((int)(cpu_mask_ctx->active_positions[i][loop])) {
-						flag2 = 1;
-						break;
-					}
+			for (i = arr[k] + 1; i < cpu_mask_ctx->count; i++)
+				if ((int)(cpu_mask_ctx->active_positions[i])) {
+					flag2 = 1;
+					break;
+				}
 
-				if (flag1)
-					cpu_mask_ctx->ranges[j].next = flag2 ? i : MAX_NUM_MASK_PLHDR;
+			if (flag1)
+				cpu_mask_ctx->ranges[j].next = flag2 ? i : MAX_NUM_MASK_PLHDR;
 
-				k++;
-			}
+			k++;
 		}
 	}
 
 	cpu_mask_ctx->cpu_count = 0;
 	cpu_mask_ctx->ps1 = MAX_NUM_MASK_PLHDR;
 	for (i = 0; i < cpu_mask_ctx->count; i++)
-		if ((int)(cpu_mask_ctx->active_positions[i][0])) {
+		if ((int)(cpu_mask_ctx->active_positions[i])) {
 			if (!cpu_mask_ctx->cpu_count)
 				cpu_mask_ctx->ps1 = i;
 			cpu_mask_ctx->cpu_count++;
@@ -2559,7 +2554,7 @@ static void finalize_mask(int len)
 		} else {
 			cand = 1;
 			for (i = 0; i < cpu_mask_ctx.count; i++)
-				if ((int)(cpu_mask_ctx.active_positions[i][0]))
+				if ((int)(cpu_mask_ctx.active_positions[i]))
 					if ((options.flags & FLG_MASK_STACKED) ||
 						cpu_mask_ctx.ranges[i].pos < len)
 				cand *= cpu_mask_ctx.ranges[i].count;

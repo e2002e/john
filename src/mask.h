@@ -63,7 +63,7 @@ typedef struct {
 	/* Set of mask placeholders for generating password */
 	mask_range ranges[MAX_NUM_MASK_PLHDR + 1];
 	/* Positions in mask for iteration on CPU */
-	int active_positions[MAX_NUM_MASK_PLHDR + 1][MAX_NUM_MASK_PLHDR];
+	int active_positions[MAX_NUM_MASK_PLHDR + 1];
 	/* Postion of the first active range */
 	int ps1;
 	/* Total number of placeholders, cpu + gpu */
