@@ -182,19 +182,20 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		int j;
 		SHA512_CTX ctx;
 #ifdef SIMD_COEF_64
+/* We use SSEi_HALF_IN, so can halve SHA_BUF_SIZ */
+#undef SHA_BUF_SIZ
+#define SHA_BUF_SIZ 8
 		unsigned int i;
-		unsigned char _IBuf[128*MIN_KEYS_PER_CRYPT+MEM_ALIGN_CACHE],
-		              *keys, tmpBuf[128];
-		uint64_t *keys64, *tmpBuf64=(uint64_t*)tmpBuf, *p64;
+		unsigned char _IBuf[8*SHA_BUF_SIZ*MIN_KEYS_PER_CRYPT+MEM_ALIGN_CACHE], *keys;
+		uint64_t *keys64, tmpBuf64[SHA_BUF_SIZ], *p64;
 		keys = (unsigned char*)mem_align(_IBuf, MEM_ALIGN_CACHE);
 		keys64 = (uint64_t*)keys;
-		memset(keys, 0, 128*MIN_KEYS_PER_CRYPT);
 
 		for (i = 0; i < MIN_KEYS_PER_CRYPT; ++i) {
 			SHA512_Init(&ctx);
 			SHA512_Update(&ctx, saved_key[index+i], strlen(saved_key[index+i]));
 			SHA512_Update(&ctx, cur_salt->salt, strlen((char*)cur_salt->salt));
-			SHA512_Final(tmpBuf, &ctx);
+			SHA512_Final((unsigned char *)tmpBuf64, &ctx);
 			p64 = &keys64[i%SIMD_COEF_64+i/SIMD_COEF_64*SHA_BUF_SIZ*SIMD_COEF_64];
 			for (j = 0; j < 8; ++j)
 #if ARCH_LITTLE_ENDIAN==1
@@ -202,12 +203,10 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 #else
 				p64[j*SIMD_COEF_64] = tmpBuf64[j];
 #endif
-			p64[8*SIMD_COEF_64] = 0x8000000000000000ULL;
-			p64[15*SIMD_COEF_64] = 0x200;
 		}
-		for (j = 0; j < 98; j++)
-			SIMDSHA512body(keys, keys64, NULL, SSEi_MIXED_IN|SSEi_OUTPUT_AS_INP_FMT);
-		SIMDSHA512body(keys, (uint64_t*)crypt_out[index], NULL, SSEi_MIXED_IN|SSEi_OUTPUT_AS_INP_FMT|SSEi_FLAT_OUT);
+		uint64_t rounds = 98;
+		SIMDSHA512body(keys, keys64, &rounds, SSEi_HALF_IN|SSEi_LOOP);
+		SIMDSHA512body(keys, (uint64_t*)crypt_out[index], NULL, SSEi_HALF_IN|SSEi_FLAT_OUT);
 #else
 		SHA512_Init(&ctx);
 		SHA512_Update(&ctx, saved_key[index], strlen(saved_key[index]));

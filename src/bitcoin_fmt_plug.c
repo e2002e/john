@@ -271,6 +271,9 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		int i;
 
 #ifdef SIMD_COEF_64
+/* We use SSEi_HALF_IN, so can halve SHA_BUF_SIZ */
+#undef SHA_BUF_SIZ
+#define SHA_BUF_SIZ 8
 		char unaligned_buf[MIN_KEYS_PER_CRYPT*SHA_BUF_SIZ*sizeof(uint64_t)+MEM_ALIGN_SIMD];
 		uint64_t *key_iv = (uint64_t*)mem_align(unaligned_buf, MEM_ALIGN_SIMD);
 		JTR_ALIGN(8)  unsigned char hash1[SHA512_DIGEST_LENGTH];            // 512 bits
@@ -287,20 +290,11 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 			for (i = 0; i < SHA512_DIGEST_LENGTH/sizeof(uint64_t); ++i) {
 				key_iv[SIMD_COEF_64*i + (index2&(SIMD_COEF_64-1)) + index2/SIMD_COEF_64*SHA_BUF_SIZ*SIMD_COEF_64] = sha_ctx.h[i];
 			}
-
-			// We need to set ONE time, the upper half of the data buffer.  We put the 0x80 byte (in BE format), at offset
-			// 512-bits (SHA512_DIGEST_LENGTH) multiplied by the SIMD_COEF_64 (same as MIN_KEYS_PER_CRYPT), then zero
-			// out the rest of the buffer, putting 512 (#bits) at the end.  Once this part of the buffer is set up, we never
-			// touch it again, for the rest of the crypt.  We simply overwrite the first half of this buffer, over and over
-			// again, with BE results of the prior hash.
-			key_iv[ SHA512_DIGEST_LENGTH/sizeof(uint64_t) * SIMD_COEF_64 + (index2&(SIMD_COEF_64-1)) + index2/SIMD_COEF_64*SHA_BUF_SIZ*SIMD_COEF_64 ] = 0x8000000000000000ULL;
-			for (i = (SHA512_DIGEST_LENGTH/sizeof(uint64_t)+1); i < 15; i++)
-				key_iv[i*SIMD_COEF_64 + (index2&(SIMD_COEF_64-1)) + index2/SIMD_COEF_64*SHA_BUF_SIZ*SIMD_COEF_64] = 0;
-			key_iv[15*SIMD_COEF_64 + (index2&(SIMD_COEF_64-1)) + index2/SIMD_COEF_64*SHA_BUF_SIZ*SIMD_COEF_64] = (SHA512_DIGEST_LENGTH << 3);
 		}
 
-		for (i = 1; i < cur_salt->cry_rounds; i++)  // start at 1; the first iteration is already done
-			SIMDSHA512body(key_iv, key_iv, NULL, SSEi_MIXED_IN|SSEi_OUTPUT_AS_INP_FMT);
+		// the first iteration is already done above
+		uint64_t rounds = cur_salt->cry_rounds - 1;
+		SIMDSHA512body(key_iv, key_iv, &rounds, SSEi_HALF_IN|SSEi_LOOP);
 
 		for (index2 = 0; index2 < MIN_KEYS_PER_CRYPT; index2++) {
 			AES_KEY aes_key;

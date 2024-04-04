@@ -26,11 +26,10 @@
  * values, the hash function has to shuffle it. But 0x80 and length must be
  * in place.
  *
- * SSEi_CSTRING_IN
- * Input will be just as for OpenSSL: A normal char[COEF][64] array where
- * each string ends in NULL, with no 0x80 or length prepared. The intrinsics
- * function needs to take care of that as well as cleaning (after NULL),
- * shuffling and possibly do endian swapping if applicable.
+ * SSEi_HALF_IN
+ * Input is like SSEi_MIXED_IN, but length must be exactly half the block,
+ * and the second half is unused (the implementation takes care of the 0x80
+ * and the length field on its own). Currently only implemented for SHA-512.
  *
  * SSEi_FLAT_OUT
  * Output will be just as from OpenSSL. Swapped if applicable, not interleaved.
@@ -66,10 +65,8 @@
  * 14/15 if in flat mode.
  *
  * SSEi_FLAT_RELOAD_SWAPLAST
- * Can be an issue for flat mode, and reload (i.e. multi buffers.) The last
- * limb should NEVER have this flag set. This also only 'affects' the SHA1
- * and SHA256 formats. Similar to SSEi_4BUF_INPUT_FIRST_BLK, but simply says
- * we will have more buffers coming after this one.
+ * Similar to SSEi_4BUF_INPUT_FIRST_BLK, but simply says we will have more
+ * buffers coming after this one. Currently only enabled/used for SHA-256.
  *
  * SSEi_CRYPT_SHA224     use SHA224 IV.
  * SSEi_CRYPT_SHA384     use SHA384 IV.
@@ -79,13 +76,24 @@
  * WARNING, SHA224 requires a FULL SHA256 width output buffer, and SHA384
  * requires a full SHA512 width output buffer.  This is to allow proper
  * reloading and doing multi-limb crypts.
+ *
+ * SSEi_LOOP
+ * Iterated hashing, with hash output reused as input for the next iteration.
+ * Currently supported only for SHA-512 and only along with SSEi_MIXED_IN or
+ * SSEi_HALF_IN.
+ * Without SSEi_FLAT_OUT, *reload_state is reused as the iteration count (and
+ * is clobbered), and the final output is in the input format (full or half).
+ * With SSEi_FLAT_OUT, reload_state is reused as pointer to the end of the
+ * multi-hash output, which is in a format similar to that of SSEi_FLAT_OUT
+ * alone but without byte order swapping, and the input data is overwritten
+ * with the final output in the SSEi_HALF_IN format, which this mode requires.
  */
 
 typedef enum {
 	SSEi_NO_OP                   = 0x0, /* No-op */
 	SSEi_MIXED_IN                = 0x0,
 	SSEi_FLAT_IN                 = 0x1,
-/*	SSEi_CSTRING_IN              = 0x2,	NOT IMPLEMENTED YET*/
+	SSEi_HALF_IN                 = 0x2,
 	SSEi_FLAT_OUT                = 0x4,
 	SSEi_RELOAD                  = 0x8,
 	SSEi_RELOAD_INP_FMT          = 0x10 | SSEi_RELOAD,
@@ -99,7 +107,8 @@ typedef enum {
 	SSEi_FLAT_RELOAD_SWAPLAST    = 0x800,
 	SSEi_CRYPT_SHA224            = 0x1000,
 	SSEi_CRYPT_SHA384            = 0x1000,
-	SSEi_OUTPUT_AS_2BUF_INP_FMT  = 0x2000 | SSEi_OUTPUT_AS_INP_FMT
+	SSEi_OUTPUT_AS_2BUF_INP_FMT  = 0x2000 | SSEi_OUTPUT_AS_INP_FMT,
+	SSEi_LOOP                    = 0x8000
 } SSEi_FLAGS;
 
 

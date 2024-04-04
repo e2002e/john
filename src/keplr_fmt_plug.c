@@ -6,7 +6,7 @@
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted.
- ///////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////
 
 #if FMT_EXTERNS_H
 extern struct fmt_main fmt_keplr;
@@ -31,13 +31,24 @@ john_register_one(&fmt_keplr);
 #include "sha2.h"
 #include "jumbo.h"
 
+/* SCRYPT_ALGORITHM_NAME taken from restic_fmt_plug.c */
+#if !defined(JOHN_NO_SIMD) && defined(__XOP__)
+#define SCRYPT_ALGORITHM_NAME "Salsa20/8 128/128 XOP"
+#elif !defined(JOHN_NO_SIMD) && defined(__AVX__)
+#define SCRYPT_ALGORITHM_NAME "Salsa20/8 128/128 AVX"
+#elif !defined(JOHN_NO_SIMD) && defined(__SSE2__)
+#define SCRYPT_ALGORITHM_NAME "Salsa20/8 128/128 SSE2"
+#else
+#define SCRYPT_ALGORITHM_NAME "Salsa20/8 32/" ARCH_BITS_STR
+#endif
+
 #define FORMAT_NAME             "Keplr Wallet"
 #define FORMAT_LABEL            "keplr"
 #define FORMAT_TAG              "$keplr$"
 #define TAG_LENGTH              (sizeof(FORMAT_TAG) - 1)
-#define ALGORITHM_NAME          "scrypt sha256"
-#define BENCHMARK_COMMENT       ""
-#define BENCHMARK_LENGTH        7
+#define ALGORITHM_NAME          "scrypt " SCRYPT_ALGORITHM_NAME ", SHA256 32/" ARCH_BITS_STR
+#define BENCHMARK_COMMENT       " (131072, 8, 1)"
+#define BENCHMARK_LENGTH        0x507
 #define BINARY_SIZE             0
 #define BINARY_ALIGN            1
 #define SALT_SIZE               sizeof(struct custom_salt)
@@ -46,7 +57,7 @@ john_register_one(&fmt_keplr);
 #define MIN_KEYS_PER_CRYPT      1
 #define MAX_KEYS_PER_CRYPT      1
 
-#define OMP_SCALE               1 // MKPC and scale tuned for i7
+#define OMP_SCALE               1
 
 static int max_threads;
 static yescrypt_local_t *local;
@@ -67,7 +78,7 @@ static int *cracked, cracked_count;
 static struct custom_salt {
 	uint8_t salt[32];
 	uint8_t mac[32];
-	// Arbitrary size, could be any really but bigger than 256 
+	// Arbitrary size, could be any really but bigger than 256
 	// have a performance hit and you need the flag FMT_HUGE_INPUT
 	uint8_t ciphertext[256];
 	uint16_t ciphertext_size;
@@ -132,7 +143,7 @@ static int valid(char *ciphertext, struct fmt_main *self)
 		goto err;
 	if (hexlenl(p, &extra) != 32 * 2 || extra)
 		goto err;
-	
+
 	MEM_FREE(keeptr);
 	return 1;
 
@@ -163,7 +174,7 @@ static void *get_salt(char *ciphertext)
 	cs.ciphertext_size = ciphertext_size;
 	for (i = 0; i < ciphertext_size; i++)
 		cs.ciphertext[i] = (atoi16[ARCH_INDEX(p[2 * i])] << 4) | atoi16[ARCH_INDEX(p[2 * i + 1])];
-	
+
 	// MAC
 	p = strtokm(NULL, "*");
 	for (i = 0; i < 32; i++)

@@ -634,6 +634,10 @@ static int mbedtls_pkcs12_derivation_simd_sha256( unsigned char *data[SSE_GROUP_
 
 #if defined(SIMD_COEF_64)
 
+/* We use SSEi_HALF_IN, so can halve SHA_BUF_SIZ */
+#undef SHA_BUF_SIZ
+#define SHA_BUF_SIZ 8
+
 // 64 bit mixer
 #if ARCH_LITTLE_ENDIAN==1
 #define GETPOS4(i, index)        ( (index&(SIMD_COEF_64-1))*8 + ((i)&(0xffffffff-7))*SIMD_COEF_64 + (7-((i)&7)) + (unsigned int)index/SIMD_COEF_64*SHA_BUF_SIZ*SIMD_COEF_64*8 )
@@ -700,7 +704,6 @@ static int mbedtls_pkcs12_derivation_simd_sha512( unsigned char *data[SSE_GROUP_
 	v = 128;
 
 	memset(diversifier, (unsigned char) id, v);
-	memset(sse_buf, 0, sizeof(sse_buf));
 
 	pkcs12_fill_salt_buffer_simd(salt_block, v, salt, saltlen, SSE_GROUP_SZ_SHA512);
 	pkcs12_fill_buffer_simd(pwd_block,  v, pwd,  pwdlen, SSE_GROUP_SZ_SHA512);
@@ -718,13 +721,11 @@ static int mbedtls_pkcs12_derivation_simd_sha512( unsigned char *data[SSE_GROUP_
 			for (i = 0; i < SHA512_DIGEST_LENGTH; ++i) {
 				sse_buf[GETPOS4(i, k)] = hash[i];
 			}
-			sse_buf[GETPOS4(64,k)] = 0x80;
-			sse_buf[GETPOS4(126,k)] = 2; // (SHA512_DIGEST_LENGTH<<3);
 		}
 
 		// Perform remaining ( iterations - 1 ) recursive hash calculations
-		for ( i = 1; i < (size_t) iterations; i++ )
-			SIMDSHA512body(sse_buf, (uint64_t*)sse_buf, NULL, SSEi_MIXED_IN|SSEi_OUTPUT_AS_INP_FMT);
+		uint64_t rounds = iterations - 1;
+		SIMDSHA512body(sse_buf, (uint64_t*)sse_buf, &rounds, SSEi_HALF_IN|SSEi_LOOP);
 
 		// Now unmarshall the data from sse_buf
 		use_len = ( datalen > hlen ) ? hlen : datalen;

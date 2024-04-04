@@ -1,8 +1,8 @@
 #!/usr/bin/env perl
 #
-# John the Ripper benchmark output comparison tool, revision 4.1
+# John the Ripper benchmark output comparison tool
 # Copyright (c) 2011 Solar Designer
-# Enhancements for revision 4.1, copyright (c) 2012 Frank Dittrich
+# Enhancements copyright (c) 2012 Frank Dittrich
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted.
 # There's ABSOLUTELY NO WARRANTY, express or implied.
@@ -42,19 +42,18 @@ sub parse
 		return;
 	}
 
-	if (/^(All|\d+ out of) \d+ (tests|formats)( have)? (passed self-tests|FAILED)/) {
-		($total) = /^All (\d+) (tests|formats)( have)? passed self-tests/;
-		if (!defined($total)) {
+	if (/^(|All |\d+ out of )\d+ (tests|formats)( have)? (benchmarked|passed self-tests|FAILED)/) {
+		($total) = /^(|All )(\d+) (tests|formats)( have)? (benchmarked|passed self-tests)/;
+		if (defined($total)) {
+			$failed = 0;
+		} else {
 			($failed, $total) =
 			    /^(\d+) out of (\d+) (tests|formats)( have)? FAILED/;
 		}
 		return;
 	}
-	return if /Benchmarking: .*\.\.\. FAILED/;
+	return if /Benchmarking: .*\.\.\. FAILED|^Speed for cost |^Warning: /;
 
-	if (/^Speed for cost /) {
-		return;
-	}
 	my $ok = 0;
 	if (defined($name)) {
 		($kind, $real, $reals, $virtual, $virtuals) =
@@ -71,9 +70,12 @@ sub parse
 			$id = $name . ':' . $kind;
 			$real *= 1000 if ($reals eq 'K');
 			$real *= 1000000 if ($reals eq 'M');
+			$real *= 1000000000 if ($reals eq 'G');
+			$real = 0.001 if ($real eq "0.0" || $real eq "0.00");
 			$virtual *= 1000 if ($virtuals eq 'K');
 			$virtual *= 1000000 if ($virtuals eq 'M');
-			$virtual = 0.001 if $virtual eq "0.0";
+			$virtual *= 1000000000 if ($virtuals eq 'G');
+			$virtual = 0.001 if ($virtual eq "0.0" || $virtual eq "0.00");
 			return;
 		}
 	} else {
@@ -258,8 +260,8 @@ exit unless ($n);
 printf "Minimum:\t\t\t%.5f real, %.5f virtual\n", $minr, $minv;
 printf "Maximum:\t\t\t%.5f real, %.5f virtual\n", $maxr, $maxv;
 
-@akr = sort @akr;
-@akv = sort @akv;
+@akr = sort {$a <=> $b} @akr;
+@akv = sort {$a <=> $b} @akv;
 if ($n & 1) {
 	$medr = $akr[($n - 1) / 2];
 	$medv = $akv[($n - 1) / 2];
@@ -281,8 +283,8 @@ for ($i = 0; $i < $n; $i++) {
 $dr = exp(($dr / $n) ** 0.5);
 $dv = exp(($dv / $n) ** 0.5);
 
-@adr = sort @adr;
-@adv = sort @adv;
+@adr = sort {$a <=> $b} @adr;
+@adv = sort {$a <=> $b} @adv;
 if ($n & 1) {
 	$madr = $adr[($n - 1) / 2];
 	$madv = $adv[($n - 1) / 2];

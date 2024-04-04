@@ -21,7 +21,7 @@ fi
 
 # Need a docker image to run the tests
 if [[ "$DOCKER" == "yes" ]]; then
-    docker run --cap-add SYS_PTRACE -v "$(pwd)":/cwd claudioandre/john:opencl sh -c \
+    docker run --cap-add SYS_PTRACE -v "$(pwd)":/cwd claudioandre/john:opencl18 sh -c \
       "
         cd /cwd; \
         export OPENCL=$OPENCL; \
@@ -79,4 +79,3 @@ else
     echo '== Running $JTR -test=0 =='
     $JTR -test=0
 fi
-
