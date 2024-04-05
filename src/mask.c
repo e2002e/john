@@ -1619,9 +1619,7 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
 		} \
 		ps = ranges(ps).next; \
 	} \
-	if (cpu_mask_ctx->cpu_count < 4) \
-		ps = ps1; \
-	else ps = ranges(ps4).next; \
+	ps = ps1; \
 	while(ps < MAX_NUM_MASK_PLHDR) { \
 		template_key[ranges(ps).pos + ranges(ps).offset] = ranges(ps).chars[ranges(ps).iter[loop]]; \
 		ps = ranges(ps).next; \
@@ -1674,30 +1672,33 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 	if(cpu_mask_ctx->cpu_count < 4) {
 		/* Initialize the placeholders */
 		ps = ps1;
-		for(loop = 0; loop <= options.eff_maxlength - options.eff_minlength; loop++)
+		for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++)
 			init_key(ps, loop);
 
 		loop = 0;
 
 		while (1) {
-			for (loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++) {
-				if (bail)
-					goto done;
-				if(options.node_count && !(options.flags & FLG_MASK_STACKED) && !(*my_candidates)--)
-					goto done;
+			if (bail)
+				goto done;
+			if(options.node_count && !(options.flags & FLG_MASK_STACKED) && !(*my_candidates)--)
+				goto done;
 #ifdef MASK_DEBUG
-				fprintf(stderr, "process_key(\"%s\")\n", template_key);
+			fprintf(stderr, "process_key(\"%s\")\n", template_key);
 #endif
-				process_key(template_key);
-				ps = ps1;
-				next_state(ps, loop);
-			}
+			process_key(template_key);
+			ps = ps1;
+			next_state(ps, loop);
+
+			if (mask_increments_len && ranges(ps).pos + ranges(ps).offset >= mask_cur_len + loop)
+				break;
+
+			if (++loop > options.eff_maxlength - mask_cur_len) loop = 0;
 		}
 	}
 	else if(cpu_mask_ctx->cpu_count >= 4) {
 		ps = ranges(ps4).next;
 		/* Initialize the remaining placeholders other than the first two */
-		for(loop = 0; loop <= options.eff_maxlength - options.eff_minlength; loop++)
+		for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++)
 			init_key(ps, loop);
 
 		int bail = 0;
@@ -1723,7 +1724,6 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 								!(*my_candidates)--)
 								goto done;
 							set_template_key(ps1, start1, loop);
-							//template_key[mask_cur_len + loop] = '\0';
 							process_key(template_key);
 						}
 						ranges(ps1).iter[loop] = 0;
