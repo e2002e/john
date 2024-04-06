@@ -1699,6 +1699,7 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 		loop = 0;
 
 		while (1) {
+			for (loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++) {
 			start1 = ranges(ps1).start;
 			start2 = ranges(ps2).start;
 			start3 = ranges(ps3).start;
@@ -1729,7 +1730,7 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 			ranges(ps4).iter[loop] = 0;
 			ps = ranges(ps4).next;
 			next_state(ps, loop);
-			if (++loop > options.eff_maxlength - mask_cur_len) loop = 0;
+			}
 		}
 	}
 done:
@@ -1885,19 +1886,13 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 	fract = (double)(options.node_max - options.node_min + 1) / options.node_count;
 
 	offset = 1;
-	ps = cpu_mask_ctx->ps1;
-	while(ps < MAX_NUM_MASK_PLHDR) {
-		if (cpu_mask_ctx->ranges[ps].pos < mask_cur_len)
-			offset *= cpu_mask_ctx->ranges[ps].count;
-		ps = cpu_mask_ctx->ranges[ps].next;
-	}
-
-	uint64_t sub_offset = 1;
-	ps = cpu_mask_ctx->ps1;
-	while(ps < MAX_NUM_MASK_PLHDR) {
-		if (cpu_mask_ctx->ranges[ps].pos < mask_cur_len - 1)
-			sub_offset *= cpu_mask_ctx->ranges[ps].count;
-		ps = cpu_mask_ctx->ranges[ps].next;
+	for(j = 0; j <= options.eff_maxlength - mask_cur_len; j++) {
+		ps = cpu_mask_ctx->ps1;
+		while(ps < MAX_NUM_MASK_PLHDR) {
+			if (cpu_mask_ctx->ranges[ps].pos < mask_cur_len)
+				offset *= cpu_mask_ctx->ranges[ps].count;
+			ps = cpu_mask_ctx->ranges[ps].next;
+		}
 	}
 
 	total_candidates = offset;
@@ -1915,7 +1910,8 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 		error();
 	}
 
-	for(j = 0; j <= options.eff_maxlength - options.eff_minlength; j++) {
+	for(j = 0; j <= options.eff_maxlength - mask_cur_len; j++)
+	{
 		ctr = 1;
 		ps = cpu_mask_ctx->ps1;
 		while(ps < MAX_NUM_MASK_PLHDR) {
@@ -1924,7 +1920,7 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 			ps = cpu_mask_ctx->ranges[ps].next;
 		}
 	}
-	return my_candidates + sub_offset;
+	return my_candidates;
 }
 
 /*
