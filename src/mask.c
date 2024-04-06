@@ -1367,7 +1367,7 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 
 			op_ctr++;
 			cl_ctr++;
-			if(cpu_mask_ctx->count++ > mask_cur_len) cpu_mask_ctx->count = mask_cur_len;
+			cpu_mask_ctx->count++;
 		}
 		else if ((unsigned int)load_op(op_ctr) >
 		         (unsigned int)load_qtn(qtn_ctr))  {
@@ -1388,7 +1388,7 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 			set_range_start();
 
 			qtn_ctr++;
-			if(cpu_mask_ctx->count++ > mask_cur_len) cpu_mask_ctx->count = mask_cur_len;
+			cpu_mask_ctx->count++;
 		}
 	}
 #ifdef MASK_DEBUG
