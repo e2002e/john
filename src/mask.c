@@ -2688,7 +2688,7 @@ int do_mask_crack(const char *extern_key)
 			if (format_cannot_reset)
 				save_restore(&cpu_mask_ctx, 0, RESTORE);
 			else
-				finalize_mask(max_keylen);
+				finalize_mask(mask_cur_len);
 
 			generate_template_key(mask, extern_key, extern_key_len, &parsed_mask, &cpu_mask_ctx, max_keylen);
 
