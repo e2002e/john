@@ -1446,7 +1446,7 @@ static void skip_position(mask_cpu_context *cpu_mask_ctx, int *arr);
 /*
  * Truncates mask after range idx.  Called by generate_template_key()
  */
-static void truncate_mask(mask_cpu_context *cpu_mask_ctx, int range_idx)
+static void truncate_mask(mask_cpu_context *cpu_mask_ctx, int range_idx, int range_idx_end)
 {
 	int i;
 
@@ -1471,7 +1471,7 @@ static void truncate_mask(mask_cpu_context *cpu_mask_ctx, int range_idx)
 		return;
 	}
 
-	cpu_mask_ctx->ranges[range_idx].next = MAX_NUM_MASK_PLHDR;
+	cpu_mask_ctx->ranges[range_idx_end].next = MAX_NUM_MASK_PLHDR;
 
 	cpu_mask_ctx->cpu_count = 0;
 	cpu_mask_ctx->ps1 = MAX_NUM_MASK_PLHDR;
@@ -1534,10 +1534,10 @@ static char *generate_template_key(char *mask, const char *key, int key_len,
 		} else
 			template_key[k++] = mask[i++];
 
-		if (k >= (unsigned int)template_len) {
+		if (k >= (unsigned int)mask_cur_len) {
 			save_restore(cpu_mask_ctx, j - 1, SAVE);
-			truncate_mask(cpu_mask_ctx, j - 1);
-			k = template_len;
+			truncate_mask(cpu_mask_ctx, j - 1, template_len - 1);
+			k = mask_cur_len;
 			break;
 		}
 	}
@@ -1621,7 +1621,7 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
 			break;						\
 		}							\
 	} \
-	if (1) \
+	if (cpu_mask_ctx->cpu_count) \
 		ps = ps1; \
 	else \
 		ps = ranges(ps4).next; \
@@ -1673,7 +1673,7 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 
 	int bail = 0;
 
-	if(1) {
+	if(cpu_mask_ctx->cpu_count) {
 		/* Initialize the placeholders */
 		ps = ps1;
 		for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++)
