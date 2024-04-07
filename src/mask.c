@@ -1622,7 +1622,10 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
 			break;						\
 		}							\
 	} \
-	ps = ps1; \
+	if (cpu_mask_ctx->cpu_count < 4) \
+		ps = ps1; \
+	else \
+		ps = ranges(ps4).next; \
 	while(ps < MAX_NUM_MASK_PLHDR) { \
 		template_key[ranges(ps).pos + ranges(ps).offset] = ranges(ps).chars[ranges(ps).iter[loop]]; \
 		ps = ranges(ps).next; \
@@ -1886,10 +1889,11 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 	fract = (double)(options.node_max - options.node_min + 1) / options.node_count;
 
 	offset = 1;
-	for(j = 0; j <= options.eff_maxlength - mask_cur_len; j++) {
+	for(j = 0; j <= options.eff_maxlength - mask_cur_len; j++)
+	{
 		ps = cpu_mask_ctx->ps1;
 		while(ps < MAX_NUM_MASK_PLHDR) {
-			if (cpu_mask_ctx->ranges[ps].pos < mask_cur_len)
+			if (cpu_mask_ctx->ranges[ps].pos < mask_cur_len + j)
 				offset *= cpu_mask_ctx->ranges[ps].count;
 			ps = cpu_mask_ctx->ranges[ps].next;
 		}
