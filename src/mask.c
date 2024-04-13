@@ -1393,7 +1393,7 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 #ifdef MASK_DEBUG
 	fprintf(stderr, "%s() count is %d\n", __FUNCTION__, cpu_mask_ctx->count);
 #endif
-	for (i = 0; i < max_keylen - 1; i++) {
+	for (i = 0; i < cpu_mask_ctx->count - 1; i++) {
 		cpu_mask_ctx->ranges[i].next = i + 1;
 		cpu_mask_ctx->active_positions[i] = 1;
 	}
@@ -1403,7 +1403,7 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 	if (restored) {
 		cpu_mask_ctx->count = restored_ctx.count;
 		cpu_mask_ctx->offset = restored_ctx.offset;
-		for (i = 0; i < max_keylen; i++)
+		for (i = 0; i < cpu_mask_ctx->count; i++)
 		    for (j = 0; j <= options.eff_maxlength - options.eff_minlength; j++)
 	            cpu_mask_ctx->ranges[i].iter[j] = restored_ctx.ranges[i].iter[j];
 	}
@@ -1621,7 +1621,7 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
 			break;						\
 		}							\
 	} \
-	if (cpu_mask_ctx->cpu_count) \
+	if (cpu_mask_ctx->cpu_count < 4) \
 		ps = ps1; \
 	else \
 		ps = ranges(ps4).next; \
@@ -1673,7 +1673,7 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 
 	int bail = 0;
 
-	if(cpu_mask_ctx->cpu_count) {
+	if(cpu_mask_ctx->cpu_count < 4) {
 		/* Initialize the placeholders */
 		ps = ps1;
 		for(loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++)
@@ -1882,7 +1882,7 @@ static void skip_position(mask_cpu_context *cpu_mask_ctx, int *arr)
  */
 static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 {
-	uint64_t offset, my_candidates, total_candidates, ctr;
+	uint64_t offset, sub_offset, my_candidates, total_candidates, ctr;
 	int ps, j;
 	double fract;
 
@@ -1893,15 +1893,22 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 	fract = (double)(options.node_max - options.node_min + 1) / options.node_count;
 
 	offset = 1;
-	for(j = 0; j <= options.eff_maxlength - mask_cur_len; j++)
-	{
-		ps = cpu_mask_ctx->ps1;
-		while(ps < MAX_NUM_MASK_PLHDR) {
-			if (cpu_mask_ctx->ranges[ps].pos < mask_cur_len + j)
-				offset *= cpu_mask_ctx->ranges[ps].count;
-			ps = cpu_mask_ctx->ranges[ps].next;
-		}
+	ps = cpu_mask_ctx->ps1;
+	while(ps < MAX_NUM_MASK_PLHDR) {
+		if (cpu_mask_ctx->ranges[ps].pos < mask_cur_len)
+			offset *= cpu_mask_ctx->ranges[ps].count;
+		ps = cpu_mask_ctx->ranges[ps].next;
 	}
+
+	sub_offset = 1;
+	ps = cpu_mask_ctx->ps1;
+	while(ps < MAX_NUM_MASK_PLHDR) {
+		if (cpu_mask_ctx->ranges[ps].pos < mask_cur_len - 1)
+			sub_offset *= cpu_mask_ctx->ranges[ps].count;
+		ps = cpu_mask_ctx->ranges[ps].next;
+	}
+
+	offset += sub_offset;
 
 	total_candidates = offset;
 	offset *= fract;
