@@ -40,17 +40,21 @@
 #include "opencl_misc.h"
 #include "opencl_sha1.h"
 
+#ifndef SHA1_DATA_LENGTH_TYPE
+#define SHA1_DATA_LENGTH_TYPE	uint
+#endif
+
 /*
  * SHA-1 context setup
  */
 
 typedef struct {
-	uint total;        /* number of bytes processed  */
+	SHA1_DATA_LENGTH_TYPE total;    /* number of bytes processed  */
 	uint state[5];     /* intermediate digest state  */
 	uchar buffer[64];  /* data block being processed */
 } SHA_CTX;
 
-inline void SHA1_Init(SHA_CTX *ctx)
+INLINE void SHA1_Init(SHA_CTX *ctx)
 {
 	ctx->total = 0;
 
@@ -61,7 +65,7 @@ inline void SHA1_Init(SHA_CTX *ctx)
 	ctx->state[4] = INIT_E;
 }
 
-inline void _sha1_process(SHA_CTX *ctx, const uchar data[64])
+INLINE void _sha1_process(SHA_CTX *ctx, const uchar data[64])
 {
 #if __OS_X__ && gpu_amd(DEVICE_INFO)
 	volatile
@@ -125,7 +129,7 @@ inline void _sha1_process(SHA_CTX *ctx, const uchar data[64])
 /*
  * SHA-1 process buffer
  */
-inline void SHA1_Update(SHA_CTX *ctx, const uchar *input, uint ilen)
+INLINE void SHA1_Update(SHA_CTX *ctx, const uchar *input, SHA1_DATA_LENGTH_TYPE ilen)
 {
 	uint fill;
 	uint left;
@@ -163,7 +167,7 @@ inline void SHA1_Update(SHA_CTX *ctx, const uchar *input, uint ilen)
 /*
  * SHA-1 final digest
  */
-inline void SHA1_Final(uchar output[20], SHA_CTX *ctx)
+INLINE void SHA1_Final(uchar output[20], SHA_CTX *ctx)
 {
 	uint last, padn;
 	ulong bits;

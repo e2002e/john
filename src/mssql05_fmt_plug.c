@@ -121,11 +121,20 @@ static int valid(char *ciphertext, struct fmt_main *self)
 		return 0;
 	for (i = 6; i < CIPHERTEXT_LENGTH; i++){
 		if (!(  (('0' <= ciphertext[i])&&(ciphertext[i] <= '9')) ||
-					//(('a' <= ciphertext[i])&&(ciphertext[i] <= 'f')) ||
+					(('a' <= ciphertext[i])&&(ciphertext[i] <= 'f')) ||
 					(('A' <= ciphertext[i])&&(ciphertext[i] <= 'F'))))
 			return 0;
 	}
 	return 1;
+}
+
+static char *split(char *ciphertext, int index, struct fmt_main *self)
+{
+	static char out[CIPHERTEXT_LENGTH + 1];
+
+	strnzcpy(out, ciphertext, sizeof(out));
+	strupr(out + 6); /* Skip first 6 chars to retain lowercase 'x' */
+	return out;
 }
 
 // Handle full hashes (old and new in one long string) as well. This means the
@@ -205,6 +214,7 @@ static void set_key(char *_key, int index)
 #ifdef SIMD_COEF_32
 	const unsigned char *key = (unsigned char*)_key;
 	unsigned int *keybuf_word = &((unsigned int*)saved_key)[(index&(SIMD_COEF_32-1)) + (unsigned int)index/SIMD_COEF_32*SHA_BUF_SIZ*SIMD_COEF_32];
+	unsigned int *keybuf_end = keybuf_word + 15*SIMD_COEF_32;
 	unsigned int len, temp2;
 
 	len = SALT_SIZE >> 1;
@@ -232,12 +242,14 @@ static void set_key(char *_key, int index)
 
 key_cleaning:
 	keybuf_word += SIMD_COEF_32;
-	while(*keybuf_word) {
+	while (keybuf_word < keybuf_end && *keybuf_word) {
 		*keybuf_word = 0;
 		keybuf_word += SIMD_COEF_32;
 	}
+	if (&keybuf_word[SIMD_COEF_32] < keybuf_end && keybuf_word[SIMD_COEF_32])
+		keybuf_word[SIMD_COEF_32] = 0;
 
-	((unsigned int *)saved_key)[15*SIMD_COEF_32 + (index&(SIMD_COEF_32-1)) + (unsigned int)index/SIMD_COEF_32*SHA_BUF_SIZ*SIMD_COEF_32] = len << 4;
+	*keybuf_end = len << 4;
 #else
 	UTF8 *s = (UTF8*)_key;
 	UTF16 *d = (UTF16*)saved_key;
@@ -258,6 +270,7 @@ static void set_key_CP(char *_key, int index)
 #ifdef SIMD_COEF_32
 	const unsigned char *key = (unsigned char*)_key;
 	unsigned int *keybuf_word = &((unsigned int*)saved_key)[(index&(SIMD_COEF_32-1)) + (unsigned int)index/SIMD_COEF_32*SHA_BUF_SIZ*SIMD_COEF_32];
+	unsigned int *keybuf_end = keybuf_word + 15*SIMD_COEF_32;
 	unsigned int len, temp2;
 
 	len = SALT_SIZE >> 1;
@@ -285,12 +298,14 @@ static void set_key_CP(char *_key, int index)
 
 key_cleaning_enc:
 	keybuf_word += SIMD_COEF_32;
-	while(*keybuf_word) {
+	while (keybuf_word < keybuf_end && *keybuf_word) {
 		*keybuf_word = 0;
 		keybuf_word += SIMD_COEF_32;
 	}
+	if (&keybuf_word[SIMD_COEF_32] < keybuf_end && keybuf_word[SIMD_COEF_32])
+		keybuf_word[SIMD_COEF_32] = 0;
 
-	((unsigned int *)saved_key)[15*SIMD_COEF_32 + (index&(SIMD_COEF_32-1)) + (unsigned int)index/SIMD_COEF_32*SHA_BUF_SIZ*SIMD_COEF_32] = len << 4;
+	*keybuf_end = len << 4;
 #else
 	key_length = enc_to_utf16((UTF16*)saved_key, PLAINTEXT_LENGTH,
 	                          (unsigned char*)_key, strlen(_key));
@@ -306,6 +321,7 @@ static void set_key_utf8(char *_key, int index)
 #ifdef SIMD_COEF_32
 	const UTF8 *source = (UTF8*)_key;
 	unsigned int *keybuf_word = &((unsigned int*)saved_key)[(index&(SIMD_COEF_32-1)) + (unsigned int)index/SIMD_COEF_32*SHA_BUF_SIZ*SIMD_COEF_32];
+	unsigned int *keybuf_end = keybuf_word + 15*SIMD_COEF_32;
 	UTF32 chl, chh = 0x80;
 	unsigned int len;
 
@@ -416,12 +432,14 @@ static void set_key_utf8(char *_key, int index)
 	keybuf_word += SIMD_COEF_32;
 
 bailout:
-	while(*keybuf_word) {
+	while (keybuf_word < keybuf_end && *keybuf_word) {
 		*keybuf_word = 0;
 		keybuf_word += SIMD_COEF_32;
 	}
+	if (&keybuf_word[SIMD_COEF_32] < keybuf_end && keybuf_word[SIMD_COEF_32])
+		keybuf_word[SIMD_COEF_32] = 0;
 
-	((unsigned int *)saved_key)[15*SIMD_COEF_32 + (index&(SIMD_COEF_32-1)) + (unsigned int)index/SIMD_COEF_32*SHA_BUF_SIZ*SIMD_COEF_32] = len << 4;
+	*keybuf_end = len << 4;
 #else
 	key_length = utf8_to_utf16((UTF16*)saved_key, PLAINTEXT_LENGTH,
 	                           (unsigned char*)_key, strlen(_key));
@@ -605,7 +623,7 @@ struct fmt_main fmt_mssql05 = {
 		SALT_ALIGN,
 		MIN_KEYS_PER_CRYPT,
 		MAX_KEYS_PER_CRYPT,
-		FMT_CASE | FMT_8_BIT | FMT_UNICODE | FMT_ENC,
+		FMT_CASE | FMT_8_BIT | FMT_SPLIT_UNIFIES_CASE | FMT_UNICODE | FMT_ENC,
 		{ NULL },
 		{ NULL },
 		tests
@@ -615,7 +633,7 @@ struct fmt_main fmt_mssql05 = {
 		fmt_default_reset,
 		prepare,
 		valid,
-		fmt_default_split,
+		split,
 		get_binary,
 		get_salt,
 		{ NULL },

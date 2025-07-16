@@ -112,7 +112,7 @@ krb_put_string(char *from, void *to)
 }
 
 int
-make_req(unsigned char *dst, char *user, char *realm)
+make_req(unsigned char *dst, size_t dst_size, char *user, char *realm)
 {
   char *pname, *pinst;
   struct timeval tv;
@@ -127,20 +127,36 @@ make_req(unsigned char *dst, char *user, char *realm)
 
   gettimeofday(&tv, NULL);
 
+#define KRB_PUT_INT(from, size) \
+  if (dst + dst_size - p < (size)) \
+    goto fail; \
+  p += krb_put_int((from), p, (size))
+#define KRB_PUT_STRING(from) \
+  if (dst + dst_size - p < strlen((from)) + 1) \
+    goto fail; \
+  p += krb_put_string((from), p)
+
   p = dst;
-  p += krb_put_int(4, p, 1);			/* protocol version */
-  p += krb_put_int((1 << 1), p, 1);		/* msg type (KDC_REQUEST) */
-  p += krb_put_string(pname, p);		/* principal name */
-  p += krb_put_string(pinst, p);		/* principal instance */
-  p += krb_put_string(realm, p);		/* realm */
-  p += krb_put_int(tv.tv_sec, p, 4);		/* time */
-  p += krb_put_int(120, p, 1);			/* lifetime (120) */
-  p += krb_put_string("krbtgt", p);		/* service name (krbtgt)*/
-  p += krb_put_string(realm, p);		/* service instance (realm) */
+  KRB_PUT_INT(4, 1);				/* protocol version */
+  KRB_PUT_INT((1 << 1), 1);			/* msg type (KDC_REQUEST) */
+  KRB_PUT_STRING(pname);			/* principal name */
+  KRB_PUT_STRING(pinst);			/* principal instance */
+  KRB_PUT_STRING(realm);			/* realm */
+  KRB_PUT_INT(tv.tv_sec, 4);			/* time */
+  KRB_PUT_INT(120, 1);				/* lifetime (120) */
+  KRB_PUT_STRING("krbtgt");			/* service name (krbtgt)*/
+  KRB_PUT_STRING(realm);			/* service instance (realm) */
+
+#undef KRB_PUT_INT
+#undef KRB_PUT_STRING
 
   MEM_FREE(pname);
 
   return (p - dst);
+
+fail:
+  MEM_FREE(pname);
+  return (-1);
 }
 
 int
@@ -190,7 +206,7 @@ fetch_tgt(char *host, char *user, char *realm, unsigned char *dst, int size)
   to.sin_port = htons(750);
 
   /* Fill in our TGT request. */
-  int ktext_length = make_req(ktext.dat, user, realm);
+  int ktext_length = make_req(ktext.dat, sizeof(ktext.dat), user, realm);
   if (ktext_length < 0)
     return (-1);
   ktext.length = ktext_length;
@@ -245,7 +261,7 @@ upcase(char *string)
   char *p;
 
   for (p = string; *p != '\0'; p++)
-    *p = toupper(((unsigned char)(*p)));
+    *p = toupper((int)(unsigned char)*p);
 
   return (string);
 }

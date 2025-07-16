@@ -69,8 +69,8 @@ john_register_one(&fmt_NS);
 #define BINARY_SIZE			16
 #define SALT_SIZE			32
 #define DYNA_SALT_SIZE		(sizeof(char*))
-#define BINARY_ALIGN		sizeof(uint32_t)
-#define SALT_ALIGN			4
+#define BINARY_ALIGN		MEM_ALIGN_WORD
+#define SALT_ALIGN			MEM_ALIGN_WORD
 
 static struct fmt_tests tests[] = {
 	{"admin$nMjFM0rdC9iOc+xIFsGEm3LtAeGZhn", "password"},

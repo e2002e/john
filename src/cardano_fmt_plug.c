@@ -127,8 +127,9 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 
 		for (i = 0; i < MIN_KEYS_PER_CRYPT; ++i) {
 			// blake2b_256 hash of the password.
-			blake2b(blake_out[i], (unsigned char *)saved_key[index + i], NULL, PWD_HASH_LEN,
-			        strlen(saved_key[index + i]), 0);
+			blake2b(blake_out[i], PWD_HASH_LEN,
+			        (unsigned char *)saved_key[index + i], strlen(saved_key[index + i]),
+			        NULL, 0);
 #if SIMD_COEF_64
 			lens[i] = PWD_HASH_LEN;
 			pin[i] = (unsigned char *)blake_out[i];

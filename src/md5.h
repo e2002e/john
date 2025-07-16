@@ -1,15 +1,32 @@
 /*
- * This is an OpenSSL-compatible implementation of the RSA Data Security,
- * Inc. MD5 Message-Digest Algorithm (RFC 1321).
+ * This is an OpenSSL-compatible implementation of the RSA Data Security, Inc.
+ * MD5 Message-Digest Algorithm (RFC 1321).
  *
- * Written by Solar Designer <solar at openwall.com> in 2001, and placed
- * in the public domain.  There's absolutely no warranty.
+ * Homepage:
+ * https://openwall.info/wiki/people/solar/software/public-domain-source-code/md5
+ *
+ * Author:
+ * Alexander Peslyak, better known as Solar Designer <solar at openwall.com>
+ *
+ * This software was written by Alexander Peslyak in 2001.  No copyright is
+ * claimed, and the software is hereby placed in the public domain.
+ * In case this attempt to disclaim copyright and place the software in the
+ * public domain is deemed null and void, then the software is
+ * Copyright (c) 2001 Alexander Peslyak and it is hereby released to the
+ * general public under the following terms:
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted.
+ *
+ * There's ABSOLUTELY NO WARRANTY, express or implied.
  *
  * See md5.c for more information.
- *
- * This file has been modified in the JtR jumbo patch.
- * If you reuse the code for another purpose, please download the original from:
- * http://openwall.info/wiki/people/solar/software/public-domain-source-code/md5
+ */
+
+/*
+ * The code below has been modified in many ways for use specifically in John
+ * the Ripper jumbo.  If you want to reuse it outside of that project, please
+ * obtain the original from the homepage URL above.
  */
 
 #if !defined(_MD5_H)
@@ -36,7 +53,7 @@ typedef struct {
 	MD5_u32plus A, B, C, D;
 	MD5_u32plus lo, hi;
 	unsigned char buffer[64];
-#if !ARCH_ALLOWS_UNALIGNED
+#if !(ARCH_LITTLE_ENDIAN && ARCH_ALLOWS_UNALIGNED)
 	MD5_u32plus block[16];
 #endif
 } MD5_CTX;

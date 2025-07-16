@@ -2,7 +2,7 @@
 * This software is Copyright (c) 2012 Sayantan Datta <std2048 at gmail dot com>
 * and it is hereby released to the general public under the following terms:
 * Redistribution and use in source and binary forms, with or without modification, are permitted.
-* Based on S3nf implementation http://openwall.info/wiki/john/MSCash2
+* Based on S3nf implementation https://openwall.info/wiki/john/MSCash2
 * Modified to support salts upto 19 characters. Bug in orginal code allowed only upto 8 characters.
 */
 #include "opencl_device_info.h"
@@ -351,7 +351,7 @@ typedef struct {
 	P(C, D, E, A, B, R6);				 \
 	P(B, C, D, E, A, R7);
 
-inline void SHA1(uint *A, uint *W) {
+INLINE void SHA1(uint *A, uint *W) {
 #if HAVE_LUT3
 #define F(x, y, z) lut3(x, y, z, 0xca)
 #elif USE_BITSELECT
@@ -403,7 +403,7 @@ inline void SHA1(uint *A, uint *W) {
 #undef F
 }
 
-inline void SHA1_digest(uint *A, uint *W) {
+INLINE void SHA1_digest(uint *A, uint *W) {
 #if HAVE_LUT3
 #define F(x, y, z) lut3(x, y, z, 0xca)
 #elif USE_BITSELECT
@@ -455,7 +455,7 @@ inline void SHA1_digest(uint *A, uint *W) {
 #undef F
 }
 
-inline void sha1_pad(uint *pad, uint *state) {
+INLINE void sha1_pad(uint *pad, uint *state) {
 	uint 		A[5], W[16] ;
 
 	GET_WORD_32_BE(W[0], pad, 0) ;
@@ -496,7 +496,7 @@ inline void sha1_pad(uint *pad, uint *state) {
 	state[4] = A[4] ;
 }
 
-inline void hmac_sha1(uint *istate, uint *ostate, uint *buf)
+INLINE void hmac_sha1(uint *istate, uint *ostate, uint *buf)
 {
 	uint	 A[5], W[16] ;
 

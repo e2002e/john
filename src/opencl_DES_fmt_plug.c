@@ -8,9 +8,9 @@
 #ifdef HAVE_OPENCL
 
 #if FMT_EXTERNS_H
-extern struct fmt_main fmt_opencl_DES;
+extern struct fmt_main fmt_opencl_cryptdes;
 #elif FMT_REGISTERS_H
-john_register_one(&fmt_opencl_DES);
+john_register_one(&fmt_opencl_cryptdes);
 #else
 
 #include <string.h>
@@ -38,7 +38,28 @@ static struct fmt_tests tests[] = {
 	{"CC4rMpbg9AMZ.", "U*U***U*"},
 	{"XXxzOu6maQKqQ", "*U*U*U*U"},
 	{"SDbsugeBiC58A", ""},
+	{"wH6YCxz1hfT9g", "12345678"},
+	{"khYkT6jaCaO7A", "1234567"},
+	{"VTb0BiUKhqhjU", "123456"},
+	{"gLaclh3quwBXs", "12345"},
+	{"oQz1vttf53NAs", "1234"},
+	{"dVWI4r16OAmdE", "123"},
+	{"12wGUVd8lAOJY", "12"},
+	{"6ZPJCnzzwFT46", "1"},
 	{"..X8NBuQ4l6uQ", ""},
+	{"bbc1MMnm9AB52", "########"},
+	{"zzfERZdZxZJeg", "11111111"},
+	{"..4Xmrg11Z3jU", "00000000"},
+	{"////////FevBg", "-/<0S]"},
+	{"///.......Lb2", "i*]cYae"},
+	{"//..////..8/c", "#?Ez|?r"},
+	{"35LSBeq/uVetI", "==*d2{^6"},
+	{"hiH9IOyyrrl4k", "cqjmide"}, /* collisions */
+	{"hiH9IOyyrrl4k", "ifpqgio"}, /* James M. Hall, 2010 */
+	{"brokenOz4KxMc", "O!>',%$"},
+	{"brokenOz4KxMc", "5dUD&66"}, /* @hops */
+	{"Tycho2izX8zFg", "?SaO9L2"},
+	{"Tycho2izX8zFg", "g[k-gRo"}, /* @hops */
 	{NULL}
 };
 
@@ -276,7 +297,7 @@ static int cmp_all(WORD *binary, int count)
 	return 1;
 }
 
-struct fmt_main fmt_opencl_DES = {
+struct fmt_main fmt_opencl_cryptdes = {
 	{
 		FORMAT_LABEL,
 		FORMAT_NAME,

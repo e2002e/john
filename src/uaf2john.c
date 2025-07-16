@@ -129,7 +129,7 @@ int uaf_extract_from_raw(void *rec_vp, int rec_len,
 	 * Fill in acct struct.
 	 */
 	for (i = 0; (i < 31) && (rec->username[i] != ' '); i++) {
-		acct->username[i] = toupper(((unsigned char)(rec->username[i])));
+		acct->username[i] = toupper((int)(unsigned char)rec->username[i]);
 	}
 	acct->username[i] = '\0';
 	if (i > 12) {
@@ -276,6 +276,10 @@ static void single_user(char *infile, char *username)
 	FILE *outf;
 
 	outf = fopen(infile, "w");
+	if (!outf) {
+		fprintf(stderr, "File open failure on '%s'\n", infile);
+		exit(1);
+	}
 	/*   0123456789012345678901 */
 	fprintf(outf, "[Dummy placeholder21]%s            \n", username);
 	fclose(outf);
@@ -318,7 +322,6 @@ static void process_file(char *infile)
 	}
 	if (!listf && !rawf) {
 		fprintf(stderr, "File open failure on '%s'\n", infile);
-		if (rawf) fclose(rawf);
 		return;
 	}
 

@@ -205,8 +205,8 @@ Major changes from 1.9.0-jumbo-1 (May 2019) in this bleeding-edge version:
 - pwsafe2john.py: Fixed parsing bug of iteration count, that led to
   uncrackable hashes in the past.  [NecroMortis; 2021]
 
-- Python3 compatibility improvements in various *2john.py scripts
-  [exploide; 2019-2021]
+- Python 3 compatibility and other improvements in various *2john.py scripts
+  [exploide; 2019-2024]
 
 - Add new option --catch-up=NAME, for running a new session only until it
   reaches the candidates tried count of a different, existing and paused
@@ -238,6 +238,10 @@ Major changes from 1.9.0-jumbo-1 (May 2019) in this bleeding-edge version:
   large portion of a mask should be generated on device-side (or completely
   disabling internal mask).  [magnum; 2021]
 
+- Added authenticator2john.py: script to extract and format
+  https://github.com/JeNeSuisPasDave/authenticator app passwords.
+  [Mark Silinio; 2021]
+
 - Add a format class "vector" for matching vector capable OpenCL formats.  This
   doesn't include bitslice formats.  It matches formats that will run SIMD
   using the default GPU, or per the  --device option.  [magnum; 2021]
@@ -257,8 +261,8 @@ Major changes from 1.9.0-jumbo-1 (May 2019) in this bleeding-edge version:
 - cisco2john: Correction for decoding of "password 7".  It turned out what we
   had was incomplete.  [magnum; 2021]
 
-- OpenCL on nvidia: Reduce the amount of CPU busy-wait in a number of OpenCL
-  formats.  [magnum; 2021]
+- OpenCL on NVIDIA (Linux only): Reduce the amount of CPU busy-wait in a number
+  of OpenCL formats.  [Solar, magnum; 2021]
 
 - OpenCL LM/DEScrypt: Override kernel selection with env. variable.  [magnum;
   2021]
@@ -270,11 +274,32 @@ Major changes from 1.9.0-jumbo-1 (May 2019) in this bleeding-edge version:
   removing the CPU bottleneck.  This work was funded by the Tezos Foundation.
   [Solar; 2021]
 
+- OpenCL SHA-2: Roll the loops to reduce code size and register pressure, and
+  speed up OpenCL formats using this code on many devices (most notably, +50%
+  for pbkdf2-hmac-sha512-opencl on NVIDIA Maxwell and Pascal GPUs) while not
+  hurting most others tested so far.  [Solar; 2021]
+
+- Default wordlist: Replace with overlap of HIBP v8 100+ hits and RockYou.
+  [Solar; 2022]
+
+- Wordlist mode: Optionally log per-rule statistics (PerRuleStats setting).
+  [Solar; 2022]
+
+- Default wordlist rules: Replace with Best-by-score, which is auto-re-ordered
+  (via PerRuleStats) subset of optimized Single and Extra rules.  [Solar; 2022]
+
+- Print detailed status on 's' keypress and help message on 'h'.  [Solar; 2022]
+
+- Add opportunistic --dupe-suppression for wordlist(+rules) and PRINCE, enabled
+  by default when rules are in use.  [Solar; 2022]
+
 - Added suport for PBKDF2-SHA256 key derivation algorithm of PrivateAccess and
   ENCDataVault. [sylvainpelissier; 2022]
 
 - Add NT-long (handles up to 110 characters), implemented as a thin dynamic.
   [magnum; 2022]
+
+- Fuzz and harden many formats' hash parsing code.  [Aleksey Cherepanov; 2022]
 
 - Update the Streebog code (a.k.a. GOST R 34.11-2012).  The new version doesn't
   require SIMD but currently doesn't support BE.  [magnum; 2022]
@@ -282,7 +307,7 @@ Major changes from 1.9.0-jumbo-1 (May 2019) in this bleeding-edge version:
 - Various fixes for drivers that support OpenCL 2.0 (such as nvidia and macOS)
   [magnum; 2022]
 
-- electrum2john (and the formats): Support at least version 18.  [magnum; 2022]
+- Many NSEC3 format enhancements.  [Ralf Sager; 2022]
 
 - Added support for Cardano legacy's encrypted secret keys. [ilap; 2022]
 
@@ -290,9 +315,11 @@ Major changes from 1.9.0-jumbo-1 (May 2019) in this bleeding-edge version:
 
 - Added support for cracking blockchain wallet v4. [Solar; 2022]
 
-- Added krb5tgs-opencl, with device-side mask acceleration.  This included
-  improvements to the shared RC4 OpenCL code, and changes to affected formats.
-  [magnum; 2023]
+- Add OneRuleToRuleThemAll and OneRuleToRuleThemStill.  [Solar; 2022, 2023]
+
+- Added krb5tgs-opencl (etype 23 TGS-REP), with device-side mask acceleration.
+  This includes improvements to the shared RC4 OpenCL code and related changes
+  to other formats.  [magnum; 2023]
 
 - Added support for cracking SNTP-MS "timeroast".  [magnum; 2023]
 
@@ -303,11 +330,13 @@ Major changes from 1.9.0-jumbo-1 (May 2019) in this bleeding-edge version:
 
 - Add Coinomi wallet support (coinomi2john.py).  [Solar; 2023]
 
-- Add Keplr wallet support (format, keplr2john.py).  [Alain Espinosa; 2023]
-
-- Add argon2-opencl support (format).  [Alain Espinosa; 2023]
-
 - Added krb5tgs-sha1[-opencl] formats for etypes 17 and 18.  [magnum; 2023]
+
+- Support for cracking InnoSetup generated Unicode installers.  [Dhiru; 2023]
+
+- Optimize the overstrike/insert and update the "All" rulesets.  [Solar; 2023]
+
+- Add Keplr wallet support (format, keplr2john.py).  [Alain Espinosa; 2023]
 
 - Added shell.nix with opencl support on AMD and Intel.  [lambdajack; 2023]
 
@@ -315,9 +344,122 @@ Major changes from 1.9.0-jumbo-1 (May 2019) in this bleeding-edge version:
 
 - Avoid hard build-time dependency on Perl (is now optional).  [Solar; 2023]
 
+- Add argon2-opencl format (Argon2 on GPU support) based on Ondrej Mosnáček's
+  OpenCL code.  [Alain Espinosa, Solar; 2023]
+
+- Load the OpenCL library dynamically (solves issues with its discovery on
+  many Windows systems).  [Alain Espinosa, Solar, Claudio; 2023]
+
 - Added a local copy of the OpenCL headers.  [Alain Espinosa; 2023]
 
-- Add Armory wallet support (accepts btcrecover data extracts).  [Solar; 2024]
+- Add Armory wallet support (accepts btcrecover data extracts), along with
+  optimization of shared SHA-512 SIMD code and its other uses.  [Solar; 2024]
+
+- electrum2john.py and Electrum format: Support seed_version above 13 (with
+  risk of false negatives on untested/future versions, but currently tested
+  working up to 59).  [magnum, Layder76, Solar; 2022, 2024]
+
+- Add Combinator external mode (combines words into pairs).  [Solar; 2024]
+
+- Add Shuffle external mode (tries permutations of characters).  [Solar; 2024]
+
+- External mode compiler: Compile-time evaluate most constant subexpressions.
+  [Solar; 2024]
+
+- New version of radius2john.py correcting support for attacks 3.1 and 3.3
+  from "An Analysis of the RADIUS Authentication Protocol" by Joshua Hill,
+  much closer to the Perl version radius2john.pl.
+  [k4amos; 2024]
+
+- Added support for SM3.  [SamuraiOcto; 2024]
+
+- Added support for Astra Linux crypt variants using GOST R 34.11-94 or GOST R
+  34.11-2012.  [magnum; 2024]
+
+- More optimal bitslice DES S-box expressions for NVIDIA GPUs and AVX-512.
+  [Sovyn Y., Solar; 2024]
+
+- Add tokenize.pl (identify and replace most common multi-character tokens in a
+  wordlist or password list e.g. to augment incremental mode).  [Solar; 2024]
+
+- Add OpenCL version of PDF format.  This also corrected bugs in handling of
+  v3 RC-40 hashes as well as more obscure key lengths that are probably not
+  used anywhere.  [magnum; 2024]
+
+- Add bitlocker2john.py to improve BitLocker hash extraction.  [holly-o; 2024]
+
+- Sync with latest upstream Argon2 and BLAKE2 code.  For Argon2, this adds
+  the Argon2id flavor and AVX2 and AVX-512 support.  [magnum, Solar; 2024]
+
+- Add KDBX4 support to KeePass formats (and keepass2john).  This means Argon2
+  support as well, and keepass-argon2-opencl is made a separate format.
+  [magnum; 2024]
+
+- Upgraded Unicode stuff from version 13.0.0 to 16.0.0.  This affects the
+  external modes Dumb16, Dumb32, Repeats16 and Repeats32.  It also affects
+  the Easter egg option "--subsets=full-unicode" which BTW supersedes the
+  external modes with far better performance.  This time some definitions of
+  character classes got (very minor) changes - this can affect resuming old
+  jobs  [magnum; 2024]
+
+- Dropped our old AES-NI code in favor of the AES code from mbedTLS, which
+  supports AES-NI (Intel) as well as AES-CE (Arm).  The new code kicks in for
+  most formats using AES.  Boosts of up to 13x seen on Intel and 7x on MacBook
+  M1 (those are for the KeePass format with AES-KDF, which is extreme because
+  all the heavy lifting is AES).  [magnum, Solar; 2024]
+
+- Revised shared OpenCL AES code for a 3-6x boost (depending on device), again
+  affecting many formats but only significant for a handful of them.  [magnum;
+  2024]
+
+- Add fvde2john.py to improve FileVault 2 hash extraction.  [holly-o; 2024]
+
+- Add oracle2john.py and fix the o5logon format to support passwords longer
+  than 16.  [k4amos; 2024]
+
+- Optimize the Monero format, speedup for one wallet is ~20x (mostly due to
+  AES-NI) and almost N times more than that for N wallets attacked concurrently
+  [Solar; 2025]
+
+- Add Oubliette Password Manager support (two formats and oubliette2john.py).
+  [DavideDG; 2025]
+
+- Use AVX512VL XOP-like bit rotates for scrypt's Salsa20.  [Solar; 2025]
+
+- When we use AVX512BW, also enable usage of AVX512VL and AVX512DQ.  [Claudio
+  André; 2025]
+
+- Deprecate and ignore the --prince-mmap option. It was too problematic to fix.
+  [magnum; 2025]
+
+- Add support for MongoDB and PostgreSQL SCRAM-SHA-256 verifiers.  For MongoDB,
+  extract them with mongodb2john.js first.  For PostgreSQL, pass them into john
+  directly (optionally prefixed by "username:").  [Dhiru, Solar; 2025]
+
+- Add support for (Win)ZIP archives larger than 4 GiB.  Prior to this they
+  ended up with false negatives.  [magnum; 2025]
+
+- bitshares2john.py: Produce less revealing wallet non-hashes.  [Solar; 2025]
+
+- BitShares format: Improve speeds, especially when attacking multiple wallets
+  concurrently.  [Solar; 2025]
+
+- Add support for EC SSH keys encrypted with AES-256-CBC.  [Peter Peshev,
+  Richard Schwab; 2024-2025]
+
+- Rework the SSH formats' detection of correct SSH key decryption to avoid
+  false negatives yet keep false positives low.  [Solar; 2025]
+
+- Hack around the SSH key "hash" "type 6" clash we ran into with the hashcat
+  project in August 2020 by supporting (and distinguishing) both our meaning
+  (bcrypt-pbkdf + AES-256-CTR) and theirs (MD5 + single DES).  [Solar; 2025]
+
+- bitcoin2john.py: add support SQLite3 format [Maxim Kuleshov; 2025]
+
+- Added support for H3C/Huawei/HPE hashes.  [SamuraiOcto; 2025]
+
+- Added gitea2john.py: Convert Gitea database fields to the pbkdf2-hmac-sha256
+  format.  [isaac-app-dev; 2025]
 
 
 Major changes from 1.8.0-jumbo-1 (December 2014) to 1.9.0-jumbo-1 (May 2019):

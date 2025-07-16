@@ -21,8 +21,8 @@ LD = $(CC)
 RM = rm -f
 OMPFLAGS = -fopenmp
 OMPFLAGS_MAYBE = $(OMPFLAGS)
-CFLAGS = -Wall -O2 -fomit-frame-pointer $(OMPFLAGS_MAYBE) -DSKIP_MEMZERO
-#CFLAGS = -Wall -O2 -march=native -fomit-frame-pointer $(OMPFLAGS_MAYBE) -DSKIP_MEMZERO
+#CFLAGS = -Wall -O2 -fomit-frame-pointer $(OMPFLAGS_MAYBE) -DSKIP_MEMZERO
+CFLAGS = -Wall -O2 -march=native -fomit-frame-pointer $(OMPFLAGS_MAYBE) -DSKIP_MEMZERO
 #CFLAGS = -Wall -O2 -funroll-loops -fomit-frame-pointer $(OMPFLAGS_MAYBE) -DSKIP_MEMZERO
 #CFLAGS = -Wall -O2 -march=native -funroll-loops -fomit-frame-pointer $(OMPFLAGS_MAYBE) -DSKIP_MEMZERO
 # -lrt is for userom's use of clock_gettime()
@@ -43,10 +43,10 @@ check: tests phc-test
 	@echo 'Running main tests'
 	@time ./tests | tee TESTS-OUT
 	@diff -U0 TESTS-OK TESTS-OUT && echo PASSED || echo FAILED
-	@if [ -e PHC-TEST-OK-SHA256 ]; then \
+	@if [ -f PHC-TEST-OK-SHA256 ]; then \
 		echo 'Running PHC tests'; \
 		time ./phc-test > PHC-TEST-OUT; \
-		sha256sum -c PHC-TEST-OK-SHA256; \
+		sha256sum -c PHC-TEST-OK-SHA256 || shasum -a 256 -c PHC-TEST-OK-SHA256; \
 	fi
 
 ref:

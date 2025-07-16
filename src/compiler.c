@@ -1,6 +1,6 @@
 /*
  * This file is part of John the Ripper password cracker,
- * Copyright (c) 1996-2000,2003,2005,2011-2013,2015,2018 by Solar Designer
+ * Copyright (c) 1996-2000,2003,2005,2011-2013,2015,2018,2024 by Solar Designer
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted.
@@ -104,12 +104,15 @@ static char *c_reserved[] = {
 #define C_CLASS_LEFT			1
 #define C_CLASS_RIGHT			2
 
+#define C_LVALUE			1
+
 struct c_op {
 	int prec;
 	int dir;
 	int class;
 	char *name;
 	void (*op)(void);
+	int lvalue;
 };
 
 #ifdef __GNUC__
@@ -437,6 +440,60 @@ static void (*c_push
 	return last;
 }
 
+static void c_subexpr(void (**last)(void), const struct c_op *op)
+{
+	/* Compile-time evaluate binary op after push_imm_imm */
+	if (op->class == C_CLASS_BINARY && *last == c_op_push_imm_imm) {
+		if (op->lvalue) {
+			c_errno = C_ERROR_EXPR;
+			return;
+		}
+		/* Patch push_imm_imm to push_imm of operation result */
+		*last = c_op_push_imm;
+		if (c_pass) {
+			c_stack[1].mem = &(c_code_ptr - 2)->imm;
+			(c_code_ptr++)->op = op->op;
+			(c_code_ptr++)->op = c_op_assign_pop;
+			(c_code_ptr++)->op = c_op_return;
+			c_execute_fast(c_code_ptr -= 6);
+			c_code_ptr->op = c_op_push_imm;
+			c_code_ptr += 2;
+		} else
+			c_code_ptr--;
+		return;
+	}
+
+	/* Compile-time evaluate binary op after push_*_imm, push_imm */
+	/* Unimplemented, need to start tracking penultimate op first */
+
+	/* Compile-time evaluate unary op after any push ending in imm */
+	if (op->class != C_CLASS_BINARY && (*last == c_op_push_imm ||
+	    *last == c_op_push_imm_imm || *last == c_op_push_mem_imm ||
+	    *last == c_op_push_mem_mem_mem_imm)) {
+		if (op->lvalue) {
+			c_errno = C_ERROR_EXPR;
+			return;
+		}
+		/* Patch the last immediate operand with operation result */
+		if (c_pass) {
+			c_stack[1].mem = &(c_code_ptr - 1)->imm;
+			c_int imm = (c_code_ptr - 1)->imm;
+			(c_code_ptr++)->op = c_op_push_imm;
+			(c_code_ptr++)->imm = imm;
+			(c_code_ptr++)->op = op->op;
+			(c_code_ptr++)->op = c_op_assign_pop;
+			(c_code_ptr++)->op = c_op_return;
+			c_execute_fast(c_code_ptr -= 5);
+		}
+		return;
+	}
+
+	*last = op->op;
+	if (c_pass)
+		c_code_ptr->op = op->op;
+	c_code_ptr++;
+}
+
 static int c_block(char term, struct c_ident *vars);
 
 static int c_define(char term, struct c_ident **vars, struct c_ident *globals)
@@ -521,10 +578,7 @@ static int c_expr(char term, struct c_ident *vars, char *token, int pop)
 				if (c_ops[stack[sp]].class == C_CLASS_BINARY)
 					balance--;
 
-				last = c_ops[stack[sp]].op;
-				if (c_pass)
-					c_code_ptr->op = last;
-				c_code_ptr++;
+				c_subexpr(&last, &c_ops[stack[sp]]);
 
 				if (!stack[sp]) break;
 			}
@@ -532,7 +586,7 @@ static int c_expr(char term, struct c_ident *vars, char *token, int pop)
 			if ((c == ')' && stack[sp] >= 0) ||
 			    (c == ']' && stack[sp]) ||
 			    ((c == ';' || (term != ')' && c == term)) && sp))
-				c_errno = C_ERROR_COUNT;
+				c_errno = C_ERROR_EXPR;
 			if (c_errno || (!sp && c == term)) break;
 
 			left = 1;
@@ -597,10 +651,7 @@ static int c_expr(char term, struct c_ident *vars, char *token, int pop)
 					if (op2->class == C_CLASS_BINARY)
 						balance--;
 
-					last = op2->op;
-					if (c_pass)
-						c_code_ptr->op = last;
-					c_code_ptr++;
+					c_subexpr(&last, op2);
 
 					sp--;
 				}
@@ -621,7 +672,7 @@ static int c_expr(char term, struct c_ident *vars, char *token, int pop)
 
 	if (c_errno) return c_errno;
 
-	if (sp || balance) c_errno = C_ERROR_COUNT;
+	if (sp || balance) c_errno = C_ERROR_EXPR;
 
 	if (pop) {
 		if (last == c_op_assign) {
@@ -862,7 +913,8 @@ int c_compile(int (*ext_getchar)(void), void (*ext_rewind)(void),
 
 		if (c_errno || c_pass) break;
 
-		c_code_start = mem_alloc((size_t)c_code_ptr);
+/* 5 extra slots for temporary code during constant subexpression evaluation */
+		c_code_start = mem_alloc((size_t)(c_code_ptr + 5));
 		c_data_start = mem_alloc((size_t)c_data_ptr);
 		memset(c_data_start, 0, (size_t)c_data_ptr);
 	}
@@ -882,11 +934,14 @@ void *c_lookup(const char *name)
 
 void c_execute_fast(void *addr)
 {
+#ifdef PRINT_INSNS
+	static unsigned long long insns;
+#endif
+
 /*
- * Push a NULL pc to the stack, so that when the VM function invokes
- * c_f_op_return() it sets pc to NULL terminating the loop below.
+ * The top stack element may have been pre-filled by c_subexpr() and used by
+ * the temporary code snippets it generates.
  */
-	c_stack[0].pc = NULL;
 	c_sp = &c_stack[2];
 
 	c_pc = addr;
@@ -897,6 +952,7 @@ void c_execute_fast(void *addr)
 		while (c_ops[i].op != op && c_ops[i].prec >= 0)
 			i++;
 		fprintf(stderr, "op: %s\n", c_ops[i].name);
+		insns++;
 		op();
 #else
 		(c_pc++)->op();
@@ -911,6 +967,10 @@ void c_execute_fast(void *addr)
 		(c_pc++)->op();
 #endif
 	} while (c_pc);
+
+#ifdef PRINT_INSNS
+	fprintf(stderr, "insns: %llu\n", insns);
+#endif
 }
 
 #else
@@ -919,6 +979,8 @@ void c_execute_fast(void *addr)
 {
 	union c_insn *pc = addr;
 /*
+ * In addition to usage by c_subexpr() described above, in this implementation:
+ *
  * We cache the top of stack value in imm.  We initially set sp to &c_stack[2]
  * so that there's room for op_push_* to spill imm to stack even when there
  * wasn't actually a previous top of stack value to cache (since we're at the
@@ -1281,7 +1343,7 @@ op_dec_r:
 
 static void c_f_op_return(void)
 {
-	c_pc = (c_sp -= 2)->pc;
+	c_pc = NULL;
 }
 
 static void c_f_op_bz(void)
@@ -1611,18 +1673,18 @@ static void (*c_op_assign_pop)(void) = c_f_op_assign_pop;
 
 /* Must be in the same order as ops[] in c_execute_fast() */
 static struct c_op c_ops[] = {
-	{1, C_LEFT_TO_RIGHT, C_CLASS_BINARY, "[", c_op_index},
-	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "=", c_f_op_assign},
-	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "+=", c_op_add_a},
-	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "-=", c_op_sub_a},
-	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "*=", c_op_mul_a},
-	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "/=", c_op_div_a},
-	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "%=", c_op_mod_a},
-	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "|=", c_op_or_a},
-	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "^=", c_op_xor_a},
-	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "&=", c_op_and_a},
-	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "<<=", c_op_shl_a},
-	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, ">>=", c_op_shr_a},
+	{1, C_LEFT_TO_RIGHT, C_CLASS_BINARY, "[", c_op_index, C_LVALUE},
+	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "=", c_f_op_assign, C_LVALUE},
+	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "+=", c_op_add_a, C_LVALUE},
+	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "-=", c_op_sub_a, C_LVALUE},
+	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "*=", c_op_mul_a, C_LVALUE},
+	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "/=", c_op_div_a, C_LVALUE},
+	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "%=", c_op_mod_a, C_LVALUE},
+	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "|=", c_op_or_a, C_LVALUE},
+	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "^=", c_op_xor_a, C_LVALUE},
+	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "&=", c_op_and_a, C_LVALUE},
+	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, "<<=", c_op_shl_a, C_LVALUE},
+	{2, C_RIGHT_TO_LEFT, C_CLASS_BINARY, ">>=", c_op_shr_a, C_LVALUE},
 	{3, C_LEFT_TO_RIGHT, C_CLASS_BINARY, "||", c_op_or_i},
 	{4, C_LEFT_TO_RIGHT, C_CLASS_BINARY, "&&", c_op_and_b},
 	{5, C_LEFT_TO_RIGHT, C_CLASS_BINARY, "|", c_op_or_i},
@@ -1644,10 +1706,10 @@ static struct c_op c_ops[] = {
 	{13, C_RIGHT_TO_LEFT, C_CLASS_LEFT, "!", c_op_not_b},
 	{13, C_RIGHT_TO_LEFT, C_CLASS_LEFT, "~", c_op_not_i},
 	{13, C_RIGHT_TO_LEFT, C_CLASS_LEFT, "-", c_op_neg},
-	{13, C_RIGHT_TO_LEFT, C_CLASS_LEFT, "++", c_op_inc_l},
-	{13, C_RIGHT_TO_LEFT, C_CLASS_LEFT, "--", c_op_dec_l},
-	{14, C_LEFT_TO_RIGHT, C_CLASS_RIGHT, "++", c_op_inc_r},
-	{14, C_LEFT_TO_RIGHT, C_CLASS_RIGHT, "--", c_op_dec_r},
+	{13, C_RIGHT_TO_LEFT, C_CLASS_LEFT, "++", c_op_inc_l, C_LVALUE},
+	{13, C_RIGHT_TO_LEFT, C_CLASS_LEFT, "--", c_op_dec_l, C_LVALUE},
+	{14, C_LEFT_TO_RIGHT, C_CLASS_RIGHT, "++", c_op_inc_r, C_LVALUE},
+	{14, C_LEFT_TO_RIGHT, C_CLASS_RIGHT, "--", c_op_dec_r, C_LVALUE},
 #ifdef PRINT_INSNS
 	{0, 0, 0, "return", c_f_op_return},
 	{0, 0, 0, "bz", c_f_op_bz},

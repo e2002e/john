@@ -44,7 +44,7 @@ john_register_one(&fmt_stribog_512);
 #elif !JOHN_NO_SIMD && __SSE2__
 #define ALGORITHM_NAME          "GOST R 34.11-2012 128/128 SSE2 1x"
 #else
-#define ALGORITHM_NAME          "GOST R 34.11-2012 64/" ARCH_BITS_STR
+#define ALGORITHM_NAME          "GOST R 34.11-2012 " ARCH_BITS_STR "/" ARCH_BITS_STR
 #endif
 #define BENCHMARK_COMMENT       ""
 #define BENCHMARK_LENGTH        0x107

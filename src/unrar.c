@@ -1,7 +1,7 @@
 /*
  *  Extract RAR archives
  *
- * Modified for JtR, (c) magnum 2012. This code use a memory buffer instead
+ * Modified for JtR, (c) magnum 2012-2025. This code uses a buffer instead
  * of a file handle, and decrypts while reading. It does not store inflated
  * data, it just CRC's it. Support for older RAR versions was stripped.
  * Autoconf stuff was removed.
@@ -30,6 +30,8 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "common.h"
 
 #include "unrar.h"
 #include "unrarppm.h"
@@ -529,9 +531,11 @@ static int read_tables(const unsigned char **fd, unpack_data_t *unpack_data)
 				n = (rar_getbits(unpack_data) >> 9) + 11;
 				rar_addbits(unpack_data, 7);
 			}
+			if (i == 0) {
+				return 0;
+			}
 			while (n-- > 0 && i < table_size) {
-				if (i>0)
-					table[i] = table[i-1];
+				table[i] = table[i - 1];
 				i++;
 			}
 		} else {
@@ -903,9 +907,9 @@ void rar_unpack_init_data(int solid, unpack_data_t *unpack_data)
 		memset(unpack_data->old_dist, 0, sizeof(unpack_data->old_dist));
 		unpack_data->old_dist_ptr= 0;
 		memset(unpack_data->unp_old_table, 0, sizeof(unpack_data->unp_old_table));
+		memset(&unpack_data->LDD, 0, sizeof(unpack_data->LDD));
 		memset(&unpack_data->LD, 0, sizeof(unpack_data->LD));
 		memset(&unpack_data->DD, 0, sizeof(unpack_data->DD));
-		memset(&unpack_data->LDD, 0, sizeof(unpack_data->LDD));
 		memset(&unpack_data->RD, 0, sizeof(unpack_data->RD));
 		memset(&unpack_data->BD, 0, sizeof(unpack_data->BD));
 		unpack_data->last_dist= 0;
@@ -1052,6 +1056,7 @@ int rar_unpack29(const unsigned char *fd, int solid, unpack_data_t *unpack_data)
 		} else {
 			number = rar_decode_number(unpack_data, (struct Decode *)&unpack_data->LD);
 			//rar_dbgmsg("number = %d\n", number);
+			/* Sanity check added by magnum */
 			if (number < 0) {
 				retval = 0;
 				break;
@@ -1061,6 +1066,11 @@ int rar_unpack29(const unsigned char *fd, int solid, unpack_data_t *unpack_data)
 				continue;
 			}
 			if (number >= 271) {
+				/* Sanity check added by magnum (lbits is same size) */
+				if (number - 271 >= sizeof(ldecode)) {
+					retval = 0;
+					break;
+				}
 				length = ldecode[number-=271]+3;
 				if ((bits=lbits[number]) > 0) {
 					length += rar_getbits(unpack_data) >> (16-bits);
@@ -1068,7 +1078,8 @@ int rar_unpack29(const unsigned char *fd, int solid, unpack_data_t *unpack_data)
 				}
 				dist_number = rar_decode_number(unpack_data,
 							(struct Decode *)&unpack_data->DD);
-				if (dist_number < 0) {
+				/* Sanity checks added by magnum (dbits is same size) */
+				if (dist_number < 0 || dist_number >= sizeof(ddecode)) {
 					retval = 0;
 					break;
 				}
@@ -1147,7 +1158,8 @@ int rar_unpack29(const unsigned char *fd, int solid, unpack_data_t *unpack_data)
 
 				length_number = rar_decode_number(unpack_data,
 							(struct Decode *)&unpack_data->RD);
-				if (length_number < 0) {
+				/* Sanity checks added by magnum (lbits is same size) */
+				if (length_number < 0 || length_number >= sizeof(ldecode)) {
 					retval = 0;
 					break;
 				}
@@ -1161,6 +1173,11 @@ int rar_unpack29(const unsigned char *fd, int solid, unpack_data_t *unpack_data)
 				continue;
 			}
 			if (number < 272) {
+				/* Sanity check added by magnum (sdbits is same size) */
+				if (number - 263 >= sizeof(sddecode)) {
+					retval = 0;
+					break;
+				}
 				distance = sddecode[number-=263]+1;
 				if ((bits = sdbits[number]) > 0) {
 					distance += rar_getbits(unpack_data) >> (16-bits);
@@ -1176,6 +1193,12 @@ int rar_unpack29(const unsigned char *fd, int solid, unpack_data_t *unpack_data)
 Bailout:
 	if (retval) {
 		unp_write_buf(unpack_data);
+	}
+
+	/* Added by magnum */
+	if (retval && unpack_data->written_size != unpack_data->dest_unp_size) {
+		//rar_dbgmsg("Passed but only wrote %ld of %ld, degrading to FAIL\n", (long)unpack_data->written_size, (long)unpack_data->dest_unp_size);
+		retval = 0;
 	}
 
 	//rar_dbgmsg("Written size: %ld\n", (long)unpack_data->written_size);

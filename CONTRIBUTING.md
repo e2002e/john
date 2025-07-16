@@ -14,8 +14,8 @@ Please refer to `doc/README.coding-style` for information on the subject.
 
 For Jumbo, The maintainer recommends to format code using the following commands:
 ```
-$ indent -kr -i4 -ts4 -nlp -nbbo -ncs -l119 -lc119 -bad -il0
-$ astyle --style=kr -t4 -U -H -p -xC119 -c -k3 -z2
+$ indent -kr -i8 -ts8 -nlp -nbbo -ncs -l131 -lc131 -bad -il0
+$ astyle --style=kr -t8 -U -H -p -xC131 -c -k3 -z2
 ```
 
 ## License

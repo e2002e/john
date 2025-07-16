@@ -40,6 +40,7 @@ typedef unsigned WORD vtype;
 #endif
 
 #if defined(_NV) || __CPU__
+#define JOHN_DES_OPT_REG /* Optimize register pressure more than gate count */
 #include "opencl_sboxes.h"
 #else
 #include "opencl_sboxes-s.h"
@@ -79,7 +80,7 @@ typedef unsigned WORD vtype;
 	for (bit = bits; bit < k; bit++)		\
 		hash |= ((((uint)B[32 + bit]) >> x) & 1) << bit;
 
-inline void cmp_final(unsigned lm_vector *B,
+INLINE void cmp_final(unsigned lm_vector *B,
 		      unsigned int *binary,
 		      __global unsigned int *offset_table,
 		      __global unsigned int *hash_table,
@@ -115,7 +116,7 @@ inline void cmp_final(unsigned lm_vector *B,
 	}
 }
 
-inline void cmp( unsigned lm_vector *B,
+INLINE void cmp( unsigned lm_vector *B,
 		 __global unsigned int *offset_table,
 		 __global unsigned int *hash_table,
 		  __global unsigned int *bitmaps,

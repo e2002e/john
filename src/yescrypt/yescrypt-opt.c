@@ -1,6 +1,6 @@
 /*-
  * Copyright 2009 Colin Percival
- * Copyright 2012-2018 Alexander Peslyak
+ * Copyright 2012-2025 Alexander Peslyak
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -37,9 +37,12 @@
  * sub-block), and much less so for YESCRYPT_RW (which uses 2 rounds of Salsa20
  * per block except during pwxform S-box initialization).
  */
+#ifdef __GNUC__
 #if 0 /* JtR hack */
 #ifdef __XOP__
 #warning "Note: XOP is enabled.  That's great."
+#elif defined(__AVX512VL__)
+#warning "Note: AVX512VL is enabled.  That's great."
 #elif defined(__AVX__)
 #warning "Note: AVX is enabled, which is great for classic scrypt and YESCRYPT_WORM, but is sometimes slightly slower than plain SSE2 for YESCRYPT_RW"
 #elif defined(__SSE2__)
@@ -48,6 +51,7 @@
 #warning "SSE2 not enabled.  Expect poor performance."
 #else
 #warning "Note: building generic code for non-x86.  That's OK."
+#endif
 #endif
 #endif
 
@@ -74,6 +78,8 @@
 #include <emmintrin.h>
 #ifdef __XOP__
 #include <x86intrin.h>
+#elif defined(__AVX512VL__)
+#include <immintrin.h>
 #endif
 #elif defined(__SSE__)
 #include <xmmintrin.h>
@@ -167,6 +173,9 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 #ifdef __XOP__
 #define ARX(out, in1, in2, s) \
 	out = _mm_xor_si128(out, _mm_roti_epi32(_mm_add_epi32(in1, in2), s));
+#elif defined(__AVX512VL__)
+#define ARX(out, in1, in2, s) \
+	out = _mm_xor_si128(out, _mm_rol_epi32(_mm_add_epi32(in1, in2), s));
 #else
 #define ARX(out, in1, in2, s) { \
 	__m128i tmp = _mm_add_epi32(in1, in2); \

@@ -56,6 +56,7 @@
 
 #ifndef BENCH_BUILD
 #include "options.h"
+#include "status.h"
 #else
 /*
  * This code was copied from loader.c.  It has been stripped to bare bones
@@ -753,11 +754,11 @@ AGAIN:
 		}
 
 		/* FIXME: Kludge for thin dynamics, and OpenCL formats */
-		/* c3_fmt also added, since it is a somewhat dynamic   */
-		/* format and needs init called to change the name     */
+		/* Monero and crypt also added since they change their name */
 		if ((format->params.flags & FMT_DYNAMIC) ||
 		    strstr(format->params.label, "-opencl") ||
 		    strstr(format->params.label, "-ztex") ||
+		    !strcmp(format->params.label, "Monero") ||
 		    !strcmp(format->params.label, "crypt")) {
 #ifdef HAVE_OPENCL
 /*
@@ -767,7 +768,9 @@ AGAIN:
  * of platforms and devices, option parsing) is performed only once.
 */
 			if (strstr(format->params.label, "-opencl")) {
+				benchmark_running++;
 				opencl_load_environment();
+				benchmark_running--;
 
 				if (get_number_of_available_devices() == 0)
 					continue;
@@ -978,7 +981,7 @@ AGAIN:
 		if (msg_1) {
 			if ((result = benchmark_format(format, 1, &results_1, test_db))) {
 				puts(result);
-				failed++;
+				failed += !event_abort;
 				goto next;
 			}
 #if HAVE_OPENCL
@@ -1078,6 +1081,7 @@ next:
 		ldr_free_db(test_db, 1);
 		fmt_done(format);
 #ifndef BENCH_BUILD
+		emms();
 		if (options.flags & FLG_MASK_CHK) {
 			mask_done();
 			mask_destroy();
@@ -1089,6 +1093,12 @@ next:
 		initUnicode(UNICODE_UNICODE);
 #endif
 	} while ((format = format->next) && !event_abort);
+
+	{
+		const char *msg = hugepage_report();
+		if (msg)
+			puts(msg);
+	}
 
 #ifdef HAVE_OPENCL
 /*

@@ -34,7 +34,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#ifndef UNICODE_NO_OPTIONS
 #include "options.h"
+#endif
+
 #include "common.h"
 #include "jumbo.h"
 
@@ -229,8 +232,54 @@ extern void truncate_utf8(UTF8 *string, int len);
  * returns > 1 if data is valid and in fact contains UTF-8 sequences
  *
  * Actually in the last case, the return is the number of proper UTF-8
- * sequences, so it can be used as a quality measure. A low number might be
- * a false positive, a high number most probably isn't.
+ * sequences (plus one and not counting ASCII), so it can be used as a
+ * quality measure. A low number might be a false positive, a high
+ * number most probably isn't.
+ *
+ *
+ * Related info about UTF-8
+ *
+ * Valid UTF-8 sequences of bytes (1-4 bytes long):
+ *
+ * 00..7F
+ *
+ * C2..DF  80..BF
+ *
+ *   E0    A0..BF  80..BF
+ *   ED    80..9F  80..BF
+ *   Ex    80..BF  80..BF  where Ex does not include E0 and ED
+ *
+ *   F0    90..BF  80..BF  80..BF
+ *   F4    80..8F  80..BF  80..BF  notice 8F as upper bound in the second byte
+ * F1..F3  80..BF  80..BF  80..BF
+ *
+ * (X..Y denotes range from X to Y inclusive. X and Y are byte
+ * values written in hex.)
+ *
+ * Incomplete sequences are invalid.
+ *
+ * Range 80..BF is for trailing bytes (also called continuation
+ * bytes). It is not a valid starting byte. Adjacent values C0 and C1
+ * could be considered starting 2-bytes sequences but they are not
+ * valid in UTF-8.
+ *
+ * Each of E0,ED,F0,F4 starting bytes use a sub-range for trailing
+ * byte at the second position. E0/ED use different halves of the
+ * range for the second byte. F0/F4 allow the second byte in other
+ * proportions (48:16), not overlapping too.
+ *
+ * Valid UTF-8 text cannot include C0,C1,F5..FF bytes at any position.
+ * 80..BF are invalid at starting position.
+ * 00..7F,C2..F4 are invalid at any trailing position (actually they
+ * invalidate previous char while new starting byte itself could be a
+ * part of a valid char, but even then the whole string would be
+ * invalid for purposes of valid_utf8()).
+ *
+ * See also  https://en.wikipedia.org/wiki/UTF-8#Codepage_layout
+ *
+ * Sequences for unallocated, unassigned, reserved (including
+ * noncharacters) code points are considered valid. See here:
+ * https://en.wikipedia.org/wiki/Universal_Character_Set_characters#Noncharacters
  */
 extern int valid_utf8(const UTF8 *source);
 
@@ -318,10 +367,16 @@ extern UTF8 CP_isUpper[0x100];
 extern UTF8 CP_isSeparator[0x100];
 extern UTF8 CP_isDigit[0x100];
 
+#ifndef UNICODE_NO_OPTIONS
 /* These are encoding-aware but not LC_CTYPE */
 #define enc_islower(c) (options.internal_cp == ENC_RAW ? (c >= 'a' && c <= 'z') : CP_isLower[ARCH_INDEX(c)])
 #define enc_isupper(c) (options.internal_cp == ENC_RAW ? (c >= 'A' && c <= 'Z') : CP_isUpper[ARCH_INDEX(c)])
 #define enc_isdigit(c) (options.internal_cp == ENC_RAW ? (c >= '0' && c <= '9') : CP_isDigit[ARCH_INDEX(c)])
+#else
+#define enc_islower(c) (c >= 'a' && c <= 'z')
+#define enc_isupper(c) (c >= 'A' && c <= 'Z')
+#define enc_isdigit(c) (c >= '0' && c <= '9')
+#endif
 #define enc_tolower(c) (char)CP_down[ARCH_INDEX(c)]
 #define enc_toupper(c) (char)CP_up[ARCH_INDEX(c)]
 

@@ -41,11 +41,17 @@
 #include "../misc.h"
 #include "../memory.h"
 #include "../common.h"
+#include "../unicode.h"
 
 #include "../sha2.h"
 
 char *_fgetl_pad = NULL;
+#ifdef __sun
+/* Solaris fprintf() seems to get confused at around 16384 */
+#define _FGETL_PAD_SIZE 16000
+#else
 #define _FGETL_PAD_SIZE 19000
+#endif
 #define _ISHEX_CNT 260
 // if we miss a line(s), only show 1 error. This variable is used to adjust
 // the linecount since we don't have the expected line count (we missed
@@ -618,9 +624,9 @@ void _nontest_gen_fgetl_files(int generate) {
 
 	if (!generate) {
 		// if !generate, then delete
-		unlink("/tmp/jnk.txt");
-		unlink("/tmp/jnkd.txt");
-		unlink("/tmp/jnkfu.txt");
+		unlink("jnk.txt");
+		unlink("jnkd.txt");
+		unlink("jnkfu.txt");
 		return;
 	}
 	/* first, setup the fgetl 'pad' data (moved from main() function. */
@@ -630,9 +636,9 @@ void _nontest_gen_fgetl_files(int generate) {
 	_fgetl_pad[_FGETL_PAD_SIZE] = 0;
 
 	start_test(__FUNCTION__); inc_test(); inc_test(); inc_test();
-	fp = fopen("/tmp/jnk.txt", "wb");
-	fp1 = fopen("/tmp/jnkd.txt", "wb");
-	fp2 = fopen("/tmp/jnkfu.txt", "wb");
+	fp = fopen("jnk.txt", "wb");
+	fp1 = fopen("jnkd.txt", "wb");
+	fp2 = fopen("jnkfu.txt", "wb");
 	for (i = 0; i < 5999; ++i) {
 		char *is_null = "";
 		char null_or_space = ' ';
@@ -782,17 +788,17 @@ void test_fgetl() {
 	start_test(__FUNCTION__);
 
 	_fgetl_fudge = 0;
-	_tst_fget_l_ll("/tmp/jnk.txt", 1);
-	_tst_fget_l_ll("/tmp/jnkd.txt", 1);
-	_tst_fget_l_ll("/tmp/jnkfu.txt", 1);
+	_tst_fget_l_ll("jnk.txt", 1);
+	_tst_fget_l_ll("jnkd.txt", 1);
+	_tst_fget_l_ll("jnkfu.txt", 1);
 	end_test();
 }
 // char *fgetll(char *s, size_t size, FILE *stream)
 void test_fgetll() {
 	start_test(__FUNCTION__);
-	_tst_fget_l_ll("/tmp/jnk.txt", 0);
-	_tst_fget_l_ll("/tmp/jnkd.txt", 0);
-	_tst_fget_l_ll("/tmp/jnkfu.txt", 0);
+	_tst_fget_l_ll("jnk.txt", 0);
+	_tst_fget_l_ll("jnkd.txt", 0);
+	_tst_fget_l_ll("jnkfu.txt", 0);
 	end_test();
 }
 // void *strncpy_pad(void *dst, const void *src, size_t size, uint8_t pad)
@@ -2434,6 +2440,9 @@ void test_sha2_c() {
 	end_test();
 }
 
+/* Tests for unicode.c */
+#include "test_valid_utf8.c"
+
 int main() {
 	start_of_run = clock();
 
@@ -2487,6 +2496,9 @@ int main() {
 
 	set_unit_test_source("sha2.c");
 	test_sha2_c();
+
+	set_unit_test_source("unicode.c");
+	test_valid_utf8();
 
 	// perform dump listing of all processed functions.
 	dump_stats();

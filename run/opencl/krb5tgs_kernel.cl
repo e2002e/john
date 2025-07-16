@@ -40,7 +40,7 @@ typedef struct {
 
 #ifdef UTF_8
 
-inline
+INLINE
 void prepare_utf16(__global const uchar *source,
                    __global const uint *index,
                    nt_buffer_t *nt_buffer)
@@ -116,7 +116,7 @@ void prepare_utf16(__global const uchar *source,
 
 #else
 
-inline
+INLINE
 void prepare_utf16(__global const uchar *password,
                    __global const uint *index,
                    nt_buffer_t *nt_buffer)
@@ -239,19 +239,17 @@ __kernel void krb5tgs_init(__global const uchar *password,
 			W[i] = 0x36363636;
 		md5_single(uint, W, inner); /* md5_update(ipad, 64) */
 
+		for (i = 0; i < 16; i++)
+			W[i] ^= (0x36363636 ^ 0x5c5c5c5c);
+		md5_single(uint, W, K1); /* md5_update(opad, 64) */
+
 		W[0] = 0x02;    /* little endian "two", 4 bytes */
 		W[1] = 0x80;
 		for (i = 2; i < 14; i++)
 			W[i] = 0;
 		W[14] = (64 + 4) << 3;
 		W[15] = 0;
-		md5_block(uint, W, inner); /* md5_update(two, 4), md5_final() */
-
-		for (i = 0; i < 4; i++)
-			W[i] = 0x5c5c5c5c ^ K[i];
-		for (i = 4; i < 16; i++)
-			W[i] = 0x5c5c5c5c;
-		md5_single(uint, W, K1); /* md5_update(opad, 64) */
+		md5_block(uint, W, inner); /* md5_update(two, 4), md5_final(inner) */
 
 		for (i = 0; i < 4; i++)
 			W[i] = inner[i];
@@ -260,26 +258,25 @@ __kernel void krb5tgs_init(__global const uchar *password,
 			W[i] = 0;
 		W[14] = (64 + 16) << 3;
 		W[15] = 0;
-		md5_block(uint, W, K1); /* md5_update(inner, 16), md5_final() */
+		md5_block(uint, W, K1); /* md5_update(inner, 16), md5_final(outer) */
 
 		memcpy_macro(out[gid * NUM_INT_KEYS + mask_idx].saved_K1, K1, 16/4);
 	}
 }
 
+__kernel
 #ifdef RC4_USE_LOCAL
-__attribute__((work_group_size_hint(32,1,1)))
+__attribute__((work_group_size_hint(MAX_LOCAL_RC4, 1, 1)))
 #endif
-__kernel void krb5tgs_crypt(__constant krb5tgs_salt *salt,
-                            __global krb5tgs_state *state,
-                            volatile __global uint *crack_count,
-                            __global krb5tgs_out *out)
+void krb5tgs_crypt(__constant krb5tgs_salt *salt,
+                   __global krb5tgs_state *state,
+                   volatile __global uint *crack_count,
+                   __global krb5tgs_out *out)
 {
 #ifdef RC4_USE_LOCAL
-	__local RC4_CTX rc4_ctx[32];
-#define rc4_ctx	rc4_ctx[get_local_id(0)]
-#else
-	RC4_CTX rc4_ctx;
+	__local
 #endif
+		RC4_CTX rc4_ctx;
 
 	for (uint mask_idx = 0; mask_idx < NUM_INT_KEYS; mask_idx++) {
 		uint gidx = get_global_id(0) * NUM_INT_KEYS + mask_idx;
@@ -300,6 +297,10 @@ __kernel void krb5tgs_crypt(__constant krb5tgs_salt *salt,
 			W[i] = 0x36363636;
 		md5_single(uint, W, inner); /* md5_update(ipad, 64) */
 
+		for (i = 0; i < 16; i++)
+			W[i] ^= (0x36363636 ^ 0x5c5c5c5c);
+		md5_single(uint, W, K3); /* md5_update(opad, 64) */
+
 		for (i = 0; i < 4; i++)
 			W[i] = salt->edata1[i];
 		W[4] = 0x80;
@@ -307,13 +308,7 @@ __kernel void krb5tgs_crypt(__constant krb5tgs_salt *salt,
 			W[i] = 0;
 		W[14] = (64 + 16) << 3;
 		W[15] = 0;
-		md5_block(uint, W, inner); /* md5_update(edata1, 16), md5_final() */
-
-		for (i = 0; i < 4; i++)
-			W[i] = 0x5c5c5c5c ^ K1[i];
-		for (i = 4; i < 16; i++)
-			W[i] = 0x5c5c5c5c;
-		md5_single(uint, W, K3); /* md5_update(opad, 64) */
+		md5_block(uint, W, inner); /* md5_update(edata1, 16), md5_final(inner) */
 
 		for (i = 0; i < 4; i++)
 			W[i] = inner[i];
@@ -322,11 +317,10 @@ __kernel void krb5tgs_crypt(__constant krb5tgs_salt *salt,
 			W[i] = 0;
 		W[14] = (64 + 16) << 3;
 		W[15] = 0;
-		md5_block(uint, W, K3); /* md5_update(inner, 16), md5_final() */
-
-		rc4_set_key(&rc4_ctx, K3);
+		md5_block(uint, W, K3); /* md5_update(inner, 16), md5_final(outer) */
 
 		uint ddata[(DATA_LEN + 3) / 4];
+		rc4_128_set_key(&rc4_ctx, K3);
 		rc4(&rc4_ctx, salt->edata2, ddata, 20);
 
 		uchar *edata2 = (uchar*)ddata;

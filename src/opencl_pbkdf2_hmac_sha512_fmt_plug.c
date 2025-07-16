@@ -11,9 +11,9 @@
 #ifdef HAVE_OPENCL
 
 #if FMT_EXTERNS_H
-extern struct fmt_main fmt_opencl_pbkdf2_hmac_sha512;
+extern struct fmt_main fmt_opencl_pbkdf2_sha512;
 #elif FMT_REGISTERS_H
-john_register_one(&fmt_opencl_pbkdf2_hmac_sha512);
+john_register_one(&fmt_opencl_pbkdf2_sha512);
 #else
 
 #include <stdint.h>
@@ -32,6 +32,8 @@ john_register_one(&fmt_opencl_pbkdf2_hmac_sha512);
 #define FORMAT_LABEL             "PBKDF2-HMAC-SHA512-opencl"
 #define FORMAT_NAME              "GRUB2 / OS X 10.8+"
 #define ALGORITHM_NAME           "PBKDF2-SHA512 OpenCL"
+#define BENCHMARK_COMMENT        ""
+#define BENCHMARK_LENGTH         0x107
 #define BINARY_ALIGN             8
 #define PLAINTEXT_LENGTH         110
 #define SALT_SIZE                sizeof(salt_t)
@@ -360,7 +362,7 @@ static unsigned int iteration_count(void *salt)
 	return (unsigned int) my_salt->rounds;
 }
 
-struct fmt_main fmt_opencl_pbkdf2_hmac_sha512 = {
+struct fmt_main fmt_opencl_pbkdf2_sha512 = {
 	{
 		FORMAT_LABEL,
 		FORMAT_NAME,

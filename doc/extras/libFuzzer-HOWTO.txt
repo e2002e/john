@@ -20,7 +20,7 @@ Start fuzzing
 Here are the instructions for fuzzing keepass2john, which is a program to
 extract hashes from KeePass databases.
 
-* Download sample KeePass databases from http://openwall.info/wiki/john/sample-non-hashes.
+* Download sample KeePass databases from https://openwall.info/wiki/john/sample-non-hashes.
 
 * Extract the KeePass databases into "seed" folder. Make a new directory called "my".
 

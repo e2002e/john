@@ -141,7 +141,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		pbkdf2_sha1_sse((const unsigned char **)pin, lens, saved_salt->salt, SALT_LENGTH(saved_salt->v.mode),
 		                KEYING_ITERATIONS, pout, BLK_SZ, early_skip);
 		for (i = 0; i < MIN_KEYS_PER_CRYPT; ++i)
-			if (!memcmp(pwd_ver[i] + 2 * key_len - late_skip, saved_salt->passverify, 2))
+			if (!memcmp(pwd_ver[i] + (2 * key_len - late_skip), saved_salt->passverify, 2))
 				something_hit = hits[i] = 1;
 		if (something_hit) {
 			for (i = 0; i < MIN_KEYS_PER_CRYPT; ++i)
@@ -208,13 +208,6 @@ static int cmp_exact(char *source, int index)
 	return 1;
 }
 
-static unsigned int cost_hmac_len(void *salt)
-{
-	winzip_salt *s = *((winzip_salt**)salt);
-
-	return s->comp_len;
-}
-
 struct fmt_main fmt_zip = {
 	{
 		FORMAT_LABEL,
@@ -232,7 +225,7 @@ struct fmt_main fmt_zip = {
 		MAX_KEYS_PER_CRYPT,
 		FMT_CASE | FMT_8_BIT | FMT_OMP | FMT_DYNA_SALT | FMT_HUGE_INPUT,
 		{
-			"HMAC size"
+			"HMAC size [KiB]"
 		},
 		{ WINZIP_FORMAT_TAG },
 		winzip_common_tests
@@ -246,7 +239,7 @@ struct fmt_main fmt_zip = {
 		winzip_common_binary,
 		winzip_common_get_salt,
 		{
-			cost_hmac_len
+			winzip_common_cost_hmac_len
 		},
 		fmt_default_source,
 		{

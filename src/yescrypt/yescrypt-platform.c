@@ -25,7 +25,23 @@
 #include <linux/mman.h> /* for MAP_HUGE_2MB */
 #endif
 
-#define HUGEPAGE_THRESHOLD		(32 * 1024 * 1024)
+/*
+ * JtR hack: on old systems like RHEL6, do use huge pages if available even at
+ * the risk of failing on munmap() if the kernel is reconfigured to use a
+ * non-default huge page size.  In upstream yescrypt, this tradeoff is resolved
+ * the other way around because failure of a critical system library like
+ * libxcrypt is deemed unacceptable.
+ */
+#ifndef MAP_HUGE_2MB
+#define MAP_HUGE_2MB 0
+#endif
+
+/*
+ * JtR hack: this threshold is lowered.  Upstream yescrypt's was 32 MiB so that
+ * its RAM and ROM would typically use different TLBs, but we don't support the
+ * ROM in JtR yet.
+ */
+#define HUGEPAGE_THRESHOLD		(2 * 1024 * 1024)
 
 #ifdef __x86_64__
 #define HUGEPAGE_SIZE			(2 * 1024 * 1024)
@@ -33,7 +49,38 @@
 #undef HUGEPAGE_SIZE
 #endif
 
-static void *alloc_region(yescrypt_region_t *region, size_t size)
+/*
+ * JtR hack: record if we tried and succeeded or failed to use huge pages (in
+ * three separate variables in hope of atomicity of their writes).
+ */
+#if defined(MAP_HUGETLB) && defined(MAP_HUGE_2MB) && defined(HUGEPAGE_SIZE)
+static unsigned int hugepage_status[3];
+const char *hugepage_report(void)
+{
+	if (hugepage_status[0]) {
+		const char *msg[3] = {
+			"Successfully using huge pages",
+			"Failed to use huge pages (not pre-allocated via sysctl? that's fine)",
+			"Partially using huge pages (too few pre-allocated via sysctl? that's weird)"
+		};
+		unsigned int msg_id = hugepage_status[1] | (hugepage_status[2] << 1);
+		if (--msg_id < 3)
+			return msg[msg_id];
+	}
+	return NULL;
+}
+#else
+const char *hugepage_report(void)
+{
+	return NULL;
+}
+#endif
+
+/*
+ * JtR hack: these functions are made non-static for reuse with non-yescrypt.
+ */
+
+void *alloc_region(yescrypt_region_t *region, size_t size)
 {
 	size_t base_size = size;
 	uint8_t *base, *aligned;
@@ -41,6 +88,13 @@ static void *alloc_region(yescrypt_region_t *region, size_t size)
 	int flags =
 #ifdef MAP_NOCORE
 	    MAP_NOCORE |
+#endif
+/*
+ * JtR hack: MAP_POPULATE had been found to hurt in some uses of yescrypt,
+ * but is helpful for suppressor's random writes.
+ */
+#ifdef MAP_POPULATE
+	    MAP_POPULATE |
 #endif
 	    MAP_ANON | MAP_PRIVATE;
 #if defined(MAP_HUGETLB) && defined(MAP_HUGE_2MB) && defined(HUGEPAGE_SIZE)
@@ -58,13 +112,17 @@ static void *alloc_region(yescrypt_region_t *region, size_t size)
 	base = mmap(NULL, new_size, PROT_READ | PROT_WRITE, flags, -1, 0);
 	if (base != MAP_FAILED) {
 		base_size = new_size;
+		if (flags & MAP_HUGETLB)
+			hugepage_status[0] = hugepage_status[1] = 1;
 	} else if (flags & MAP_HUGETLB) {
 		flags &= ~(MAP_HUGETLB | MAP_HUGE_2MB);
 		base = mmap(NULL, size, PROT_READ | PROT_WRITE, flags, -1, 0);
+		if (base != MAP_FAILED)
+			hugepage_status[0] = hugepage_status[2] = 1;
 	}
 
 #else
-	base = mmap(NULL, size, PROT_READ | PROT_WRITE, flags, -1, 0);
+	base = (void *)mmap(NULL, size, PROT_READ | PROT_WRITE, flags, -1, 0);
 #endif
 	if (base == MAP_FAILED)
 		base = NULL;
@@ -89,13 +147,13 @@ static void *alloc_region(yescrypt_region_t *region, size_t size)
 	return aligned;
 }
 
-static inline void init_region(yescrypt_region_t *region)
+void init_region(yescrypt_region_t *region)
 {
 	region->base = region->aligned = NULL;
 	region->base_size = region->aligned_size = 0;
 }
 
-static int free_region(yescrypt_region_t *region)
+int free_region(yescrypt_region_t *region)
 {
 	if (region->base) {
 #ifdef MAP_ANON

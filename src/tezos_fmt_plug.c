@@ -174,7 +174,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 			// asymmetric stuff
 			ed25519_publickey(seed[i].sk, pk);
 
-			blake2b((uint8_t *)buffer, (unsigned char*)pk, NULL, 20, 32, 0); // pk is pkh (pubkey hash)
+			blake2b((uint8_t *)buffer, 20, (unsigned char*)pk, 32, NULL, 0); // pk is pkh (pubkey hash)
 
 			if (!memcmp(cur_salt->raw_address + 2, buffer, 20)) {
 				cracked[index+i] = 1;

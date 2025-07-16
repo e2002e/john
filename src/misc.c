@@ -206,6 +206,9 @@ char *fgetll(char *s, size_t size, FILE *stream)
 		void *new_cp;
 
 		new_cp = realloc(cp, len + increase);
+		/* Reference the relocated pointer to avoid GCC -Wuse-after-free */
+		if (new_cp)
+			cp = new_cp;
 
 		while (!new_cp) {
 			increase >>= 2;
@@ -217,6 +220,7 @@ char *fgetll(char *s, size_t size, FILE *stream)
 				cp = new_cp;
 		}
 
+		/* This became redundant after GCC warning workarounds above */
 		cp = new_cp;
 
 		/* We get an EOF if there is no trailing \n on the last line */
@@ -292,21 +296,8 @@ char *strnfcpy(char *dst, const char *src, int size)
 	return dst;
 }
 
-char *strnzcpy(char *dst, const char *src, int size)
-{
-	char *dptr;
-
-	if (size < 1)
-		return dst;
-	dptr = dst;
-
-	while (--size)
-		if (!(*dptr++ = *src++))
-			return dst;
-	*dptr = 0;
-
-	return dst;
-}
+/* C99-style inlining: Code in .h and extern declaration in .c */
+extern inline char *strnzcpy(char *dst, const char *src, int size);
 
 char *strnzcpylwr(char *dst, const char *src, int size)
 {
@@ -332,21 +323,7 @@ char *strnzcpylwr(char *dst, const char *src, int size)
 	return dst;
 }
 
-int strnzcpyn(char *dst, const char *src, int size)
-{
-	char *dptr;
-
-	if (size < 1)
-		return 0;
-	dptr = dst;
-
-	while (--size)
-		if (!(*dptr++ = *src++))
-			return (dptr-dst)-1;
-	*dptr = 0;
-
-	return (dptr-dst);
-}
+extern inline int strnzcpyn(char *dst, const char *src, int size);
 
 int strnzcpylwrn(char *dst, const char *src, int size)
 {

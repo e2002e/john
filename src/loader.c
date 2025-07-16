@@ -1,8 +1,8 @@
 /*
  * This file is part of John the Ripper password cracker,
  * Copyright (c) 1996-2000,2003,2005,2010-2012,2015 by Solar Designer
- *
- * ...with heavy changes in the jumbo patch, by magnum and various authors
+ * Copyright (c) 2012-2025, magnum
+ * Copyright (c) 2009-2018, JimF
  */
 #if AC_BUILT
 #include "autoconfig.h"
@@ -453,8 +453,8 @@ static MAYBE_INLINE int ldr_check_shells(struct list_main *list, char *shell)
 
 void ldr_set_encoding(struct fmt_main *format)
 {
-	if ((!options.target_enc || options.default_target_enc) &&
-	    !options.internal_cp) {
+	if (!options.loader.showformats &&
+	    (!options.target_enc || options.default_target_enc) && !options.internal_cp) {
 		if (!strncasecmp(format->params.label, "LM", 2) ||
 		    !strcasecmp(format->params.label, "netlm") ||
 		    !strcasecmp(format->params.label, "nethalflm")) {
@@ -996,6 +996,9 @@ static void ldr_load_pw_line(struct db_main *db, char *line)
 
 		if (!(db->options->flags & DB_WORDS) && dupe_checking) {
 			int collisions = 0;
+			int hash_collisions_max = format->params.binary_size ?
+				LDR_HASH_COLLISIONS_MAX : LDR_HASH_COLLISIONS_SALT_ONLY;
+
 			if ((current_pw = db->password_hash[pw_hash]))
 			do {
 				if (!fmt_bincmp(binary, current_pw->binary, format) &&
@@ -1004,7 +1007,7 @@ static void ldr_load_pw_line(struct db_main *db, char *line)
 					db->options->flags |= DB_NODUP;
 					break;
 				}
-				if (++collisions <= LDR_HASH_COLLISIONS_MAX)
+				if (++collisions <= hash_collisions_max)
 					continue;
 
 				if (john_main_process) {
@@ -2038,6 +2041,7 @@ static void ldr_fill_user_words(struct db_main *db)
 int ldr_fix_database(struct db_main *db)
 {
 	int total = db->password_count;
+	int cracked = 0;
 
 	ldr_init_salts(db);
 	MEM_FREE(db->password_hash);
@@ -2047,20 +2051,34 @@ int ldr_fix_database(struct db_main *db)
 		MEM_FREE(db->salt_hash);
 
 	if (!ldr_loading_testdb) {
+		FILE *out_file = options.loader.showuncracked ? stderr : stdout;
+
 		if (db->options->best_pps) {
 			ldr_sort_salts(db, 1);
 			ldr_filter_n_best_salts(db);
 		} else
 			ldr_filter_salts(db);
+		int filtered = total - db->password_count;
+		if (filtered && john_main_process) {
+			fprintf(out_file, "Removed %d password hash%s due to --salts\n",
+			       filtered, filtered != 1 ? "es" : "");
+		}
+
+		total = db->password_count;
 		ldr_filter_costs(db);
+		filtered = total - db->password_count;
+		if (filtered && john_main_process) {
+			fprintf(out_file, "Removed %d password hash%s due to --cost\n",
+			       filtered, filtered != 1 ? "es" : "");
+		}
+
 		total = db->password_count;
 		ldr_remove_marked(db);
+		cracked = total - db->password_count;
 		if (options.loader.showuncracked) {
-			int cracked = total - db->password_count;
-			if (john_main_process)
-				fprintf(stderr, "%s%d password hash%s cracked,"
-					" %d left\n", cracked ? "\n" : "", cracked,
-					cracked != 1 ? "es" : "", db->password_count);
+			fprintf(stderr, "%s%d password hash%s cracked, %d left\n",
+			        cracked ? "\n" : "", cracked,
+			        cracked != 1 ? "es" : "", db->password_count);
 			exit(0);
 		}
 	}
@@ -2076,7 +2094,7 @@ int ldr_fix_database(struct db_main *db)
 	if (!ldr_loading_testdb && options.seed_per_user)
 		ldr_fill_user_words(db);
 
-	return total;
+	return cracked;
 }
 
 static int ldr_cracked_hash(char *ciphertext)

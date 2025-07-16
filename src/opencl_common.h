@@ -139,6 +139,7 @@ extern cl_kernel crypt_kernel;
 extern size_t local_work_size;
 extern size_t global_work_size;
 extern size_t max_group_size;
+extern int lws_set_by_user;
 extern unsigned int ocl_v_width;
 extern unsigned long long global_speed;
 
@@ -166,6 +167,10 @@ void opencl_done(void);
  * affect the return value.
  */
 unsigned int opencl_get_vector_width(int sequential_id, int size);
+
+/* Returns true if the end user has specified a value for local_work_size
+ * using 'LWS=', '-lws', or the configuration file. */
+int get_lws_set_by_user(void);
 
 /* Returns number of selected devices */
 int get_number_of_devices_in_use(void);
@@ -335,13 +340,17 @@ void opencl_process_event(void);
 	static uint64_t wait_times[20], wait_min; \
 	static unsigned int wait_index; \
 	uint64_t wait_start = 0;
-#define WAIT_SLEEP \
+#define WAIT_SLEEP_MAX(wait_max_us) \
 	if (opencl_avoid_busy_wait[gpu_id]) { \
 		wait_start = john_get_nano(); \
 		uint64_t us = wait_min >> 10; /* 2.4% less than min */ \
+		if (us > wait_max_us) \
+			us = wait_max_us; \
 		if (wait_sleep && us >= 1000) \
 			usleep(us); \
 	}
+#define WAIT_SLEEP \
+	WAIT_SLEEP_MAX(10000000)
 #define WAIT_UPDATE \
 	if (opencl_avoid_busy_wait[gpu_id]) { \
 		uint64_t wait_new = john_get_nano() - wait_start; \

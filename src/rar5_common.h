@@ -5,6 +5,7 @@
 #define SIZE_PSWCHECK 8
 #define SIZE_PSWCHECK_CSUM 4
 #define SIZE_INITV 16
+#define CIPHERTEXT_LENGTH (TAG_LENGTH+2+1+32+1+2+1+2*SIZE_INITV+1+1+1+2*SIZE_PSWCHECK)
 
 #define FORMAT_TAG  		"$rar5$"
 #define TAG_LENGTH  		(sizeof(FORMAT_TAG)-1)
@@ -105,6 +106,25 @@ static int valid(char *ciphertext, struct fmt_main *self)
 err:
 	MEM_FREE(keeptr);
 	return 0;
+}
+
+/*
+ * We don't care about the IV, so canonicalize it in order to recognize
+ * otherwise same hashes coming from pot file.
+ */
+static char *split(char *ciphertext, int index, struct fmt_main *self)
+{
+	static char out[CIPHERTEXT_LENGTH + 1];
+	int i;
+
+	char *p = strnzcpy(out, ciphertext, sizeof(out));
+
+	for (i = 0; i < 5; i++)
+		p = strchr(p, '$') + 1;
+	for (i = 0; i < SIZE_INITV * 2; i++)
+		p[i] = '0';
+
+	return out;
 }
 
 static void *get_salt(char *ciphertext)

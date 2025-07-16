@@ -1,9 +1,12 @@
 /*
  * This file is part of John the Ripper password cracker,
- * Copyright (c) 2022 by Solar Designer
+ * Copyright (c) 2022,2025 by Solar Designer
  */
 
 #include <stdint.h>
+#ifdef __unix__
+#include <sys/mman.h>
+#endif
 
 #include "common.h"
 #include "memory.h"
@@ -18,6 +21,7 @@
 #define K 8
 
 static uint32_t N, Klock;
+static region_t memory;
 static uint64_t (*filter)[K];
 static unsigned int flags;
 
@@ -27,6 +31,9 @@ static int suppressor_process_key(char *key);
 
 void suppressor_init(unsigned int new_flags)
 {
+	if (flags & SUPPRESSOR_OFF)
+		return;
+
 	if (!flags) {
 		if (!(new_flags & SUPPRESSOR_UPDATE))
 			return;
@@ -52,12 +59,31 @@ void suppressor_init(unsigned int new_flags)
 			Klock = K / 2;
 
 		if (john_main_process) {
-			const char *msg = "Enabling duplicate candidate password suppressor";
-			log_event("%s", msg);
-			fprintf(stderr, "%s\n", msg);
+			const char *msg = "Enabling duplicate candidate password suppressor using ";
+			const char *suffix = options.fork ? " per process" : "";
+			log_event("%s%d MiB%s", msg, size, suffix);
+			fprintf(stderr, "%s%d MiB%s\n", msg, size, suffix);
 		}
 
-		filter = mem_calloc_align(N, sizeof(*filter), MEM_ALIGN_CACHE);
+		init_region(&memory);
+		filter = alloc_region(&memory, (size_t)size << 20);
+		if (!filter) {
+			const char *msg = "Failed to allocate memory for duplicate candidate password suppressor";
+			log_event("%s", msg);
+			if (NODES > 1)
+				fprintf(stderr, "%d: %s\n", NODE, msg);
+			else
+				fprintf(stderr, "%s\n", msg);
+			return;
+		}
+
+/*
+ * alloc_region() uses mmap() when MAP_ANON is available, so we only have to
+ * perform our own zeroization otherwise.
+ */
+#ifndef MAP_ANON
+		memset(filter, 0, (size_t)size << 20);
+#endif
 
 		status.suppressor_start = status.cands + 1;
 		status.suppressor_start_time = status_get_time();
@@ -66,8 +92,10 @@ void suppressor_init(unsigned int new_flags)
 	flags = new_flags;
 	status.suppressor_end = 0;
 	status.suppressor_end_time = 0;
-	old_process_key = crk_process_key;
-	crk_process_key = suppressor_process_key;
+	if (crk_process_key != suppressor_process_key) {
+		old_process_key = crk_process_key;
+		crk_process_key = suppressor_process_key;
+	}
 }
 
 static void suppressor_done(void)
@@ -79,7 +107,7 @@ static void suppressor_done(void)
 	else
 		fprintf(stderr, "%s\n", msg);
 
-	MEM_FREE(filter);
+	free_region(&memory);
 
 	flags = SUPPRESSOR_OFF;
 	status.suppressor_end = status.cands;
@@ -155,17 +183,20 @@ static int suppressor_process_key(char *key)
 		filter[i][j] = hash;
 	}
 
-	if (!(++status.suppressor_miss & 0x3ffffff) && !(flags & SUPPRESSOR_FORCE)) {
-		double ps_rate_threshold = 5000000.0 * status.suppressor_hit / status.suppressor_miss;
-		static unsigned long misses_at_non_update;
+	if (!(++status.suppressor_miss & 0x1ffffff) && !(flags & SUPPRESSOR_FORCE)) {
+		double ps_rate_threshold = 5000000.0 * status.suppressor_hit / (status.suppressor_hit + status.suppressor_miss);
+		static unsigned long long misses_at_non_update;
 		if (!(flags & SUPPRESSOR_UPDATE)) {
 			if (misses_at_non_update)
 				ps_rate_threshold /= 1 + ((status.suppressor_miss - misses_at_non_update) / ((double)N * K));
 			else
 				misses_at_non_update = status.suppressor_miss;
 		}
+		if (ps_rate_threshold > 1000000)
+			ps_rate_threshold = 1000000;
 		unsigned int time = status_get_time() - status.suppressor_start_time;
-		if (time > 9 && status.suppressor_miss / time > ps_rate_threshold)
+		if (time > 9 && (status.suppressor_miss / time > ps_rate_threshold ||
+		    (status.suppressor_hit + status.suppressor_miss) / time > 2000000))
 			suppressor_done();
 	}
 

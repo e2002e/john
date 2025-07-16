@@ -27,7 +27,7 @@
 #include <openssl/bn.h>
 #include <openssl/dsa.h>
 #include <openssl/des.h>
-#include <openssl/aes.h> /* AES_cfb128_encrypt() */
+#include "aes.h"
 
 #include "twofish.h"
 #include "idea-JtR.h"
@@ -859,11 +859,9 @@ void *gpg_common_get_salt(char *ciphertext)
 	char *keeptr = ctcopy;
 	int i;
 	char *p;
-	struct gpg_common_custom_salt cs, *psalt;
-	static unsigned char *ptr;
+	struct gpg_common_custom_salt cs;
 
 	memset(&cs, 0, sizeof(cs));
-	if (!ptr) ptr = mem_alloc_tiny(sizeof(struct gpg_common_custom_salt*),sizeof(struct gpg_common_custom_salt*));
 	ctcopy += FORMAT_TAG_LEN;	/* skip over "$gpg$" marker and first '*' */
 	p = strtokm(ctcopy, "*");
 	cs.pk_algorithm = atoi(p);
@@ -875,6 +873,7 @@ void *gpg_common_get_salt(char *ciphertext)
 
 	/* Ok, now we 'know' the size of the dyna salt, so we can allocate */
 	/* note the +64 is due to certain algo's reading dirty data, up to 64 bytes past end */
+	static struct gpg_common_custom_salt *psalt;
 	psalt = mem_calloc(sizeof(struct gpg_common_custom_salt) + cs.datalen + 64, 1);
 	psalt->pk_algorithm = cs.pk_algorithm;
 	psalt->symmetric_mode = cs.symmetric_mode;
@@ -1047,24 +1046,13 @@ void *gpg_common_get_salt(char *ciphertext)
 	psalt->dsalt.salt_cmp_offset = SALT_CMP_OFF(struct gpg_common_custom_salt, datalen);
 	psalt->dsalt.salt_cmp_size = SALT_CMP_SIZE(struct gpg_common_custom_salt, datalen, data, psalt->datalen);
 
-	memcpy(ptr, &psalt, sizeof(struct gpg_common_custom_salt*));
-	return (void*)ptr;
+	return &psalt;
 }
-static int give_multi_precision_integer(unsigned char *buf, int len, int *key_bytes, unsigned char *out)
+
+static unsigned int length_of_multi_precision_integer(const unsigned char *buf)
 {
-	int bytes;
-	int i;
-	int bits = buf[len] * 256;
-	len++;
-	bits += buf[len];
-	len++;
-	bytes = (bits + 7) / 8;
-	*key_bytes = bytes;
-
-	for (i = 0; i < bytes; i++)
-		out[i] = buf[len++];
-
-	return bytes + 2;
+	unsigned int bits = ((unsigned int)buf[0] << 8) | buf[1];
+	return (bits + 7) / 8;
 }
 
 // borrowed from "passe-partout" project
@@ -1209,6 +1197,7 @@ int gpg_common_check(unsigned char *keydata, int ks)
 	unsigned char ivec[32];
 	unsigned char *out;
 	int tmp = 0;
+	size_t tmpz = 0;
 	uint32_t num_bits = 0;
 	int checksumOk;
 	int i;
@@ -1216,10 +1205,7 @@ int gpg_common_check(unsigned char *keydata, int ks)
 	SHA_CTX ctx;
 	int block_size = 8;
 
-	// out is used for more than just data. So if datalen is 'small', but
-	// other things (like mpz integer creation) are needed, we know that
-	// our sizes will not overflow.
-	out = mem_alloc((gpg_common_cur_salt->datalen) + 0x10000);
+	out = mem_alloc(gpg_common_cur_salt->datalen);
 	// Quick Hack
 	if (!gpg_common_cur_salt->symmetric_mode)
 		memcpy(ivec, gpg_common_cur_salt->iv, gpg_common_blockSize(gpg_common_cur_salt->cipher_algorithm));
@@ -1250,7 +1236,7 @@ int gpg_common_check(unsigned char *keydata, int ks)
 		case CIPHER_AES256: {
 					    AES_KEY ck;
 					    AES_set_encrypt_key(keydata, ks * 8, &ck);
-					    AES_cfb128_encrypt(gpg_common_cur_salt->data, out, AES_BLOCK_SIZE, &ck, ivec, &tmp, AES_DECRYPT);
+					    AES_cfb128_encrypt(gpg_common_cur_salt->data, out, AES_BLOCK_SIZE, &ck, ivec, &tmpz, AES_DECRYPT);
 				    }
 				    break;
 		case CIPHER_3DES: {
@@ -1289,10 +1275,8 @@ int gpg_common_check(unsigned char *keydata, int ks)
 
 	if (!gpg_common_cur_salt->symmetric_mode) {
 		num_bits = ((out[0] << 8) | out[1]);
-		if (num_bits < MIN_BN_BITS || num_bits > gpg_common_cur_salt->bits) {
-			MEM_FREE(out);
-			return 0;
-		}
+		if (num_bits < MIN_BN_BITS || num_bits > gpg_common_cur_salt->bits)
+			goto bad;
 	}
 	// Decrypt all data
 	if (!gpg_common_cur_salt->symmetric_mode)
@@ -1341,12 +1325,12 @@ int gpg_common_check(unsigned char *keydata, int ks)
 					    AES_set_encrypt_key(keydata, ks * 8, &ck);
 					    block_size = 16;
 					    if (gpg_common_cur_salt->symmetric_mode && gpg_common_cur_salt->usage == 9) {
-						    AES_cfb128_encrypt(gpg_common_cur_salt->data, out, block_size + 2, &ck, ivec, &tmp, AES_DECRYPT);
-						    tmp = 0;
+						    AES_cfb128_encrypt(gpg_common_cur_salt->data, out, block_size + 2, &ck, ivec, &tmpz, AES_DECRYPT);
+						    tmpz = 0;
 						    memcpy(ivec, gpg_common_cur_salt->data + 2, block_size);
-						    AES_cfb128_encrypt(gpg_common_cur_salt->data + block_size + 2, out + block_size + 2, gpg_common_cur_salt->datalen - block_size - 2, &ck, ivec, &tmp, AES_DECRYPT);
+						    AES_cfb128_encrypt(gpg_common_cur_salt->data + block_size + 2, out + block_size + 2, gpg_common_cur_salt->datalen - block_size - 2, &ck, ivec, &tmpz, AES_DECRYPT);
 					    } else {
-						    AES_cfb128_encrypt(gpg_common_cur_salt->data, out, gpg_common_cur_salt->datalen, &ck, ivec, &tmp, AES_DECRYPT);
+						    AES_cfb128_encrypt(gpg_common_cur_salt->data, out, gpg_common_cur_salt->datalen, &ck, ivec, &tmpz, AES_DECRYPT);
 					    }
 				    }
 				    break;
@@ -1403,12 +1387,9 @@ int gpg_common_check(unsigned char *keydata, int ks)
 		SHA1_Init(&ctx);
 		SHA1_Update(&ctx, out, gpg_common_cur_salt->datalen - SHA_DIGEST_LENGTH);
 		SHA1_Final(checksum, &ctx);
-		if (memcmp(checksum, out + gpg_common_cur_salt->datalen - SHA_DIGEST_LENGTH, SHA_DIGEST_LENGTH) == 0) {
-			MEM_FREE(out);
-			return 1;  /* we have a 20 byte verifier ;) */
-		}
-		MEM_FREE(out);
-		return 0;
+		if (memcmp(checksum, out + gpg_common_cur_salt->datalen - SHA_DIGEST_LENGTH, SHA_DIGEST_LENGTH) == 0)
+			goto good; /* we have a 20 byte verifier ;) */
+		goto bad;
 	} else if (gpg_common_cur_salt->symmetric_mode && gpg_common_cur_salt->usage == 9) {
 		int ctb, new_ctb, pkttype, c, partial, lenbytes = 0;
 		unsigned long pktlen;
@@ -1522,11 +1503,7 @@ int gpg_common_check(unsigned char *keydata, int ks)
 			}
 		}
 
-		MEM_FREE(out);
-		return 1;
-bad:
-		MEM_FREE(out);
-		return 0;
+		goto good;
 	}
 
 	// Verify
@@ -1536,12 +1513,9 @@ bad:
 				  SHA1_Init(&ctx);
 				  SHA1_Update(&ctx, out, gpg_common_cur_salt->datalen - SHA_DIGEST_LENGTH);
 				  SHA1_Final(checksum, &ctx);
-				  if (memcmp(checksum, out + gpg_common_cur_salt->datalen - SHA_DIGEST_LENGTH, SHA_DIGEST_LENGTH) == 0) {
-					  MEM_FREE(out);
-					  return 1;  /* we have a 20 byte verifier ;) */
-				  }
-				  MEM_FREE(out);
-				  return 0;
+				  if (memcmp(checksum, out + gpg_common_cur_salt->datalen - SHA_DIGEST_LENGTH, SHA_DIGEST_LENGTH) == 0)
+					goto good; /* we have a 20 byte verifier ;) */
+				  goto bad;
 			  } break;
 		case 0:
 		case 255: {
@@ -1565,18 +1539,15 @@ bad:
 		BIGNUM *b = NULL;
 		uint32_t blen = (num_bits + 7) / 8;
 		int ret;
-		if (gpg_common_cur_salt->datalen == 24 && blen != 20) { /* verifier 1 */
-			MEM_FREE(out);
-			return 0;
-		}
+		if (gpg_common_cur_salt->datalen == 24 && blen != 20) /* verifier 1 */
+			goto bad;
 		if (blen < gpg_common_cur_salt->datalen && ((b = BN_bin2bn(out + 2, blen, NULL)) != NULL)) {
 			char *str = BN_bn2hex(b);
 
 			if (strlen(str) != blen * 2) { /* verifier 2 */
 				OPENSSL_free(str);
 				BN_free(b);
-				MEM_FREE(out);
-				return 0;
+				goto bad;
 			}
 			OPENSSL_free(str);
 
@@ -1614,10 +1585,8 @@ bad:
 				// puts(BN_bn2hex(dsa.pub_key));
 				ret = check_dsa_secret_key(&dsa); /* verifier 3 */
 #endif
-				if (ret != 0) {
-					MEM_FREE(out);
-					return 0;
-				}
+				if (ret != 0)
+					goto bad;
 			}
 			if (gpg_common_cur_salt->pk_algorithm == PKA_ELGAMAL || gpg_common_cur_salt->pk_algorithm == PKA_EG) { /* ElGamal check */
 				ElGamal_secret_key elg;
@@ -1631,36 +1600,46 @@ bad:
 				elg.y = BN_bin2bn(gpg_common_cur_salt->y, gpg_common_cur_salt->yl, NULL);
 				// puts(BN_bn2hex(elg.y));
 				ret = check_elg_secret_key(&elg); /* verifier 3 */
-				if (ret != 0) {
-					MEM_FREE(out);
-					return 0;
-				}
+				if (ret != 0)
+					goto bad;
 			}
 			if (gpg_common_cur_salt->pk_algorithm == PKA_RSA_ENCSIGN) { /* RSA check */
 				RSA_secret_key rsa;
 				// http://www.ietf.org/rfc/rfc4880.txt
-				int length = 0;
-
-				length += give_multi_precision_integer(out, length, &gpg_common_cur_salt->dl, gpg_common_cur_salt->d);
-				length += give_multi_precision_integer(out, length, &gpg_common_cur_salt->pl, gpg_common_cur_salt->p);
-				length += give_multi_precision_integer(out, length, &gpg_common_cur_salt->ql, gpg_common_cur_salt->q);
-
-				rsa.n = BN_bin2bn(gpg_common_cur_salt->n, gpg_common_cur_salt->nl, NULL);
-				rsa.p = BN_bin2bn(gpg_common_cur_salt->p, gpg_common_cur_salt->pl, NULL);
-				rsa.q = BN_bin2bn(gpg_common_cur_salt->q, gpg_common_cur_salt->ql, NULL);
+				unsigned char *p, *q;
+				unsigned int length, pl, ql;
 
 				// b is not used.  So we must free it, or we have a leak.
 				BN_free(b);
+
+				length = 2 + length_of_multi_precision_integer(out);
+				if (length + 4 > gpg_common_cur_salt->datalen)
+					goto bad;
+				pl = length_of_multi_precision_integer(&out[length]);
+				length += 2 + pl;
+				if (length + 2 > gpg_common_cur_salt->datalen)
+					goto bad;
+				p = &out[length - pl];
+				ql = length_of_multi_precision_integer(&out[length]);
+				length += 2 + ql;
+				if (length > gpg_common_cur_salt->datalen)
+					goto bad;
+				q = &out[length - ql];
+
+				rsa.n = BN_bin2bn(gpg_common_cur_salt->n, gpg_common_cur_salt->nl, NULL);
+				rsa.p = BN_bin2bn(p, pl, NULL);
+				rsa.q = BN_bin2bn(q, ql, NULL);
+
 				ret = check_rsa_secret_key(&rsa);
-				if (ret != 0) {
-					MEM_FREE(out);
-					return 0;
-				}
+				if (ret != 0)
+					goto bad;
 			}
+good:
 			MEM_FREE(out);
 			return 1;
 		}
 	}
+bad:
 	MEM_FREE(out);
 	return 0;
 }

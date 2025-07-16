@@ -1,27 +1,20 @@
 /*
  * This source file is UTF-8 encoded, for auto-generated warnings
  *
- * This software was written by Jim Fougeron jfoug AT cox dot net
- * in 2011. No copyright is claimed, and the software is hereby
- * placed in the public domain. In case this attempt to disclaim
- * copyright and place the software in the public domain is deemed
- * null and void, then the software is Copyright (c) 2011 Jim Fougeron
- * and it is hereby released to the general public under the following
- * terms:
+ * This software is Copyright (c) 2011, Jim Fougeron jfoug AT cox . net and
+ * Copyright (c) 2011-2024 magnum, and it is hereby released to the general
+ * public under the following terms:  Redistribution and use in source
+ * and binary forms, with or without modification, are permitted.
  *
- * This software may be modified, redistributed, and used for any
- * purpose, in source and binary forms, with or without modification.
+ * Character encoding additional information.  Casing and other info.
  *
- * character encoding additional information.  Casing and other info.
- *
- * This data was generated using ./run/cmpt_cp.pl (compute code page)
- * cmpt_cp.pl 1.2 has to be run in ./src, to load the proper file
- * ./src/unused/UnicodeData.txt used to determine char classes.
- * cmpt_cp.pl builds the proper array and #defines, and then all that
+ * This data was generated using src/Unicode/cmpt_cp.pl (compute code page)
+ * which loads src/Unicode/UnicodeData.txt to determine char classes.
+ * The script builds the proper array and #defines, and then all that
  * is needed is to put the output of that script into this file, and
  * then hook that code into rules.c and unicode.c (and options.c/.h to
  * add the new code page to command line).  See the wiki tutorial page
- * at http://openwall.info/wiki/john/tutorials/add-codepage for help.
+ * at https://openwall.info/wiki/john/tutorials/add-codepage for help.
  */
 
 #ifndef __ENCODING_DATA_H__
@@ -42,7 +35,7 @@
 // combinations that are invalid but can't be matched this easily.
 #define CHARS_INVALID_UTF8 "\xc0\xc1\xf5\xf6\xf7\xf8\xf9\xfa\xfb\xfc\xfd\xfe\xff"
 
-// for i in iso-8859-1 iso-8859-2 iso-8859-7 iso-8859-15 koi8-r cp437 cp737 cp850 cp852 cp858 cp866 cp1250 cp1251 cp1252 cp1253 ; do Unicode/cmpt_cp.pl -v $i; done >> encoding_data.h
+// for i in iso-8859-1 iso-8859-2 iso-8859-7 iso-8859-15 koi8-r cp437 cp720 cp737 cp850 cp852 cp858 cp866 cp868 cp1250 cp1251 cp1252 cp1253 cp1254 cp1255 cp1256 ; do ./cmpt_cp.pl -v $i; done >> encoding_data.h
 
 // ----8<------8<---- AUTO-GENERATED DATA BELOW THIS POINT ----8<------8<----
 
@@ -70,8 +63,8 @@ EXTATIC const UTF16 ISO_8859_1_to_unicode_high128[]
 #define CHARS_LOWER_ISO_8859_1 \
 	"\xE0\xE1\xE2\xE3\xE4\xE5\xE6\xE7\xE8\xE9\xEA\xEB\xEC\xED\xEE\xEF\xF0\xF1\xF2\xF3\xF4\xF5\xF6\xF8\xF9\xFA\xFB\xFC\xFD\xFE"
 
-// ªµºßÿ
-#define CHARS_LOW_ONLY_ISO_8859_1 "\xAA\xB5\xBA\xDF\xFF"
+// µßÿ
+#define CHARS_LOW_ONLY_ISO_8859_1 "\xB5\xDF\xFF"
 
 // ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ
 #define CHARS_UPPER_ISO_8859_1 \
@@ -80,17 +73,17 @@ EXTATIC const UTF16 ISO_8859_1_to_unicode_high128[]
 //
 #define CHARS_UP_ONLY_ISO_8859_1
 
-//
-#define CHARS_NOCASE_ISO_8859_1
+// ªº
+#define CHARS_NOCASE_ISO_8859_1 "\xAA\xBA"
 
 // ²³¹¼½¾
 #define CHARS_DIGITS_ISO_8859_1 "\xB2\xB3\xB9\xBC\xBD\xBE"
 
-// ¡«·»¿
-#define CHARS_PUNCTUATION_ISO_8859_1 "\xA1\xAB\xB7\xBB\xBF"
+// ¡§«¶·»¿
+#define CHARS_PUNCTUATION_ISO_8859_1 "\xA1\xA7\xAB\xB6\xB7\xBB\xBF"
 
-// ¢£¤¥¦§¨©¬­®¯°±´¶¸×÷
-#define CHARS_SPECIALS_ISO_8859_1 "\xA2\xA3\xA4\xA5\xA6\xA7\xA8\xA9\xAC\xAD\xAE\xAF\xB0\xB1\xB4\xB6\xB8\xD7\xF7"
+// ¢£¤¥¦¨©¬­®¯°±´¸×÷
+#define CHARS_SPECIALS_ISO_8859_1 "\xA2\xA3\xA4\xA5\xA6\xA8\xA9\xAC\xAD\xAE\xAF\xB0\xB1\xB4\xB8\xD7\xF7"
 
 // ªµºÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ
 #define CHARS_ALPHA_ISO_8859_1 \
@@ -150,11 +143,11 @@ EXTATIC const UTF16 ISO_8859_2_to_unicode_high128[]
 //
 #define CHARS_DIGITS_ISO_8859_2 ""
 
-//
-#define CHARS_PUNCTUATION_ISO_8859_2
+// §
+#define CHARS_PUNCTUATION_ISO_8859_2 "\xA7"
 
-// ˘¤§¨­°˛´ˇ¸˝×÷˙
-#define CHARS_SPECIALS_ISO_8859_2 "\xA2\xA4\xA7\xA8\xAD\xB0\xB2\xB4\xB7\xB8\xBD\xD7\xF7\xFF"
+// ˘¤¨­°˛´ˇ¸˝×÷˙
+#define CHARS_SPECIALS_ISO_8859_2 "\xA2\xA4\xA8\xAD\xB0\xB2\xB4\xB7\xB8\xBD\xD7\xF7\xFF"
 
 // ĄŁĽŚŠŞŤŹŽŻąłľśšşťźžżŔÁÂĂÄĹĆÇČÉĘËĚÍÎĎĐŃŇÓÔŐÖŘŮÚŰÜÝŢßŕáâăäĺćçčéęëěíîďđńňóôőöřůúűüýţ
 #define CHARS_ALPHA_ISO_8859_2 \
@@ -216,11 +209,11 @@ EXTATIC const UTF16 ISO_8859_7_to_unicode_high128[]
 // ²³½
 #define CHARS_DIGITS_ISO_8859_7 "\xB2\xB3\xBD"
 
-// ‘’«―·»
-#define CHARS_PUNCTUATION_ISO_8859_7 "\xA1\xA2\xAB\xAF\xB7\xBB"
+// ‘’§«―·»
+#define CHARS_PUNCTUATION_ISO_8859_7 "\xA1\xA2\xA7\xAB\xAF\xB7\xBB"
 
-// £€₯¦§¨©ͺ¬­°±΄΅
-#define CHARS_SPECIALS_ISO_8859_7 "\xA3\xA4\xA5\xA6\xA7\xA8\xA9\xAA\xAC\xAD\xB0\xB1\xB4\xB5"
+// £€₯¦¨©ͺ¬­°±΄΅
+#define CHARS_SPECIALS_ISO_8859_7 "\xA3\xA4\xA5\xA6\xA8\xA9\xAA\xAC\xAD\xB0\xB1\xB4\xB5"
 
 // ΆΈΉΊΌΎΏΐΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩΪΫάέήίΰαβγδεζηθικλμνξοπρςστυφχψωϊϋόύώ
 #define CHARS_ALPHA_ISO_8859_7 \
@@ -265,8 +258,8 @@ EXTATIC const UTF16 ISO_8859_15_to_unicode_high128[]
 #define CHARS_LOWER_ISO_8859_15 \
 	"\xA8\xB8\xBD\xE0\xE1\xE2\xE3\xE4\xE5\xE6\xE7\xE8\xE9\xEA\xEB\xEC\xED\xEE\xEF\xF0\xF1\xF2\xF3\xF4\xF5\xF6\xF8\xF9\xFA\xFB\xFC\xFD\xFE\xFF"
 
-// ªµºß
-#define CHARS_LOW_ONLY_ISO_8859_15 "\xAA\xB5\xBA\xDF"
+// µß
+#define CHARS_LOW_ONLY_ISO_8859_15 "\xB5\xDF"
 
 // ŠŽŒÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞŸ
 #define CHARS_UPPER_ISO_8859_15 \
@@ -275,17 +268,17 @@ EXTATIC const UTF16 ISO_8859_15_to_unicode_high128[]
 //
 #define CHARS_UP_ONLY_ISO_8859_15
 
-//
-#define CHARS_NOCASE_ISO_8859_15
+// ªº
+#define CHARS_NOCASE_ISO_8859_15 "\xAA\xBA"
 
 // ²³¹
 #define CHARS_DIGITS_ISO_8859_15 "\xB2\xB3\xB9"
 
-// ¡«·»¿
-#define CHARS_PUNCTUATION_ISO_8859_15 "\xA1\xAB\xB7\xBB\xBF"
+// ¡§«¶·»¿
+#define CHARS_PUNCTUATION_ISO_8859_15 "\xA1\xA7\xAB\xB6\xB7\xBB\xBF"
 
-// ¢£€¥§©¬­®¯°±¶×÷
-#define CHARS_SPECIALS_ISO_8859_15 "\xA2\xA3\xA4\xA5\xA7\xA9\xAC\xAD\xAE\xAF\xB0\xB1\xB6\xD7\xF7"
+// ¢£€¥©¬­®¯°±×÷
+#define CHARS_SPECIALS_ISO_8859_15 "\xA2\xA3\xA4\xA5\xA9\xAC\xAD\xAE\xAF\xB0\xB1\xD7\xF7"
 
 // ŠšªŽµžºŒœŸÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ
 #define CHARS_ALPHA_ISO_8859_15 \
@@ -392,9 +385,9 @@ EXTATIC const UTF16 CP437_to_unicode_high128[]
 // üéäåçæöñσφ
 #define CHARS_LOWER_CP437 "\x81\x82\x84\x86\x87\x91\x94\xA4\xE5\xED"
 
-// âàêëèïîìôòûùÿƒáíóúªºαßπµτδε
+// âàêëèïîìôòûùÿƒáíóúαßπµτδε
 #define CHARS_LOW_ONLY_CP437 \
-	"\x83\x85\x88\x89\x8A\x8B\x8C\x8D\x93\x95\x96\x97\x98\x9F\xA0\xA1\xA2\xA3\xA6\xA7\xE0\xE1\xE3\xE6\xE7\xEB\xEE"
+	"\x83\x85\x88\x89\x8A\x8B\x8C\x8D\x93\x95\x96\x97\x98\x9F\xA0\xA1\xA2\xA3\xE0\xE1\xE3\xE6\xE7\xEB\xEE"
 
 // ÜÉÄÅÇÆÖÑΣΦ
 #define CHARS_UPPER_CP437 "\x9A\x90\x8E\x8F\x80\x92\x99\xA5\xE4\xE8"
@@ -402,8 +395,8 @@ EXTATIC const UTF16 CP437_to_unicode_high128[]
 //
 #define CHARS_UP_ONLY_CP437
 
-//
-#define CHARS_NOCASE_CP437
+// ªº
+#define CHARS_NOCASE_CP437 "\xA6\xA7"
 
 // ½¼²
 #define CHARS_DIGITS_CP437 "\xAB\xAC\xFD"
@@ -583,8 +576,8 @@ EXTATIC const UTF16 CP850_to_unicode_high128[]
 #define CHARS_LOWER_CP850 \
 	"\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8A\x8B\x8C\x8D\x91\x93\x94\x95\x96\x97\x9B\xA0\xA1\xA2\xA3\xA4\xC6\xD0\xE4\xE7\xEC"
 
-// ÿƒªºıßµ
-#define CHARS_LOW_ONLY_CP850 "\x98\x9F\xA6\xA7\xD5\xE1\xE6"
+// ÿƒıßµ
+#define CHARS_LOW_ONLY_CP850 "\x98\x9F\xD5\xE1\xE6"
 
 // ÜÉÂÄÀÅÇÊËÈÏÎÌÆÔÖÒÛÙØÁÍÓÚÑÃÐÕÞÝ
 #define CHARS_UPPER_CP850 \
@@ -593,18 +586,18 @@ EXTATIC const UTF16 CP850_to_unicode_high128[]
 //
 #define CHARS_UP_ONLY_CP850
 
-//
-#define CHARS_NOCASE_CP850
+// ªº
+#define CHARS_NOCASE_CP850 "\xA6\xA7"
 
 // ½¼¾¹³²
 #define CHARS_DIGITS_CP850 "\xAB\xAC\xF3\xFB\xFC\xFD"
 
-// ¿¡«»‗·
-#define CHARS_PUNCTUATION_CP850 "\xA8\xAD\xAE\xAF\xF2\xFA"
+// ¿¡«»‗¶§·
+#define CHARS_PUNCTUATION_CP850 "\xA8\xAD\xAE\xAF\xF2\xF4\xF5\xFA"
 
-// £×®¬░▒▓│┤©╣║╗╝¢¥┐└┴┬├─┼╚╔╩╦╠═╬¤┘┌█▄¦▀¯´­±¶§÷¸°¨■
+// £×®¬░▒▓│┤©╣║╗╝¢¥┐└┴┬├─┼╚╔╩╦╠═╬¤┘┌█▄¦▀¯´­±÷¸°¨■
 #define CHARS_SPECIALS_CP850 \
-	"\x9C\x9E\xA9\xAA\xB0\xB1\xB2\xB3\xB4\xB8\xB9\xBA\xBB\xBC\xBD\xBE\xBF\xC0\xC1\xC2\xC3\xC4\xC5\xC8\xC9\xCA\xCB\xCC\xCD\xCE\xCF\xD9\xDA\xDB\xDC\xDD\xDF\xEE\xEF\xF0\xF1\xF4\xF5\xF6\xF7\xF8\xF9\xFE"
+	"\x9C\x9E\xA9\xAA\xB0\xB1\xB2\xB3\xB4\xB8\xB9\xBA\xBB\xBC\xBD\xBE\xBF\xC0\xC1\xC2\xC3\xC4\xC5\xC8\xC9\xCA\xCB\xCC\xCD\xCE\xCF\xD9\xDA\xDB\xDC\xDD\xDF\xEE\xEF\xF0\xF1\xF6\xF7\xF8\xF9\xFE"
 
 // ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜøØƒáíóúñÑªºÁÂÀãÃðÐÊËÈıÍÎÏÌÓßÔÒõÕµþÞÚÛÙýÝ
 #define CHARS_ALPHA_CP850 \
@@ -663,12 +656,12 @@ EXTATIC const UTF16 CP852_to_unicode_high128[]
 //
 #define CHARS_DIGITS_CP852 ""
 
-// «»
-#define CHARS_PUNCTUATION_CP852 "\xAE\xAF"
+// «»§
+#define CHARS_PUNCTUATION_CP852 "\xAE\xAF\xF5"
 
-// ×¬░▒▓│┤╣║╗╝┐└┴┬├─┼╚╔╩╦╠═╬¤┘┌█▄▀´­˝˛ˇ˘§÷¸°¨˙■
+// ×¬░▒▓│┤╣║╗╝┐└┴┬├─┼╚╔╩╦╠═╬¤┘┌█▄▀´­˝˛ˇ˘÷¸°¨˙■
 #define CHARS_SPECIALS_CP852 \
-	"\x9E\xAA\xB0\xB1\xB2\xB3\xB4\xB9\xBA\xBB\xBC\xBF\xC0\xC1\xC2\xC3\xC4\xC5\xC8\xC9\xCA\xCB\xCC\xCD\xCE\xCF\xD9\xDA\xDB\xDC\xDF\xEF\xF0\xF1\xF2\xF3\xF4\xF5\xF6\xF7\xF8\xF9\xFA\xFE"
+	"\x9E\xAA\xB0\xB1\xB2\xB3\xB4\xB9\xBA\xBB\xBC\xBF\xC0\xC1\xC2\xC3\xC4\xC5\xC8\xC9\xCA\xCB\xCC\xCD\xCE\xCF\xD9\xDA\xDB\xDC\xDF\xEF\xF0\xF1\xF2\xF3\xF4\xF6\xF7\xF8\xF9\xFA\xFE"
 
 // ÇüéâäůćçłëŐőîŹÄĆÉĹĺôöĽľŚśÖÜŤťŁčáíóúĄąŽžĘęźČşÁÂĚŞŻżĂăđĐĎËďŇÍÎěŢŮÓßÔŃńňŠšŔÚŕŰýÝţűŘř
 #define CHARS_ALPHA_CP852 \
@@ -712,8 +705,8 @@ EXTATIC const UTF16 CP858_to_unicode_high128[]
 #define CHARS_LOWER_CP858 \
 	"\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8A\x8B\x8C\x8D\x91\x93\x94\x95\x96\x97\x9B\xA0\xA1\xA2\xA3\xA4\xC6\xD0\xE4\xE7\xEC"
 
-// ÿƒªºßµ
-#define CHARS_LOW_ONLY_CP858 "\x98\x9F\xA6\xA7\xE1\xE6"
+// ÿƒßµ
+#define CHARS_LOW_ONLY_CP858 "\x98\x9F\xE1\xE6"
 
 // ÜÉÂÄÀÅÇÊËÈÏÎÌÆÔÖÒÛÙØÁÍÓÚÑÃÐÕÞÝ
 #define CHARS_UPPER_CP858 \
@@ -722,18 +715,18 @@ EXTATIC const UTF16 CP858_to_unicode_high128[]
 //
 #define CHARS_UP_ONLY_CP858
 
-//
-#define CHARS_NOCASE_CP858
+// ªº
+#define CHARS_NOCASE_CP858 "\xA6\xA7"
 
 // ½¼¾¹³²
 #define CHARS_DIGITS_CP858 "\xAB\xAC\xF3\xFB\xFC\xFD"
 
-// ¿¡«»‗·
-#define CHARS_PUNCTUATION_CP858 "\xA8\xAD\xAE\xAF\xF2\xFA"
+// ¿¡«»‗¶§·
+#define CHARS_PUNCTUATION_CP858 "\xA8\xAD\xAE\xAF\xF2\xF4\xF5\xFA"
 
-// £×®¬░▒▓│┤©╣║╗╝¢¥┐└┴┬├─┼╚╔╩╦╠═╬¤€┘┌█▄¦▀¯´­±¶§÷¸°¨■
+// £×®¬░▒▓│┤©╣║╗╝¢¥┐└┴┬├─┼╚╔╩╦╠═╬¤€┘┌█▄¦▀¯´­±÷¸°¨■
 #define CHARS_SPECIALS_CP858 \
-	"\x9C\x9E\xA9\xAA\xB0\xB1\xB2\xB3\xB4\xB8\xB9\xBA\xBB\xBC\xBD\xBE\xBF\xC0\xC1\xC2\xC3\xC4\xC5\xC8\xC9\xCA\xCB\xCC\xCD\xCE\xCF\xD5\xD9\xDA\xDB\xDC\xDD\xDF\xEE\xEF\xF0\xF1\xF4\xF5\xF6\xF7\xF8\xF9\xFE"
+	"\x9C\x9E\xA9\xAA\xB0\xB1\xB2\xB3\xB4\xB8\xB9\xBA\xBB\xBC\xBD\xBE\xBF\xC0\xC1\xC2\xC3\xC4\xC5\xC8\xC9\xCA\xCB\xCC\xCD\xCE\xCF\xD5\xD9\xDA\xDB\xDC\xDD\xDF\xEE\xEF\xF0\xF1\xF6\xF7\xF8\xF9\xFE"
 
 // ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜøØƒáíóúñÑªºÁÂÀãÃðÐÊËÈÍÎÏÌÓßÔÒõÕµþÞÚÛÙýÝ
 #define CHARS_ALPHA_CP858 \
@@ -912,12 +905,11 @@ EXTATIC const UTF16 CP1250_to_unicode_high128[]
 //
 #define CHARS_DIGITS_CP1250 ""
 
-// ‚„…†‡‰‹‘’“”•–—›«·»
-#define CHARS_PUNCTUATION_CP1250 "\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xAB\xB7\xBB"
+// ‚„…†‡‰‹‘’“”•–—›§«¶·»
+#define CHARS_PUNCTUATION_CP1250 "\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xA7\xAB\xB6\xB7\xBB"
 
-// €™ˇ˘¤¦§¨©¬­®°±˛´¶¸˝×÷˙
-#define CHARS_SPECIALS_CP1250 \
-	"\x80\x99\xA1\xA2\xA4\xA6\xA7\xA8\xA9\xAC\xAD\xAE\xB0\xB1\xB2\xB4\xB6\xB8\xBD\xD7\xF7\xFF"
+// €™ˇ˘¤¦¨©¬­®°±˛´¸˝×÷˙
+#define CHARS_SPECIALS_CP1250 "\x80\x99\xA1\xA2\xA4\xA6\xA8\xA9\xAC\xAD\xAE\xB0\xB1\xB2\xB4\xB8\xBD\xD7\xF7\xFF"
 
 // ŠŚŤŽŹšśťžźŁĄŞŻłµąşĽľżŔÁÂĂÄĹĆÇČÉĘËĚÍÎĎĐŃŇÓÔŐÖŘŮÚŰÜÝŢßŕáâăäĺćçčéęëěíîďđńňóôőöřůúűüýţ
 #define CHARS_ALPHA_CP1250 \
@@ -976,11 +968,11 @@ EXTATIC const UTF16 CP1251_to_unicode_high128[]
 //
 #define CHARS_DIGITS_CP1251 ""
 
-// ‚„…†‡‰‹‘’“”•–—›«·»
-#define CHARS_PUNCTUATION_CP1251 "\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xAB\xB7\xBB"
+// ‚„…†‡‰‹‘’“”•–—›§«¶·»
+#define CHARS_PUNCTUATION_CP1251 "\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xA7\xAB\xB6\xB7\xBB"
 
-// €™¤¦§©¬­®°±¶№
-#define CHARS_SPECIALS_CP1251 "\x88\x99\xA4\xA6\xA7\xA9\xAC\xAD\xAE\xB0\xB1\xB6\xB9"
+// €™¤¦©¬­®°±№
+#define CHARS_SPECIALS_CP1251 "\x88\x99\xA4\xA6\xA9\xAC\xAD\xAE\xB0\xB1\xB9"
 
 // ЂЃѓЉЊЌЋЏђљњќћџЎўЈҐЁЄЇІіґµёєјЅѕїАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя
 #define CHARS_ALPHA_CP1251 \
@@ -1024,8 +1016,8 @@ EXTATIC const UTF16 CP1252_to_unicode_high128[]
 #define CHARS_LOWER_CP1252 \
 	"\x9A\x9C\x9E\xE0\xE1\xE2\xE3\xE4\xE5\xE6\xE7\xE8\xE9\xEA\xEB\xEC\xED\xEE\xEF\xF0\xF1\xF2\xF3\xF4\xF5\xF6\xF8\xF9\xFA\xFB\xFC\xFD\xFE\xFF"
 
-// ƒªµºß
-#define CHARS_LOW_ONLY_CP1252 "\x83\xAA\xB5\xBA\xDF"
+// ƒµß
+#define CHARS_LOW_ONLY_CP1252 "\x83\xB5\xDF"
 
 // ŠŒŽÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞŸ
 #define CHARS_UPPER_CP1252 \
@@ -1034,18 +1026,19 @@ EXTATIC const UTF16 CP1252_to_unicode_high128[]
 //
 #define CHARS_UP_ONLY_CP1252
 
-//
-#define CHARS_NOCASE_CP1252
+// ªº
+#define CHARS_NOCASE_CP1252 "\xAA\xBA"
 
 // ²³¹¼½¾
 #define CHARS_DIGITS_CP1252 "\xB2\xB3\xB9\xBC\xBD\xBE"
 
-// ‚„…†‡‰‹‘’“”•–—›¡«·»¿
-#define CHARS_PUNCTUATION_CP1252 "\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xA1\xAB\xB7\xBB\xBF"
+// ‚„…†‡‰‹‘’“”•–—›¡§«¶·»¿
+#define CHARS_PUNCTUATION_CP1252 \
+	"\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xA1\xA7\xAB\xB6\xB7\xBB\xBF"
 
-// €ˆ˜™¢£¤¥¦§¨©¬­®¯°±´¶¸×÷
+// €ˆ˜™¢£¤¥¦¨©¬­®¯°±´¸×÷
 #define CHARS_SPECIALS_CP1252 \
-	"\x80\x88\x98\x99\xA2\xA3\xA4\xA5\xA6\xA7\xA8\xA9\xAC\xAD\xAE\xAF\xB0\xB1\xB4\xB6\xB8\xD7\xF7"
+	"\x80\x88\x98\x99\xA2\xA3\xA4\xA5\xA6\xA8\xA9\xAC\xAD\xAE\xAF\xB0\xB1\xB4\xB8\xD7\xF7"
 
 // ƒŠŒŽšœžŸªµºÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ
 #define CHARS_ALPHA_CP1252 \
@@ -1106,11 +1099,12 @@ EXTATIC const UTF16 CP1253_to_unicode_high128[]
 // ²³½
 #define CHARS_DIGITS_CP1253 "\xB2\xB3\xBD"
 
-// ‚„…†‡‰‹‘’“”•–—›«―·»
-#define CHARS_PUNCTUATION_CP1253 "\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xAB\xAF\xB7\xBB"
+// ‚„…†‡‰‹‘’“”•–—›§«―¶·»
+#define CHARS_PUNCTUATION_CP1253 \
+	"\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xA7\xAB\xAF\xB6\xB7\xBB"
 
-// €™΅£¤¥¦§¨©¬­®°±΄¶
-#define CHARS_SPECIALS_CP1253 "\x80\x99\xA1\xA3\xA4\xA5\xA6\xA7\xA8\xA9\xAC\xAD\xAE\xB0\xB1\xB4\xB6"
+// €™΅£¤¥¦¨©¬­®°±΄
+#define CHARS_SPECIALS_CP1253 "\x80\x99\xA1\xA3\xA4\xA5\xA6\xA8\xA9\xAC\xAD\xAE\xB0\xB1\xB4"
 
 // ƒΆµΈΉΊΌΎΏΐΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩΪΫάέήίΰαβγδεζηθικλμνξοπρςστυφχψωϊϋόύώ
 #define CHARS_ALPHA_CP1253 \
@@ -1155,8 +1149,8 @@ EXTATIC const UTF16 CP1254_to_unicode_high128[]
 #define CHARS_LOWER_CP1254 \
 	"\x9A\x9C\xE0\xE1\xE2\xE3\xE4\xE5\xE6\xE7\xE8\xE9\xEA\xEB\xEC\xED\xEE\xEF\xF0\xF1\xF2\xF3\xF4\xF5\xF6\xF8\xF9\xFA\xFB\xFC\xFE\xFF"
 
-// ƒªµºßı
-#define CHARS_LOW_ONLY_CP1254 "\x83\xAA\xB5\xBA\xDF\xFD"
+// ƒµßı
+#define CHARS_LOW_ONLY_CP1254 "\x83\xB5\xDF\xFD"
 
 // ŠŒÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏĞÑÒÓÔÕÖØÙÚÛÜŞŸ
 #define CHARS_UPPER_CP1254 \
@@ -1165,18 +1159,19 @@ EXTATIC const UTF16 CP1254_to_unicode_high128[]
 //
 #define CHARS_UP_ONLY_CP1254
 
-//
-#define CHARS_NOCASE_CP1254
+// ªº
+#define CHARS_NOCASE_CP1254 "\xAA\xBA"
 
 // ²³¹¼½¾
 #define CHARS_DIGITS_CP1254 "\xB2\xB3\xB9\xBC\xBD\xBE"
 
-// ‚„…†‡‰‹‘’“”•–—›¡«·»¿
-#define CHARS_PUNCTUATION_CP1254 "\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xA1\xAB\xB7\xBB\xBF"
+// ‚„…†‡‰‹‘’“”•–—›¡§«¶·»¿
+#define CHARS_PUNCTUATION_CP1254 \
+	"\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xA1\xA7\xAB\xB6\xB7\xBB\xBF"
 
-// €ˆ˜™¢£¤¥¦§¨©¬­®¯°±´¶¸×÷
+// €ˆ˜™¢£¤¥¦¨©¬­®¯°±´¸×÷
 #define CHARS_SPECIALS_CP1254 \
-	"\x80\x88\x98\x99\xA2\xA3\xA4\xA5\xA6\xA7\xA8\xA9\xAC\xAD\xAE\xAF\xB0\xB1\xB4\xB6\xB8\xD7\xF7"
+	"\x80\x88\x98\x99\xA2\xA3\xA4\xA5\xA6\xA8\xA9\xAC\xAD\xAE\xAF\xB0\xB1\xB4\xB8\xD7\xF7"
 
 // ƒŠŒšœŸªµºÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏĞÑÒÓÔÕÖØÙÚÛÜİŞßàáâãäåæçèéêëìíîïğñòóôõöøùúûüışÿ
 #define CHARS_ALPHA_CP1254 \
@@ -1233,13 +1228,13 @@ EXTATIC const UTF16 CP1255_to_unicode_high128[]
 // ²³¹¼½¾
 #define CHARS_DIGITS_CP1255 "\xB2\xB3\xB9\xBC\xBD\xBE"
 
-// ‚„…†‡‰‹‘’“”•–—›¡«·»¿־׀׃׳״
+// ‚„…†‡‰‹‘’“”•–—›¡§«¶·»¿־׀׃׳״
 #define CHARS_PUNCTUATION_CP1255 \
-	"\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xA1\xAB\xB7\xBB\xBF\xCE\xD0\xD3\xD7\xD8"
+	"\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xA1\xA7\xAB\xB6\xB7\xBB\xBF\xCE\xD0\xD3\xD7\xD8"
 
-// €ˆ˜™¢£₪¥¦§¨©×¬­®¯°±´¶¸÷ְֱֲֳִֵֶַָֹֻּֽֿׁׂ‎‏
+// €ˆ˜™¢£₪¥¦¨©×¬­®¯°±´¸÷ְֱֲֳִֵֶַָֹֻּֽֿׁׂ‎‏
 #define CHARS_SPECIALS_CP1255 \
-	"\x80\x88\x98\x99\xA2\xA3\xA4\xA5\xA6\xA7\xA8\xA9\xAA\xAC\xAD\xAE\xAF\xB0\xB1\xB4\xB6\xB8\xBA\xC0\xC1\xC2\xC3\xC4\xC5\xC6\xC7\xC8\xC9\xCB\xCC\xCD\xCF\xD1\xD2\xFD\xFE"
+	"\x80\x88\x98\x99\xA2\xA3\xA4\xA5\xA6\xA8\xA9\xAA\xAC\xAD\xAE\xAF\xB0\xB1\xB4\xB8\xBA\xC0\xC1\xC2\xC3\xC4\xC5\xC6\xC7\xC8\xC9\xCB\xCC\xCD\xCF\xD1\xD2\xFD\xFE"
 
 // ƒµװױײאבגדהוזחטיךכלםמןנסעףפץצקרשת
 #define CHARS_ALPHA_CP1255 \
@@ -1297,13 +1292,13 @@ EXTATIC const UTF16 CP1256_to_unicode_high128[]
 // ²³¹¼½¾
 #define CHARS_DIGITS_CP1256 "\xB2\xB3\xB9\xBC\xBD\xBE"
 
-// ‚„…†‡‰‹‘’“”•–—›،«·؛»؟
+// ‚„…†‡‰‹‘’“”•–—›،§«¶·؛»؟
 #define CHARS_PUNCTUATION_CP1256 \
-	"\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xA1\xAB\xB7\xBA\xBB\xBF"
+	"\x82\x84\x85\x86\x87\x89\x8B\x91\x92\x93\x94\x95\x96\x97\x9B\xA1\xA7\xAB\xB6\xB7\xBA\xBB\xBF"
 
-// €ˆ™‌‍¢£¤¥¦§¨©¬­®¯°±´¶¸×ـًٌٍَُِ÷ّْ‎‏
+// €ˆ™‌‍¢£¤¥¦¨©¬­®¯°±´¸×ـًٌٍَُِ÷ّْ‎‏
 #define CHARS_SPECIALS_CP1256 \
-	"\x80\x88\x99\x9D\x9E\xA2\xA3\xA4\xA5\xA6\xA7\xA8\xA9\xAC\xAD\xAE\xAF\xB0\xB1\xB4\xB6\xB8\xD7\xDC\xF0\xF1\xF2\xF3\xF5\xF6\xF7\xF8\xFA\xFD\xFE"
+	"\x80\x88\x99\x9D\x9E\xA2\xA3\xA4\xA5\xA6\xA8\xA9\xAC\xAD\xAE\xAF\xB0\xB1\xB4\xB8\xD7\xDC\xF0\xF1\xF2\xF3\xF5\xF6\xF7\xF8\xFA\xFD\xFE"
 
 // پƒٹŒچژڈگکڑœںھµہءآأؤإئابةتثجحخدذرزسشصضطظعغفقكàلâمنهوçèéêëىيîïôùûüے
 #define CHARS_ALPHA_CP1256 \

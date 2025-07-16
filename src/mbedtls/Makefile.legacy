@@ -1,0 +1,25 @@
+CC = gcc
+AR = ar
+RM = rm -f
+AESIN = aesce.o aesni.o aes.o
+
+default: aes.a
+all: aes.a
+
+aes.o:	aes.c common.h build_info.h mbedtls_config.h alignment.h aes.h private_access.h platform_util.h platform.h error.h aesni.h aesce.h ctr.h
+	$(CC) $(CFLAGS) -std=gnu99 -c aes.c -o aes.o
+
+aesce.o:	aesce.c common.h build_info.h mbedtls_config.h alignment.h aesce.h aes.h private_access.h platform_util.h
+	$(CC) $(CFLAGS) -std=gnu99 -c aesce.c -o aesce.o
+
+aesni.o:	aesni.c common.h build_info.h mbedtls_config.h alignment.h aesni.h aes.h private_access.h platform_util.h
+	$(CC) $(CFLAGS) -std=gnu99 -c aesni.c -o aesni.o
+
+aes.a: $(AESIN)
+	$(AR) -rs aes.a $(AESIN)
+
+clean:
+	$(RM) *.a *.o
+
+distclean: clean
+	$(RM) Makefile

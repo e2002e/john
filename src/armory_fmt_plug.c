@@ -115,7 +115,7 @@ static void init(struct fmt_main *self)
 	memory = mem_alloc(sizeof(*memory) * max_threads);
 	int i;
 	for (i = 0; i < max_threads; i++)
-		init_region_t(&memory[i]);
+		init_region(&memory[i]);
 
 	saved_key = mem_calloc(self->params.max_keys_per_crypt, sizeof(*saved_key));
 	crypt_out = mem_calloc(self->params.max_keys_per_crypt, sizeof(*crypt_out));
@@ -134,7 +134,7 @@ static void done(void)
 {
 	int i;
 	for (i = 0; i < max_threads; i++)
-		free_region_t(&memory[i]);
+		free_region(&memory[i]);
 	MEM_FREE(memory);
 
 	MEM_FREE(saved_key);
@@ -149,16 +149,14 @@ static void done(void)
  * than the tests.  However, don't do this when proceeding from self-test to
  * benchmark, so that memory (de)allocation time doesn't affect the speeds.
  */
-void reset(struct db_main *db)
+static void reset(struct db_main *db)
 {
 	if (benchmark_running)
 		return;
 
 	int i;
-	for (i = 0; i < max_threads; i++) {
-		free_region_t(&memory[i]);
-		init_region_t(&memory[i]);
-	}
+	for (i = 0; i < max_threads; i++)
+		free_region(&memory[i]);
 }
 
 static void *get_salt(char *ciphertext)
@@ -257,8 +255,8 @@ static int derive_keys(region_t *memory, int index, derived_key *dk)
 	lut_item *lut = memory->aligned;
 	size_t bytes_reqd = (size_t)n * sizeof(*lut);
 	if (!lut || memory->aligned_size < bytes_reqd) {
-		free_region_t(memory);
-		if (!(lut = alloc_region_t(memory, bytes_reqd)))
+		if (free_region(memory) ||
+		    !(lut = alloc_region(memory, bytes_reqd)))
 			return -1;
 	}
 

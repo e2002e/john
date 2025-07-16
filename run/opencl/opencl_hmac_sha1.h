@@ -24,8 +24,12 @@
 #define HMAC_OUT_TYPE
 #endif
 
-inline void hmac_sha1(HMAC_KEY_TYPE void *_key, uint key_len,
-                      HMAC_MSG_TYPE void *_data, uint data_len,
+#ifndef SHA1_DATA_LENGTH_TYPE
+#define SHA1_DATA_LENGTH_TYPE	uint
+#endif
+
+INLINE void hmac_sha1(HMAC_KEY_TYPE void *_key, uint key_len,
+                      HMAC_MSG_TYPE void *_data, SHA1_DATA_LENGTH_TYPE data_len,
                       HMAC_OUT_TYPE void *_digest, uint digest_len)
 {
 	HMAC_KEY_TYPE uchar *key = _key;
@@ -74,7 +78,7 @@ inline void hmac_sha1(HMAC_KEY_TYPE void *_key, uint key_len,
 	SHA1_Update(&ctx, u.buf, 64);
 #ifdef USE_DATA_BUF
 	HMAC_MSG_TYPE uint *data32 = (HMAC_MSG_TYPE uint*)_data;
-	uint blocks = data_len / 64;
+	SHA1_DATA_LENGTH_TYPE blocks = data_len / 64;
 	data_len -= 64 * blocks;
 	data += 64 * blocks;
 	ctx.total += 64 * blocks;
@@ -94,10 +98,16 @@ inline void hmac_sha1(HMAC_KEY_TYPE void *_key, uint key_len,
 	SHA1_Final(local_digest, &ctx);
 	for (i = 0; i < 16; i++)
 		u.pW[i] ^= (0x36363636 ^ 0x5c5c5c5c);
+#if gpu_amd(DEVICE_INFO)
+/* Workaround miscompile with AMD-APP 2766.4 */
+	SHA_CTX ctx2;
+#define ctx ctx2
+#endif
 	SHA1_Init(&ctx);
 	SHA1_Update(&ctx, u.buf, 64);
 	SHA1_Update(&ctx, local_digest, 20);
 	SHA1_Final(local_digest, &ctx);
+#undef ctx
 
 	memcpy_macro(digest, local_digest, digest_len);
 }

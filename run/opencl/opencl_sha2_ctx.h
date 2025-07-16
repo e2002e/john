@@ -1,5 +1,5 @@
 /*
- * This software is Copyright (c) 2017 magnum
+ * This software is Copyright (c) 2017-2024 magnum
  * and it is hereby released to the general public under the following terms:
  *
  * Redistribution and use in source and binary forms, with or without
@@ -26,7 +26,7 @@ typedef struct {
 	uchar buffer[64];  /* data block being processed */
 } SHA256_CTX;
 
-inline
+INLINE
 void SHA256_Init(SHA256_CTX *ctx) {
 	uint i;
 
@@ -36,7 +36,7 @@ void SHA256_Init(SHA256_CTX *ctx) {
 		ctx->state[i] = h[i];
 }
 
-inline
+INLINE
 void _sha256_process(SHA256_CTX *ctx, const uchar data[64]) {
 	MAYBE_VOLATILE uint t, W[16], A, B, C, D, E, F, G, H;
 
@@ -103,7 +103,7 @@ void _sha256_process(SHA256_CTX *ctx, const uchar data[64]) {
 /*
  * SHA-256 process buffer
  */
-inline
+INLINE
 void SHA256_Update(SHA256_CTX *ctx, const uchar *input, uint ilen) {
 	uint fill;
 	uint left;
@@ -141,7 +141,7 @@ void SHA256_Update(SHA256_CTX *ctx, const uchar *input, uint ilen) {
 /*
  * SHA-256 final digest
  */
-inline
+INLINE
 void SHA256_Final(uchar output[32], SHA256_CTX *ctx) {
 	uint last, padn;
 	ulong bits;
@@ -192,20 +192,33 @@ typedef struct {
 	uchar buffer[128]; /* data block being processed */
 } SHA512_CTX;
 
-inline
-void SHA512_Init(SHA512_CTX *ctx) {
+INLINE
+void SHA384_Init(SHA512_CTX *ctx) {
 	ctx->total = 0;
-	ctx->state[0] = SHA2_INIT_A;
-	ctx->state[1] = SHA2_INIT_B;
-	ctx->state[2] = SHA2_INIT_C;
-	ctx->state[3] = SHA2_INIT_D;
-	ctx->state[4] = SHA2_INIT_E;
-	ctx->state[5] = SHA2_INIT_F;
-	ctx->state[6] = SHA2_INIT_G;
-	ctx->state[7] = SHA2_INIT_H;
+	ctx->state[0] = SHA384_INIT_A;
+	ctx->state[1] = SHA384_INIT_B;
+	ctx->state[2] = SHA384_INIT_C;
+	ctx->state[3] = SHA384_INIT_D;
+	ctx->state[4] = SHA384_INIT_E;
+	ctx->state[5] = SHA384_INIT_F;
+	ctx->state[6] = SHA384_INIT_G;
+	ctx->state[7] = SHA384_INIT_H;
 }
 
-inline
+INLINE
+void SHA512_Init(SHA512_CTX *ctx) {
+	ctx->total = 0;
+	ctx->state[0] = SHA512_INIT_A;
+	ctx->state[1] = SHA512_INIT_B;
+	ctx->state[2] = SHA512_INIT_C;
+	ctx->state[3] = SHA512_INIT_D;
+	ctx->state[4] = SHA512_INIT_E;
+	ctx->state[5] = SHA512_INIT_F;
+	ctx->state[6] = SHA512_INIT_G;
+	ctx->state[7] = SHA512_INIT_H;
+}
+
+INLINE
 void _sha512_process(SHA512_CTX *ctx, const uchar data[128]) {
 	ulong t, W[16], A, B, C, D, E, F, G, H;
 
@@ -272,7 +285,7 @@ void _sha512_process(SHA512_CTX *ctx, const uchar data[128]) {
 /*
  * SHA-512 process buffer
  */
-inline
+INLINE
 void SHA512_Update(SHA512_CTX *ctx, const uchar *input, uint ilen) {
 	uint fill;
 	uint left;
@@ -307,10 +320,53 @@ void SHA512_Update(SHA512_CTX *ctx, const uchar *input, uint ilen) {
 	}
 }
 
+#define SHA384_Update(c, i, l)	SHA512_Update(c, i, l)
+
+/*
+ * SHA-384 final digest
+ */
+INLINE
+void SHA384_Final(uchar output[64], SHA512_CTX *ctx) {
+	uint last, padn;
+	ulong bits;
+	uchar msglen[16];
+	uchar sha384_padding[128] = { 0x80 /* , 0, 0 ... */ };
+
+	bits = ctx->total << 3;
+
+	PUT_UINT64BE(0UL, msglen, 0);
+	PUT_UINT64BE(bits, msglen, 8);
+
+	last = ctx->total & 0x7F;
+	padn = (last < 112) ? (112 - last) : (240 - last);
+
+	SHA512_Update(ctx, sha384_padding, padn);
+	SHA512_Update(ctx, msglen, 16);
+
+#if ALLOW_ALIASING_VIOLATIONS
+	if (!((size_t)output & 0x07)) {
+		PUT_UINT64BE_ALIGNED(ctx->state[0], output,  0);
+		PUT_UINT64BE_ALIGNED(ctx->state[1], output,  8);
+		PUT_UINT64BE_ALIGNED(ctx->state[2], output, 16);
+		PUT_UINT64BE_ALIGNED(ctx->state[3], output, 24);
+		PUT_UINT64BE_ALIGNED(ctx->state[4], output, 32);
+		PUT_UINT64BE_ALIGNED(ctx->state[5], output, 40);
+	} else
+#endif
+	{
+		PUT_UINT64BE(ctx->state[0], output,  0);
+		PUT_UINT64BE(ctx->state[1], output,  8);
+		PUT_UINT64BE(ctx->state[2], output, 16);
+		PUT_UINT64BE(ctx->state[3], output, 24);
+		PUT_UINT64BE(ctx->state[4], output, 32);
+		PUT_UINT64BE(ctx->state[5], output, 40);
+	}
+}
+
 /*
  * SHA-512 final digest
  */
-inline
+INLINE
 void SHA512_Final(uchar output[64], SHA512_CTX *ctx) {
 	uint last, padn;
 	ulong bits;

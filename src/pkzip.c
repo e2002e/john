@@ -188,13 +188,9 @@ char *winzip_common_split(char *ciphertext, int index, struct fmt_main *self)
 void *winzip_common_get_salt(char *ciphertext)
 {
 	uint64_t i;
-	winzip_salt salt, *psalt;
-	static unsigned char *ptr;
+	winzip_salt salt;
 	c8 *copy_mem = xstrdup(ciphertext);
 	c8 *cp, *p;
-
-	if (!ptr)
-		ptr = mem_alloc_tiny(sizeof(winzip_salt*),sizeof(winzip_salt*));
 
 	p = copy_mem + WINZIP_TAG_LENGTH + 1; /* skip over "$zip2$*" */
 	memset(&salt, 0, sizeof(salt));
@@ -215,7 +211,8 @@ void *winzip_common_get_salt(char *ciphertext)
 
 	// Ok, now create the allocated salt record we are going to return back to John, using the dynamic
 	// sized data buffer.
-	psalt = (winzip_salt*)mem_calloc(1, sizeof(winzip_salt) + salt.comp_len);
+	static winzip_salt *psalt;
+	psalt = mem_calloc(1, sizeof(winzip_salt) + salt.comp_len);
 	psalt->v.type = salt.v.type;
 	psalt->v.mode = salt.v.mode;
 	psalt->comp_len = salt.comp_len;
@@ -234,8 +231,7 @@ void *winzip_common_get_salt(char *ciphertext)
 
 	MEM_FREE(copy_mem);
 
-	memcpy(ptr, &psalt, sizeof(winzip_salt*));
-	return (void*)ptr;
+	return &psalt;
 }
 
 void *winzip_common_binary(char *ciphertext) {
@@ -251,4 +247,11 @@ void *winzip_common_binary(char *ciphertext) {
 		bin[i] = atoi16[ARCH_INDEX(c[i<<1])] << 4 | atoi16[ARCH_INDEX(c[(i<<1)+1])];
 	}
 	return bin;
+}
+
+unsigned int winzip_common_cost_hmac_len(void *salt)
+{
+	winzip_salt *s = *((winzip_salt**)salt);
+
+	return (s->comp_len + 1023) / 1024;
 }

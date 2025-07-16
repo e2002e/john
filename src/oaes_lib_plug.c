@@ -40,6 +40,7 @@
 #endif
 
 #include "oaes_lib.h"
+#include "memory.h"
 
 #define OAES_RKEY_LEN 4
 #define OAES_COL_LEN 4
@@ -64,10 +65,6 @@ typedef struct _oaes_key
 
 typedef struct _oaes_ctx
 {
-#ifdef OAES_HAVE_ISAAC
-  randctx * rctx;
-#endif // OAES_HAVE_ISAAC
-
 #ifdef OAES_DEBUG
 	oaes_step_cb step_cb;
 #endif // OAES_DEBUG
@@ -77,11 +74,14 @@ typedef struct _oaes_ctx
 	uint8_t iv[OAES_BLOCK_SIZE];
 } oaes_ctx;
 
+#if 0
 // "OAES<8-bit header version><8-bit type><16-bit options><8-bit flags><56-bit reserved>"
 static uint8_t oaes_header[OAES_BLOCK_SIZE] = {
 	// 		0,    1,    2,    3,    4,    5,    6,    7,    8,    9,    a,    b,    c,    d,    e,    f,
 	/*0*/	0x4f, 0x41, 0x45, 0x53, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
+#endif
+
 static uint8_t oaes_gf_8[] = {
 	0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36 };
 
@@ -105,6 +105,7 @@ static uint8_t oaes_sub_byte_value[16][16] = {
 	/*f*/	{ 0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16 },
 };
 
+#if 0
 static uint8_t oaes_inv_sub_byte_value[16][16] = {
 	// 		0,    1,    2,    3,    4,    5,    6,    7,    8,    9,    a,    b,    c,    d,    e,    f,
 	/*0*/	{ 0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb },
@@ -124,6 +125,7 @@ static uint8_t oaes_inv_sub_byte_value[16][16] = {
 	/*e*/	{ 0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61 },
 	/*f*/	{ 0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d },
 };
+#endif
 
 static uint8_t oaes_gf_mul_2[16][16] = {
 	// 		0,    1,    2,    3,    4,    5,    6,    7,    8,    9,    a,    b,    c,    d,    e,    f,
@@ -261,6 +263,7 @@ static OAES_RET oaes_sub_byte( uint8_t * byte )
 	return OAES_RET_SUCCESS;
 }
 
+#if 0
 static OAES_RET oaes_inv_sub_byte( uint8_t * byte )
 {
 	size_t _x, _y;
@@ -276,6 +279,7 @@ static OAES_RET oaes_inv_sub_byte( uint8_t * byte )
 
 	return OAES_RET_SUCCESS;
 }
+#endif
 
 static OAES_RET oaes_word_rot_left( uint8_t word[OAES_COL_LEN] )
 {
@@ -319,6 +323,7 @@ static OAES_RET oaes_shift_rows( uint8_t block[OAES_BLOCK_SIZE] )
 	return OAES_RET_SUCCESS;
 }
 
+#if 0
 static OAES_RET oaes_inv_shift_rows( uint8_t block[OAES_BLOCK_SIZE] )
 {
 	uint8_t _temp[OAES_BLOCK_SIZE];
@@ -346,6 +351,7 @@ static OAES_RET oaes_inv_shift_rows( uint8_t block[OAES_BLOCK_SIZE] )
 
 	return OAES_RET_SUCCESS;
 }
+#endif
 
 static uint8_t oaes_gf_mul(uint8_t left, uint8_t right)
 {
@@ -402,6 +408,7 @@ static OAES_RET oaes_mix_cols( uint8_t word[OAES_COL_LEN] )
 	return OAES_RET_SUCCESS;
 }
 
+#if 0
 static OAES_RET oaes_inv_mix_cols( uint8_t word[OAES_COL_LEN] )
 {
 	uint8_t _temp[OAES_COL_LEN];
@@ -455,6 +462,7 @@ OAES_RET oaes_sprintf(
 
 	return OAES_RET_SUCCESS;
 }
+#endif
 
 static OAES_RET oaes_key_destroy( oaes_key ** key )
 {
@@ -499,7 +507,7 @@ static OAES_RET oaes_key_expand( OAES_CTX * ctx )
 
 	_ctx->key->exp_data_len = _ctx->key->num_keys * OAES_RKEY_LEN * OAES_COL_LEN;
 	_ctx->key->exp_data = (uint8_t *)
-			calloc( _ctx->key->exp_data_len, sizeof( uint8_t ));
+			mem_calloc_align( _ctx->key->exp_data_len, sizeof( uint8_t ), 16);
 
 	if( NULL == _ctx->key->exp_data )
 		return OAES_RET_MEM;
@@ -542,64 +550,7 @@ static OAES_RET oaes_key_expand( OAES_CTX * ctx )
 	return OAES_RET_SUCCESS;
 }
 
-static OAES_RET oaes_key_gen( OAES_CTX * ctx, size_t key_size )
-{
-	size_t _i;
-	oaes_key * _key = NULL;
-	oaes_ctx * _ctx = (oaes_ctx *) ctx;
-	OAES_RET _rc = OAES_RET_SUCCESS;
-
-	if( NULL == _ctx )
-		return OAES_RET_ARG1;
-
-	_key = (oaes_key *) calloc( sizeof( oaes_key ), 1 );
-
-	if( NULL == _key )
-		return OAES_RET_MEM;
-
-	if( _ctx->key )
-		oaes_key_destroy( &(_ctx->key) );
-
-	_key->data_len = key_size;
-	_key->data = (uint8_t *) calloc( key_size, sizeof( uint8_t ));
-
-	if( NULL == _key->data )
-		return OAES_RET_MEM;
-
-	for( _i = 0; _i < key_size; _i++ )
-#ifdef OAES_HAVE_ISAAC
-		_key->data[_i] = (uint8_t) rand( _ctx->rctx );
-#else
-		_key->data[_i] = (uint8_t) rand();
-#endif // OAES_HAVE_ISAAC
-
-	_ctx->key = _key;
-	_rc = _rc || oaes_key_expand( ctx );
-
-	if( _rc != OAES_RET_SUCCESS )
-	{
-		oaes_key_destroy( &(_ctx->key) );
-		return _rc;
-	}
-
-	return OAES_RET_SUCCESS;
-}
-
-OAES_RET oaes_key_gen_128( OAES_CTX * ctx )
-{
-	return oaes_key_gen( ctx, 16 );
-}
-
-OAES_RET oaes_key_gen_192( OAES_CTX * ctx )
-{
-	return oaes_key_gen( ctx, 24 );
-}
-
-OAES_RET oaes_key_gen_256( OAES_CTX * ctx )
-{
-	return oaes_key_gen( ctx, 32 );
-}
-
+#if 0
 OAES_RET oaes_key_export( OAES_CTX * ctx,
 		uint8_t * data, size_t * data_len )
 {
@@ -752,6 +703,7 @@ OAES_RET oaes_key_import( OAES_CTX * ctx,
 
 	return OAES_RET_SUCCESS;
 }
+#endif
 
 OAES_RET oaes_key_import_data( OAES_CTX * ctx,
 		const uint8_t * data, size_t data_len )
@@ -812,8 +764,6 @@ OAES_CTX * oaes_alloc(void)
 	if( NULL == _ctx )
 		return NULL;
 
-	srand(0); // XXX
-
 	_ctx->key = NULL;
 	oaes_set_option( _ctx, OAES_OPTION_CBC, NULL );
 
@@ -838,14 +788,6 @@ OAES_RET oaes_free( OAES_CTX ** ctx )
 	if( (*_ctx)->key )
 		oaes_key_destroy( &((*_ctx)->key) );
 
-#ifdef OAES_HAVE_ISAAC
-	if( (*_ctx)->rctx )
-	{
-		free( (*_ctx)->rctx );
-		(*_ctx)->rctx = NULL;
-	}
-#endif // OAES_HAVE_ISAAC
-
 	free( *_ctx );
 	*_ctx = NULL;
 
@@ -855,7 +797,6 @@ OAES_RET oaes_free( OAES_CTX ** ctx )
 OAES_RET oaes_set_option( OAES_CTX * ctx,
 		OAES_OPTION option, const void * value )
 {
-	size_t _i;
 	oaes_ctx * _ctx = (oaes_ctx *) ctx;
 
 	if( NULL == _ctx )
@@ -873,14 +814,7 @@ OAES_RET oaes_set_option( OAES_CTX * ctx,
 			if( value )
 				memcpy( _ctx->iv, value, OAES_BLOCK_SIZE );
 			else
-			{
-				for( _i = 0; _i < OAES_BLOCK_SIZE; _i++ )
-#ifdef OAES_HAVE_ISAAC
-					_ctx->iv[_i] = (uint8_t) rand( _ctx->rctx );
-#else
-					_ctx->iv[_i] = (uint8_t) rand();
-#endif // OAES_HAVE_ISAAC
-			}
+				memset( _ctx->iv, 0, OAES_BLOCK_SIZE );
 			break;
 
 #ifdef OAES_DEBUG
@@ -916,6 +850,7 @@ OAES_RET oaes_set_option( OAES_CTX * ctx,
 	return OAES_RET_SUCCESS;
 }
 
+#if 0
 static OAES_RET oaes_encrypt_block(
 		OAES_CTX * ctx, uint8_t * c, size_t c_len )
 {
@@ -1346,6 +1281,7 @@ OAES_RET oaes_decrypt( OAES_CTX * ctx,
 
 	return OAES_RET_SUCCESS;
 }
+#endif
 
 
 OAES_API OAES_RET oaes_encryption_round( const uint8_t * key, uint8_t * c )
@@ -1395,7 +1331,13 @@ OAES_API OAES_RET oaes_pseudo_encrypt_ecb( OAES_CTX * ctx, uint8_t * c )
 	for ( _i = 0; _i < 10; ++_i )
 	{
 	  oaes_encryption_round( &_ctx->key->exp_data[_i * OAES_RKEY_LEN * OAES_COL_LEN], c );
-  }
+	}
 
 	return OAES_RET_SUCCESS;
+}
+
+OAES_API uint8_t * oaes_get_exp_data( const OAES_CTX * ctx )
+{
+	oaes_ctx * _ctx = (oaes_ctx *) ctx;
+	return _ctx->key->exp_data;
 }

@@ -1,7 +1,7 @@
 /*
  * Developed by Claudio André <claudioandre.br at gmail.com> in 2012
  *
- * More information at http://openwall.info/wiki/john/OpenCL-RAWSHA-256
+ * More information at https://openwall.info/wiki/john/OpenCL-RAWSHA-256
  *
  * Copyright (c) 2012-2016 Claudio André <claudioandre.br at gmail.com>
  * This program comes with ABSOLUTELY NO WARRANTY; express or implied.
@@ -43,7 +43,7 @@
     #define USE_LOCAL       1
 #endif
 
-inline void _memcpy(               uint32_t * dest,
+INLINE void _memcpy(               uint32_t * dest,
                     __global const uint32_t * src,
                              const uint32_t   len) {
 
@@ -51,7 +51,7 @@ inline void _memcpy(               uint32_t * dest,
         *dest++ = *src++;
 }
 
-inline void any_hash_cracked(
+INLINE void any_hash_cracked(
 	const uint32_t iter,                        //which candidates_number is this one
 	volatile __global uint32_t * const hash_id, //information about how recover the cracked password
 	const uint32_t * const hash,                //the hash calculated by this kernel
@@ -111,7 +111,7 @@ inline void any_hash_cracked(
  *
  * [1] Of course, one could be a crack.
  */
-inline void sha256_block(	  const uint32_t * const buffer,
+INLINE void sha256_block(	  const uint32_t * const buffer,
 				  const uint32_t total, uint32_t * const H) {
 
     uint32_t a = H0;

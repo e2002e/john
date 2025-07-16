@@ -346,6 +346,10 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		if (idx_offset > 4 * (gws + 1))
 			idx_offset = 0;
 
+		/* Safety for when count < GWS */
+		for (int i = count; i <= gws; i++)
+			saved_idx[i] = key_idx;
+
 		BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], cl_saved_key, CL_FALSE, key_offset, key_idx - key_offset, saved_key + key_offset, 0, NULL, multi_profilingEvent[0]), "Failed transferring keys");
 		BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], cl_saved_idx, CL_FALSE, idx_offset, 4 * (gws + 1) - idx_offset, saved_idx + (idx_offset / 4), 0, NULL, multi_profilingEvent[1]), "Failed transferring index");
 
@@ -360,8 +364,9 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 	BENCH_CLERROR(clEnqueueReadBuffer(queue[gpu_id], cl_crack_count_ret, CL_TRUE, 0, sizeof(int), &crack_count_ret, 0, NULL, NULL), "failed reading results back");
 
 	if (crack_count_ret) {
+		/* This is benign - may happen when gws > count due to GET_NEXT_MULTIPLE() */
 		if (crack_count_ret > *pcount)
-			error_msg("Corrupt return: Got a claimed %u cracks out of %d\n", crack_count_ret, *pcount);
+			crack_count_ret = *pcount;
 
 		BENCH_CLERROR(clEnqueueReadBuffer(queue[gpu_id], cl_result, CL_TRUE, 0, sizeof(unsigned int) * crack_count_ret, cracked, 0, NULL, NULL), "failed reading results back");
 

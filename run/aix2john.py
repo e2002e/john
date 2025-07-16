@@ -17,7 +17,6 @@
 
 
 import argparse
-import binascii
 import sys
 import re
 
@@ -33,7 +32,7 @@ def process_file(filename, is_standard):
     username = "?"
 
     for line in fd.readlines():
-        if re.match('^\s*\S+\s*:\s*$',line):
+        if re.match(r'^\s*\S+\s*:\s*$',line):
             username = line.split(':')[0]
 
         if "password = " in line and "smd5" in line:
@@ -62,26 +61,17 @@ def process_file(filename, is_standard):
 
 if __name__ == "__main__":
 
-    if len(sys.argv) < 2:
-        sys.stderr.write("Usage: %s [-s] -f <AIX passwd file (/etc/security/passwd)>\n" % sys.argv[0])
-        sys.exit(1)
-
     parser = argparse.ArgumentParser()
     parser.add_argument('-s', action="store_true",
         default=False,
         dest="is_standard",
         help='Use this option if "lpa_options = std_hash=true" is activated'
-        )
+    )
 
-    parser.add_argument('-f', dest="filename",
-        default=False,
-        help='Specify the AIX shadow file filename to read (usually /etc/security/passwd)'
-        )
+    parser.add_argument("filename",
+        help='The AIX shadow file to read (usually /etc/security/passwd)'
+    )
 
     args = parser.parse_args()
 
-    if args.filename:
-        process_file(args.filename, args.is_standard)
-    else:
-        print("Please specify a filename (-f)")
-        sys.exit(1)
+    process_file(args.filename, args.is_standard)

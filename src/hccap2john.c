@@ -91,10 +91,11 @@ static int process_file(const char *filename)
 	static int warn;
 
 	f = fopen(filename, "r");
-	if (stat(filename, &sb) == -1) {
+	if (!f || stat(filename, &sb) == -1) {
 		perror(filename);
 		fprintf(stderr, "\n");
-		fclose(f);
+		if (f)
+			fclose(f);
 		return 0;
 	}
 	if (sb.st_size > 4) {

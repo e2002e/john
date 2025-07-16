@@ -1,6 +1,6 @@
 /*
  * This file is part of John the Ripper password cracker,
- * Copyright (c) 1996-2022 by Solar Designer
+ * Copyright (c) 1996-2025 by Solar Designer
  *
  * ...with changes in the jumbo patch, by JimF and magnum (and various others?)
  *
@@ -91,6 +91,7 @@ static struct opt_entry opt_list[] = {
 	{"prince-wl-max", FLG_ONCE, 0, FLG_PRINCE_CHK, OPT_REQ_PARAM, "%d", &prince_wl_max},
 	{"prince-case-permute", FLG_PRINCE_CASE_PERMUTE, 0, FLG_PRINCE_CHK, FLG_PRINCE_MMAP},
 	{"prince-keyspace", FLG_PRINCE_KEYSPACE | FLG_STDOUT, 0, FLG_PRINCE_CHK, FLG_RULES_IN_USE},
+	/* -prince-mmap is deprecated and ignored. Remove after releasing 1.9.0-Jumbo-2 */
 	{"prince-mmap", FLG_PRINCE_MMAP, 0, FLG_PRINCE_CHK, FLG_PRINCE_CASE_PERMUTE},
 #endif
 	/* -enc is an alias for -input-enc for logic reasons, never deprecated */
@@ -239,7 +240,6 @@ static struct opt_entry opt_list[] = {
 "--prince-wl-dist-len       Calculate length distribution from wordlist\n" \
 "--prince-wl-max=N          Load only N words from input wordlist\n" \
 "--prince-case-permute      Permute case of first letter\n" \
-"--prince-mmap              Memory-map infile (not available with case permute)\n" \
 "--prince-keyspace          Just show total keyspace that would be produced\n" \
 "                           (disregarding skip and limit)\n"
 #else
@@ -257,7 +257,7 @@ static struct opt_entry opt_list[] = {
 
 #define JOHN_BANNER	  \
 "John the Ripper " JTR_GIT_VERSION _MP_VERSION DEBUG_STRING ASAN_STRING UBSAN_STRING " [" JOHN_BLD "]\n" \
-"Copyright (c) 1996-2023 by " JOHN_COPYRIGHT "\n" \
+"Copyright (c) 1996-2025 by " JOHN_COPYRIGHT "\n" \
 "Homepage: https://www.openwall.com/john/\n" \
 "\n" \
 "Usage: %s [OPTIONS] [PASSWORD-FILES]\n\n"

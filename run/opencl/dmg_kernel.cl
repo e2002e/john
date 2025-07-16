@@ -12,9 +12,6 @@ typedef struct {
 
 #define pbkdf2_out dmg_out
 #include "pbkdf2_hmac_sha1_kernel.cl"
-#if __OS_X__
-#define AES_NO_BITSLICE
-#endif
 #define AES_SRC_TYPE MAYBE_CONSTANT
 #include "opencl_aes.h"
 #include "opencl_hmac_sha1.h"
@@ -39,7 +36,7 @@ typedef struct {
 	uchar zchunk[4096]; /* chunk #0 */
 } dmg_salt;
 
-inline int apple_des3_ede_unwrap_key1(MAYBE_CONSTANT uchar *wrapped_key,
+INLINE int apple_des3_ede_unwrap_key1(MAYBE_CONSTANT uchar *wrapped_key,
                                       const int wrapped_key_len,
                                       const uchar *decryptKey)
 {
@@ -67,7 +64,7 @@ inline int apple_des3_ede_unwrap_key1(MAYBE_CONSTANT uchar *wrapped_key,
 }
 
 /* Check for 64-bit NULL at 32-bit alignment */
-inline int check_nulls(const void *buf, uint size)
+INLINE int check_nulls(const void *buf, uint size)
 {
 	const uint *p = buf;
 
@@ -79,7 +76,7 @@ inline int check_nulls(const void *buf, uint size)
 	return 0;
 }
 
-inline int check_v1hash(const uchar *derived_key,
+INLINE int check_v1hash(const uchar *derived_key,
                         MAYBE_CONSTANT dmg_salt *salt)
 {
 	if (!apple_des3_ede_unwrap_key1(salt->wrapped_aes_key,
@@ -93,11 +90,11 @@ inline int check_v1hash(const uchar *derived_key,
 	return 1;
 }
 
-inline int check_v2hash(const uchar *derived_key,
-                        MAYBE_CONSTANT dmg_salt *salt)
+INLINE int check_v2hash(const uchar *derived_key,
+                        MAYBE_CONSTANT dmg_salt *salt, __local aes_local_t *lt)
 {
 	des3_context ks;
-	AES_KEY aes_decrypt_key;
+	AES_KEY aes_decrypt_key; aes_decrypt_key.lt = lt;
 	uint buf[8192/4];
 	uchar *outbuf = (uchar*)buf;
 	uchar iv[20];
@@ -155,10 +152,11 @@ __kernel
 void dmg_final_v2(MAYBE_CONSTANT dmg_salt *salt,
                   __global dmg_out *out)
 {
+	__local aes_local_t lt;
 	uint gid = get_global_id(0);
 	uint dk[OUTLEN / 4];
 
 	memcpy_gp(dk, out[gid].dk, OUTLEN);
 
-	out[gid].cracked = check_v2hash((uchar*)dk, salt);
+	out[gid].cracked = check_v2hash((uchar*)dk, salt, &lt);
 }

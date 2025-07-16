@@ -38,16 +38,15 @@ john_register_one(&fmt_racf_kdfaes);
 #include "options.h"
 #include "aes.h"
 #include "sha2.h"
-#include "hmac_sha.h"
 #include "memory.h"
 
 #define FORMAT_LABEL            "RACF-KDFAES"
 #define FORMAT_NAME             ""
 #define FORMAT_TAG              "$racf$*"
 #define FORMAT_TAG_LEN          (sizeof(FORMAT_TAG)-1)
-#define ALGORITHM_NAME          "KDFAES (DES + HMAC-SHA256/" ARCH_BITS_STR " + AES-256)"
+#define ALGORITHM_NAME          "DES/HMAC-SHA256/AES 32/" ARCH_BITS_STR
 #define BENCHMARK_COMMENT       ""
-#define BENCHMARK_LENGTH        7
+#define BENCHMARK_LENGTH        0x507
 #define PLAINTEXT_LENGTH        8
 #define CIPHERTEXT_LENGTH       96
 #define BINARY_SIZE             16
@@ -126,31 +125,35 @@ static void process_userid(unsigned char *str)
 }
 
 static struct fmt_tests racf_kdfaes_tests[] = {
-	{"$racf$*USER123*E7D7E66D00018000001000340010001054FDAABCDEF012345674A0F58EE6137D3B3AD9EC21E371BE67D5A75BE0E892B8", "openwall"},
 	{"$racf$*USER1*E7D7E66D00018000000900320010001054FDAABCDEF012345674A0F58EE6137D203D3CD649E9E52F80A1F1B7CD263EE2", "P@ssw0rd"},
+	{"$racf$*USER123*E7D7E66D00018000001000340010001054FDAABCDEF012345674A0F58EE6137D3B3AD9EC21E371BE67D5A75BE0E892B8", "openwall"},
 	{ NULL }
 };
 
 static struct custom_salt {
-	unsigned char userid[8 + 1];
-	uint16_t mfact;
-	uint32_t rfact;
-	uint8_t length;
-	uint8_t salt[MAX_SALT_SIZE + HASH_OUTPUT_SIZE];
+	unsigned char userid[16]; /* 8 chars padded to AES block */
+	uint32_t mfact_log2, mfact, rfact;
+	uint8_t salt[MAX_SALT_SIZE + 8];
 } *cur_salt;
 
 static char (*saved_key)[PLAINTEXT_LENGTH + 1];
-static uint32_t (*crypt_out)[SHA256_DIGEST_LENGTH/ sizeof(uint32_t)];
+static uint32_t (*crypt_out)[BINARY_SIZE / sizeof(uint32_t)];
 
 static void init(struct fmt_main *self)
 {
 	omp_autotune(self, OMP_SCALE);
 
-	saved_key = mem_calloc_tiny(sizeof(*saved_key) *
-			self->params.max_keys_per_crypt, MEM_ALIGN_WORD);
-	crypt_out = mem_calloc_tiny(sizeof(*crypt_out) *
-			self->params.max_keys_per_crypt, MEM_ALIGN_WORD);
+	saved_key = mem_calloc(sizeof(*saved_key), self->params.max_keys_per_crypt);
+	crypt_out = mem_calloc(sizeof(*crypt_out), self->params.max_keys_per_crypt);
 }
+
+static void done(void)
+{
+	MEM_FREE(saved_key);
+	MEM_FREE(crypt_out);
+}
+
+static void *get_salt(char *ciphertext);
 
 static int valid(char *ciphertext, struct fmt_main *self)
 {
@@ -158,7 +161,6 @@ static int valid(char *ciphertext, struct fmt_main *self)
 	char *keeptr;
 	char *p, *q;
 	char *c;
-	int res;
 
 	if (strncmp(ciphertext, FORMAT_TAG, FORMAT_TAG_LEN))
 		return 0;
@@ -180,10 +182,14 @@ static int valid(char *ciphertext, struct fmt_main *self)
 	if (strncmp(c + 1, HEADER, HEADER_LEN))  // header check
 		goto err;
 
-	res = !*q && q - p == CIPHERTEXT_LENGTH;
+	if (!*q && q - p == CIPHERTEXT_LENGTH) {
+		struct custom_salt *cs = get_salt(ciphertext);
+		if (!cs->mfact || !cs->rfact)
+			goto err;
 
-	MEM_FREE(keeptr);
-	return res;
+		MEM_FREE(keeptr);
+		return 1;
+	}
 
 err:
 	MEM_FREE(keeptr);
@@ -214,11 +220,11 @@ static void *get_binary(char *ciphertext)
 static void *get_salt(char *ciphertext)
 {
 	static struct custom_salt cs;
-
 	char *ctcopy = xstrdup(ciphertext);
 	char *keeptr = ctcopy, *username;
-	char *c, *p;
-	char mf[5], rf[5] = "0x0";
+	char *p;
+	char hexstr[5];
+	unsigned long v;
 	int i;
 
 	memset(&cs, 0, sizeof(cs));
@@ -227,34 +233,34 @@ static void *get_salt(char *ciphertext)
 	username = strtok(ctcopy, "*");
 
 	strncpy((char*)cs.userid, username, 8);
-	cs.userid[8] = 0;
 	ascii2ebcdic(cs.userid);
 	process_userid(cs.userid);
 
-	c = strrchr(ciphertext,'*');
-	strncpy((char*)mf, c + HEADER_LEN + 1, 4);
-	mf[sizeof(mf)-1] = 0;
-	cs.mfact = (2 << (strtol((char*)mf, NULL, 16)-1)) / HASH_OUTPUT_SIZE;
+	p = strrchr(ciphertext, '*');
 
-	strncpy((char*)rf, c + HEADER_LEN + 1 + 4, 4);
-	cs.rfact = strtol((char*)rf, NULL, 16);
+	memcpy(hexstr, p + HEADER_LEN + 1, 4);
+	hexstr[4] = 0;
+	v = strtoul(hexstr, NULL, 16);
+	if (v >= 8 && v <= 16) {
+		cs.mfact_log2 = v;
+		cs.mfact = v = (1U << v) / HASH_OUTPUT_SIZE;
+	}
 
-	p = strrchr(ciphertext, '*') + 33;
-	for (i = 0; i < MAX_SALT_SIZE; i++) { cs.salt[i] = (atoi16[ARCH_INDEX(*p)] << 4) |
-		atoi16[ARCH_INDEX(p[1])];
+	memcpy(hexstr, p + HEADER_LEN + 1 + 4, 4);
+	v = strtoul(hexstr, NULL, 16);
+	if (v >= 50 && v <= 1000)
+		cs.rfact = v;
+
+	p += 33;
+	for (i = 0; i < MAX_SALT_SIZE; i++) {
+		cs.salt[i] = (atoi16[ARCH_INDEX(*p)] << 4) | atoi16[ARCH_INDEX(p[1])];
 		p += 2;
 	}
-	for ( i = MAX_SALT_SIZE; i < MAX_SALT_SIZE+7; i++) {
-		cs.salt[i] = strtol("00", NULL, 16);
-	}
-	if (cs.mfact > 255) {
-		cs.salt[MAX_SALT_SIZE+2] = (cs.mfact >> 8);
-		cs.salt[MAX_SALT_SIZE+3] = (cs.mfact & 0xff);
-	} else {
-		cs.salt[MAX_SALT_SIZE+3] = cs.mfact;
-	}
+	for (; i < MAX_SALT_SIZE+7; i++)
+		cs.salt[i] = 0;
+	cs.salt[MAX_SALT_SIZE+2] = (cs.mfact >> 8);
+	cs.salt[MAX_SALT_SIZE+3] = (cs.mfact & 0xff);
 	cs.salt[MAX_SALT_SIZE+7] = 1;
-	cs.length = MAX_SALT_SIZE + 8;
 
 	MEM_FREE(keeptr);
 	return (void *)&cs;
@@ -285,12 +291,7 @@ static void set_salt(void *salt)
 
 static void racf_kdfaes_set_key(char *key, int index)
 {
-	int saved_key_length = strlen(key);
-
-	if (saved_key_length > PLAINTEXT_LENGTH)
-		saved_key_length = PLAINTEXT_LENGTH;
-	memcpy(saved_key[index], key, saved_key_length);
-	saved_key[index][saved_key_length] = 0;
+	strnzcpy(saved_key[index], key, sizeof(*saved_key));
 }
 
 static char *get_key(int index)
@@ -317,90 +318,148 @@ static void get_des_hash(char *key, unsigned char *dhash)
 	DES_cbc_encrypt(cur_salt->userid, dhash, 8, &schedule, &ivec, DES_ENCRYPT);
 }
 
+#define HMAC_SHA_IPAD_XOR 0x3636363636363636ULL
+#define HMAC_SHA_OPAD_XOR 0x5c5c5c5c5c5c5c5cULL
+
+#define hash_xor_input(a, b, c) \
+	a[0] ^= b; \
+	a[1] ^= b; \
+	a[2] ^= b; \
+	a[3] ^= b; \
+	a[4] = c; \
+	a[5] = c; \
+	a[6] = c; \
+	a[7] = c;
+
+typedef union {
+	unsigned char uc[64];
+	uint64_t u64[8];
+} hash_input;
+
+typedef union {
+	unsigned char uc[32];
+	uint64_t u64[4];
+} hash_output;
+
+typedef struct {
+	SHA256_CTX ictx, octx;
+} hmac_sha256_ctx;
+
+static MAYBE_INLINE void hmac_sha256_start(hmac_sha256_ctx *ctx, const unsigned char *key, size_t key_len) {
+	hash_input buf;
+
+	/* assert(key_len <= 32); */
+	memcpy(buf.uc, key, key_len);
+	memset(&buf.uc[key_len], 0, 32 - key_len);
+	hash_xor_input(buf.u64, HMAC_SHA_IPAD_XOR, HMAC_SHA_IPAD_XOR);
+	SHA256_Init(&ctx->ictx);
+	SHA256_Update(&ctx->ictx, buf.uc, 64);
+	hash_xor_input(buf.u64, HMAC_SHA_IPAD_XOR ^ HMAC_SHA_OPAD_XOR, HMAC_SHA_OPAD_XOR);
+	SHA256_Init(&ctx->octx);
+	SHA256_Update(&ctx->octx, buf.uc, 64);
+}
+
+static MAYBE_INLINE void hmac_sha256_finish(hmac_sha256_ctx *ctx, const unsigned char *data, size_t data_len, unsigned char *digest) {
+	hash_output local_digest;
+
+	SHA256_Update(&ctx->ictx, data, data_len);
+	SHA256_Final(local_digest.uc, &ctx->ictx);
+	SHA256_Update(&ctx->octx, local_digest.uc, sizeof(local_digest));
+	SHA256_Final(digest, &ctx->octx);
+}
+
+static MAYBE_INLINE void hmac_sha256_finish_const(const hmac_sha256_ctx *ctx, const unsigned char *data, size_t data_len, unsigned char *digest) {
+	hmac_sha256_ctx tmp = *ctx;
+	hmac_sha256_finish(&tmp, data, data_len, digest);
+}
+
+static MAYBE_INLINE void hmac_sha256_full(const unsigned char *key, size_t key_len, const unsigned char *data, size_t data_len, unsigned char *digest) {
+	hmac_sha256_ctx ctx;
+
+	hmac_sha256_start(&ctx, key, key_len);
+	hmac_sha256_finish(&ctx, data, data_len, digest);
+}
+
+#define hash_xor(a, b) \
+	a.u64[0] ^= b.u64[0]; \
+	a.u64[1] ^= b.u64[1]; \
+	a.u64[2] ^= b.u64[2]; \
+	a.u64[3] ^= b.u64[3];
+
 static int crypt_all(int *pcount, struct db_salt *salt)
 {
-	int count = *pcount;
-	int index = 0;
+	const int count = *pcount;
+	int index;
 
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
 	for (index = 0; index < count; index++) {
-		int x, i, n, n_key, ml;
-		char mac1[32] = { 0 };
-		char t1[32] = { 0 };
-		unsigned char key[32];
-		unsigned char *key_p = key;
-		unsigned char m[MAX_SALT_SIZE + HASH_OUTPUT_SIZE + 32];
-		unsigned char *t1f = mem_alloc(HASH_OUTPUT_SIZE * cur_salt->mfact);
-		unsigned char *h_out = (unsigned char*)crypt_out[index];
-		unsigned char plaint[16];
-		AES_KEY akey;
-		unsigned char zeroiv[16];
+		const uint32_t rounds = cur_salt->rfact * 100 - 1;
+		const uint32_t mask = cur_salt->mfact - 1;
+		uint32_t r, n, ml;
+		hash_output h, t1, *t1p, t1f[0x10000 / HASH_OUTPUT_SIZE];
+		union {
+			unsigned char uc[52];
+			hash_output h;
+		} m;
+		hmac_sha256_ctx ctx;
 		unsigned char dh[8];
+		AES_KEY akey;
 
-		ml = cur_salt->length;
-		memset(key_p, 0, sizeof(key));
-		memcpy(m, cur_salt->salt, ml);
+		ml = sizeof(cur_salt->salt);
+		memcpy(m.uc, cur_salt->salt, ml);
 
 		// get des hash
 		get_des_hash(saved_key[index], dh);  // k1
 
 		// kdf
-		for (n = 0; n < cur_salt->mfact; n++) {
-			JTR_hmac_sha256(dh, 8, m, ml, h_out, HASH_OUTPUT_SIZE);
+		hmac_sha256_start(&ctx, dh, 8);
+		memcpy(m.uc+48, "\x00\x00\x00\x01", 4);
+		t1p = t1f;
+		n = cur_salt->mfact;
+		do {
+			hmac_sha256_finish_const(&ctx, m.uc, ml, h.uc);
 
-			ml = 32;
-			memcpy(t1, h_out, HASH_OUTPUT_SIZE);
-			for (x = 0; x < (cur_salt->rfact*100)-1 ; x++) {
-				memcpy(mac1, h_out, HASH_OUTPUT_SIZE);
-				JTR_hmac_sha256(dh, 8, h_out, ml, h_out, HASH_OUTPUT_SIZE);
-				for (i = 0; i < HASH_OUTPUT_SIZE; i++)
-					t1[i] ^= h_out[i];
-			}
+			t1 = h;
+			r = rounds - 1;
+			do {
+				hmac_sha256_finish_const(&ctx, h.uc, HASH_OUTPUT_SIZE, h.uc);
+				hash_xor(t1, h);
+			} while (--r);
+			memcpy(m.uc, h.uc, 16);
+			hmac_sha256_finish_const(&ctx, h.uc, HASH_OUTPUT_SIZE, h.uc);
+			hash_xor(t1, h);
 
-			memcpy(m, mac1, 16);
-			memcpy(m+16, t1, HASH_OUTPUT_SIZE);
-			memcpy(m+48, "\x00\x00\x00\x01", 4);
+			memcpy(m.uc+16, t1.uc, HASH_OUTPUT_SIZE);
 			ml = 52;
-			memcpy(t1f+(n*HASH_OUTPUT_SIZE), t1, HASH_OUTPUT_SIZE);
+			*t1p++ = t1;
+		} while (--n);
+
+		t1p = &t1;
+		memcpy(m.uc + HASH_OUTPUT_SIZE, "\x00\x00\x00\x01", 4);
+		for (n = 0; n <= mask; n++) {
+			m.h = t1f[(((uint32_t)t1p->uc[30] << 8) | t1p->uc[31]) & mask];
+			hmac_sha256_full(t1p->uc, HASH_OUTPUT_SIZE, m.uc, HASH_OUTPUT_SIZE + 4, t1f[n].uc);
+			t1p = &t1f[n];
 		}
 
-		memcpy(key, t1, 32);
+		hmac_sha256_start(&ctx, t1p->uc, HASH_OUTPUT_SIZE);
+		hmac_sha256_finish_const(&ctx, t1f->uc, ml, h.uc);
 
-		for (n = 0; n < cur_salt->mfact; n++) {
-			n_key =(((key_p[28]<<24) & 0xff000000) +
-					((key_p[29]<<16) & 0xff0000) +
-					((key_p[30]<<8)  & 0xff00)  +
-					(key_p[31] & 0xff)) & (cur_salt->mfact-1);
-			memcpy(m, t1f + (n_key * HASH_OUTPUT_SIZE), HASH_OUTPUT_SIZE);
-			memcpy(m + HASH_OUTPUT_SIZE, "\x00\x00\x00\x01", 4);
-			JTR_hmac_sha256(key_p, HASH_OUTPUT_SIZE, m, HASH_OUTPUT_SIZE + 4, h_out, HASH_OUTPUT_SIZE);
-			memcpy(t1f + (n*HASH_OUTPUT_SIZE), h_out, HASH_OUTPUT_SIZE);
-			memcpy(key, h_out, HASH_OUTPUT_SIZE);
-		}
+		memcpy(t1f[mask].uc, "\x00\x00\x00\x01", 4);
+		hmac_sha256_finish_const(&ctx, t1f->uc, (HASH_OUTPUT_SIZE * mask) + 4, h.uc);
 
-		memcpy(t1f + (HASH_OUTPUT_SIZE * (cur_salt->mfact-1)), "\x00\x00\x00\x01", 4);
-		ml = (HASH_OUTPUT_SIZE * (cur_salt->mfact-1))+4;
-		JTR_hmac_sha256(key_p, HASH_OUTPUT_SIZE, t1f, ml, h_out, HASH_OUTPUT_SIZE);
-
-		ml = 32;
-		memcpy(t1, h_out, HASH_OUTPUT_SIZE);
-		for (x = 0; x < (cur_salt->rfact*100)-1; x++) {
-			JTR_hmac_sha256(key_p, HASH_OUTPUT_SIZE, h_out, ml, h_out, HASH_OUTPUT_SIZE);
-			for (i = 0; i < HASH_OUTPUT_SIZE; i++)
-				t1[i] ^= h_out[i];
-		}
-		memcpy(h_out, t1, HASH_OUTPUT_SIZE);
+		t1 = h;
+		r = rounds;
+		do {
+			hmac_sha256_finish_const(&ctx, h.uc, HASH_OUTPUT_SIZE, h.uc);
+			hash_xor(t1, h);
+		} while (--r);
 
 		// encrypt user name
-		memset(plaint, '\x00', sizeof(plaint));
-		memcpy(plaint, cur_salt->userid, 8);
-		memset(zeroiv, 0, 16);
-		AES_set_encrypt_key((unsigned char*)crypt_out[index], 256, &akey);
-		AES_cbc_encrypt(plaint, (unsigned char*)crypt_out[index], 16, &akey, zeroiv, AES_ENCRYPT);
-
-		MEM_FREE(t1f);
+		AES_set_encrypt_key(t1.uc, 256, &akey);
+		AES_encrypt(cur_salt->userid, (unsigned char *)crypt_out[index], &akey);
 	}
 
 	return count;
@@ -428,6 +487,18 @@ static int cmp_exact(char *source, int index)
 	return 1;
 }
 
+static unsigned int tunable_cost_mfact(void *_salt)
+{
+	struct custom_salt *salt = (struct custom_salt *)_salt;
+	return salt->mfact_log2;
+}
+
+static unsigned int tunable_cost_rfact(void *_salt)
+{
+	struct custom_salt *salt = (struct custom_salt *)_salt;
+	return salt->rfact;
+}
+
 struct fmt_main fmt_racf_kdfaes = {
 	{
 		FORMAT_LABEL,
@@ -444,19 +515,19 @@ struct fmt_main fmt_racf_kdfaes = {
 		MIN_KEYS_PER_CRYPT,
 		MAX_KEYS_PER_CRYPT,
 		FMT_CASE | FMT_8_BIT | FMT_OMP,
-		{ NULL },
+		{"PMEM", "PREP"},
 		{ FORMAT_TAG },
 		racf_kdfaes_tests
 	}, {
 		init,
-		fmt_default_done,
+		done,
 		fmt_default_reset,
 		fmt_default_prepare,
 		valid,
 		fmt_default_split,
 		get_binary,
 		get_salt,
-		{ NULL },
+		{tunable_cost_mfact, tunable_cost_rfact},
 		fmt_default_source,
 		{
 			fmt_default_binary_hash_0,

@@ -97,6 +97,10 @@ int main(int argc, char **argv)
 	}
 
 	statfile = fopen(argv[2 + args], "w");
+	if (!statfile) {
+		fprintf(stderr, "could not open %s\n", argv[2 + args]);
+		return -1;
+	}
 
 	nb_lignes = 0;
 	while (fgets(ligne, 4096, fichier)) {

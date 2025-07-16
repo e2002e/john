@@ -73,8 +73,7 @@ run/wpapcap2john
 run/zip2john
 
 src/.gdbinit
-src/Unicode
-src/aes/aes.a
+src/mbedtls/aes.a
 src/arch.h
 src/all_tests.lst
 src/autoconfig-stamp-h
@@ -113,3 +112,10 @@ src/.vscode/
 /src/.vs
 /src/CppProperties.json
 /src/launch.vs.json
+
+# Python-related files
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+**/venv/

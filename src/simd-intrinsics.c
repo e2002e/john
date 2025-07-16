@@ -342,7 +342,7 @@ void SIMDmd5body(vtype* _data, unsigned int *out,
 /*
  * This is currently not used for MD5, and was observed to result
  * in a significant performance regression (at least on XOP) just by sitting
- * here. http://www.openwall.com/lists/john-dev/2015/09/05/5
+ * here. https://www.openwall.com/lists/john-dev/2015/09/05/5
  * NOTE the regression might be gone now anyway since we went from -O3 to -O2.
  */
 	if (SSEi_flags & SSEi_FLAT_OUT) {
@@ -991,7 +991,7 @@ void SIMDmd4body(vtype* _data, unsigned int *out, uint32_t *reload_state,
 /*
  * This is currently not used for MD4, and was observed to result
  * in a significant performance regression (at least on XOP) just by sitting
- * here. http://www.openwall.com/lists/john-dev/2015/09/05/5
+ * here. https://www.openwall.com/lists/john-dev/2015/09/05/5
  * NOTE the regression might be gone now anyway since we went from -O3 to -O2.
  */
 	if (SSEi_flags & SSEi_FLAT_OUT) {

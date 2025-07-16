@@ -1,7 +1,7 @@
 /*
  * KeePass OpenCL cracker for JtR.
  *
- * This software is Copyright (c) 2018 magnum,
+ * This software is Copyright (c) 2018-2024 magnum,
  * Copyright (c) 2016 Fist0urs <eddy.maaalou at gmail.com>,
  * Copyright (c) 2014 m3g9tr0n (Spiros Fraganastasis),
  * Copyright (c) 2012 Dhiru Kholia <dhiru.kholia at gmail.com>
@@ -27,16 +27,26 @@ john_register_one(&fmt_opencl_KeePass);
 #include "formats.h"
 #include "params.h"
 #include "options.h"
-#include "keepass_common.h"
+#include "config.h"
 #include "opencl_common.h"
+#include "opencl_helper_macros.h"
+
+#define KEEPASS_AES                     1
+#define KEEPASS_ARGON2                  0
+#define KEEPASS_REAL_COST_TEST_VECTORS  0
+#include "keepass_common.h"
 
 #define FORMAT_LABEL            "KeePass-opencl"
 #define FORMAT_NAME             ""
-#define ALGORITHM_NAME          "SHA256 AES/Twofish/ChaCha OpenCL"
+#if KEEPASS_ARGON2
+#define ALGORITHM_NAME          "AES/Argon2 OpenCL"
+#else
+#define ALGORITHM_NAME          "AES OpenCL"
+#endif
 
 typedef struct {
 	uint32_t length;
-	uint8_t v[PLAINTEXT_LENGTH];
+	uint8_t v[KEEPASS_PLAINTEXT_LENGTH];
 } password;
 
 typedef struct {
@@ -44,28 +54,35 @@ typedef struct {
 } result;
 
 typedef struct {
+#if KEEPASS_AES
 	uint32_t iterations;
-	uint8_t  hash[32];
-	uint8_t  akey[724]; /* sizeof(AES_CTX) on GPU side */
+#endif
+	uint8_t hash[32];
 } keepass_state;
 
 static int new_keys;
-static cl_int cl_error;
 static password *inbuffer;
 static result *outbuffer;
-static cl_mem mem_in, mem_salt, mem_state, mem_out;
+static cl_mem mem_in, mem_salt, mem_state, mem_out, mem_autotune;
 static struct fmt_main *self;
-#define kernel_loop crypt_kernel
-static cl_kernel kernel_init, kernel_final;
+#define kernel_init crypt_kernel
+static cl_kernel kernel_loop_aes, kernel_final;
 
-static size_t insize, outsize, saltsize;
+static size_t insize, outsize;
+static size_t saltsize = sizeof(keepass_salt_t) + 32 - 1; // Min. content size is 32
+
+#if KEEPASS_ARGON2
+static cl_mem mem_pool;
+static cl_kernel kernel_argon2;
+static size_t keepass_max_argon2_memory;
+#endif
 
 #define STEP			0
 #define SEED			256
 
 #define HASH_LOOPS		1000
 
-#define LOOP_COUNT		((keepass_salt->key_transf_rounds + HASH_LOOPS - 1) / HASH_LOOPS)
+#define LOOP_COUNT		((keepass_salt->t_cost + HASH_LOOPS - 1) / HASH_LOOPS)
 
 static int split_events[] = { 2, -1, -1 };
 
@@ -81,7 +98,10 @@ static size_t get_task_max_work_group_size()
 {
 	size_t s = autotune_get_task_max_work_group_size(FALSE, 0, kernel_init);
 
-	s = MIN(s, autotune_get_task_max_work_group_size(FALSE, 0, kernel_loop));
+	s = MIN(s, autotune_get_task_max_work_group_size(FALSE, 0, kernel_loop_aes));
+#if KEEPASS_ARGON2
+	s = MIN(s, autotune_get_task_max_work_group_size(FALSE, 0, kernel_argon2));
+#endif
 	s = MIN(s, autotune_get_task_max_work_group_size(FALSE, 0, kernel_final));
 
 	return s;
@@ -91,62 +111,53 @@ static void release_clobj(void);
 
 static void create_clobj(size_t gws, struct fmt_main *self)
 {
-	size_t statesize;
-
 	release_clobj();
 
-	statesize = sizeof(keepass_state) * gws;
+	size_t statesize = sizeof(keepass_state) * gws;
 	insize = sizeof(password) * gws;
 	outsize = sizeof(result) * gws;
-	saltsize = sizeof(keepass_salt_t);
 
 	inbuffer = mem_calloc(1, insize);
 	outbuffer = mem_alloc(outsize);
 
-	// Allocate memory
-	mem_in =
-	    clCreateBuffer(context[gpu_id], CL_MEM_READ_ONLY, insize, NULL,
-		&cl_error);
-	HANDLE_CLERROR(cl_error, "Error allocating mem in");
-	mem_salt =
-	    clCreateBuffer(context[gpu_id], CL_MEM_READ_ONLY, saltsize,
-		NULL, &cl_error);
-	HANDLE_CLERROR(cl_error, "Error allocating mem salt");
-	mem_state =
-		clCreateBuffer(context[gpu_id], CL_MEM_READ_WRITE,
-			statesize, NULL, &cl_error);
-	HANDLE_CLERROR(cl_error, "Error allocating mem state");
-	mem_out =
-	    clCreateBuffer(context[gpu_id], CL_MEM_WRITE_ONLY, outsize, NULL,
-		&cl_error);
-	HANDLE_CLERROR(cl_error, "Error allocating mem out");
+	CLCREATEBUFFER(mem_in, CL_RO, insize);
+	CLCREATEBUFFER(mem_salt, CL_RO, saltsize);
+	CLCREATEBUFFER(mem_state, CL_RW, statesize);
+	CLCREATEBUFFER(mem_out, CL_WO, outsize);
+	CLCREATEBUFFER(mem_autotune, CL_RO, sizeof(ocl_autotune_running));
 
 	// Set kernel args
-	HANDLE_CLERROR(clSetKernelArg(kernel_init, 0, sizeof(mem_in),
-		&mem_in), "Error while setting mem_in kernel argument");
-	HANDLE_CLERROR(clSetKernelArg(kernel_init, 1, sizeof(mem_salt),
-		&mem_salt), "Error while setting mem_salt kernel argument");
-	HANDLE_CLERROR(clSetKernelArg(kernel_init, 2, sizeof(mem_state),
-		&mem_state), "Error while setting mem_out kernel argument");
+	CLKERNELARG(kernel_init, 0, mem_in);
+	CLKERNELARG(kernel_init, 1, mem_salt);
+	CLKERNELARG(kernel_init, 2, mem_state);
 
-	HANDLE_CLERROR(clSetKernelArg(kernel_loop, 0, sizeof(mem_state),
-		&mem_state), "Error while setting mem_out kernel argument");
+	CLKERNELARG(kernel_loop_aes, 0, mem_state);
+	CLKERNELARG(kernel_loop_aes, 1, mem_salt);
 
-	HANDLE_CLERROR(clSetKernelArg(kernel_final, 0, sizeof(mem_state),
-		&mem_state), "Error while setting mem_in kernel argument");
-	HANDLE_CLERROR(clSetKernelArg(kernel_final, 1, sizeof(mem_salt),
-		&mem_salt), "Error while setting mem_salt kernel argument");
-	HANDLE_CLERROR(clSetKernelArg(kernel_final, 2, sizeof(mem_out),
-		&mem_out), "Error while setting mem_out kernel argument");
+	CLKERNELARG(kernel_final, 0, mem_state);
+	CLKERNELARG(kernel_final, 1, mem_salt);
+	CLKERNELARG(kernel_final, 2, mem_out);
+
+#if KEEPASS_ARGON2
+	size_t poolsize = MAX(keepass_max_argon2_memory * gws, 1);
+	CLCREATEBUFFER(mem_pool, CL_RW, poolsize);
+	CLKERNELARG(kernel_argon2, 0, mem_state);
+	CLKERNELARG(kernel_argon2, 1, mem_salt);
+	CLKERNELARG(kernel_argon2, 2, mem_pool);
+	CLKERNELARG(kernel_argon2, 3, mem_autotune);
+#endif
 }
 
 static void release_clobj(void)
 {
 	if (outbuffer) {
-		HANDLE_CLERROR(clReleaseMemObject(mem_in), "Release mem in");
-		HANDLE_CLERROR(clReleaseMemObject(mem_salt), "Release mem salt");
-		HANDLE_CLERROR(clReleaseMemObject(mem_state), "Release mem state");
-		HANDLE_CLERROR(clReleaseMemObject(mem_out), "Release mem out");
+		CLRELEASEBUFFER(mem_in);
+		CLRELEASEBUFFER(mem_salt);
+		CLRELEASEBUFFER(mem_state);
+		CLRELEASEBUFFER(mem_out);
+#if KEEPASS_ARGON2
+		CLRELEASEBUFFER(mem_pool);
+#endif
 
 		MEM_FREE(inbuffer);
 		MEM_FREE(outbuffer);
@@ -162,38 +173,54 @@ static void init(struct fmt_main *_self)
 static void reset(struct db_main *db)
 {
 	if (!program[gpu_id]) {
-		char build_opts[96];
+		char build_opts[128];
 
 		snprintf(build_opts, sizeof(build_opts),
-		         "-DPLAINTEXT_LENGTH=%d -DHASH_LOOPS=%d -DMAX_CONT_SIZE=%d",
-		         PLAINTEXT_LENGTH, HASH_LOOPS, MAX_CONT_SIZE);
+		         "-DPLAINTEXT_LENGTH=%d -DHASH_LOOPS=%d -DMAX_CONTENT_SIZE=%d -DKEEPASS_AES%s",
+		         KEEPASS_PLAINTEXT_LENGTH, HASH_LOOPS, KEEPASS_MAX_CONTENT_SIZE,
+		         KEEPASS_ARGON2 ? " -DKEEPASS_ARGON2" : "");
+
 		opencl_init("$JOHN/opencl/keepass_kernel.cl", gpu_id,  build_opts);
 
-		kernel_init =
-			clCreateKernel(program[gpu_id], "keepass_init", &cl_error);
-		HANDLE_CLERROR(cl_error, "Error creating kernel");
-
-		kernel_loop =
-			clCreateKernel(program[gpu_id], "keepass_loop", &cl_error);
-		HANDLE_CLERROR(cl_error, "Error creating kernel");
-
-		kernel_final =
-			clCreateKernel(program[gpu_id], "keepass_final", &cl_error);
-		HANDLE_CLERROR(cl_error, "Error creating kernel");
+		CLCREATEKERNEL(kernel_init, "keepass_init");
+		CLCREATEKERNEL(kernel_loop_aes, "keepass_loop_aes");
+#if KEEPASS_ARGON2
+		CLCREATEKERNEL(kernel_argon2, "keepass_argon2");
+#endif
+		CLCREATEKERNEL(kernel_final, "keepass_final");
 	}
 
-	// Initialize openCL tuning (library) for this format.
-	opencl_init_auto_setup(SEED, HASH_LOOPS, split_events, warn, 2, self,
+#if KEEPASS_ARGON2
+	/* Argon2 has tough memory requirements for a GPU */
+	uint32_t iter, lanes, m_cost;
+	if (self_test_running) {
+		iter = db->max_cost[0];
+		m_cost = db->max_cost[1];
+		lanes = db->max_cost[2];
+	} else {
+		iter = MIN(db->max_cost[0], options.loader.max_cost[0]);
+		m_cost = MIN(db->max_cost[1], options.loader.max_cost[1]);
+		lanes = MIN(db->max_cost[2], options.loader.max_cost[2]);
+	}
+
+	/* Minimum memory_blocks = 8L blocks, where L is the number of lanes */
+	keepass_max_argon2_memory = MAX(m_cost, 8 * lanes) * 1024;
+
+	size_t gws_limit = get_max_mem_alloc_size(gpu_id) / MAX(keepass_max_argon2_memory, sizeof(keepass_state));
+	uint32_t loops = iter < 100 ? iter : HASH_LOOPS;
+	size_t dimensioning_memory_need = MAX(keepass_max_argon2_memory, sizeof(keepass_state));
+#else
+	size_t gws_limit = get_max_mem_alloc_size(gpu_id) / sizeof(keepass_state);
+	uint32_t loops = HASH_LOOPS;
+	size_t dimensioning_memory_need = sizeof(keepass_state);
+#endif
+
+	opencl_init_auto_setup(SEED, loops, split_events, warn, 2, self,
 	                       create_clobj, release_clobj,
-	                       sizeof(keepass_state), 0, db);
+	                       dimensioning_memory_need, gws_limit, db);
 
-	int iter = db->max_cost[0];
-
-	if (options.loader.min_cost[0])
-		iter = options.loader.min_cost[0];
-
-	// Auto tune execution from shared/included code, max. 200ms total.
-	autotune_run(self, iter, 0, 200);
+	/* Auto tune execution from shared/included code, max. 200 ms per kernel invocation */
+	autotune_run(self, loops, gws_limit, 200);
 }
 
 static void done(void)
@@ -202,7 +229,10 @@ static void done(void)
 		release_clobj();
 
 		HANDLE_CLERROR(clReleaseKernel(kernel_init), "Release kernel");
-		HANDLE_CLERROR(clReleaseKernel(kernel_loop), "Release kernel");
+		HANDLE_CLERROR(clReleaseKernel(kernel_loop_aes), "Release kernel");
+#if KEEPASS_ARGON2
+		HANDLE_CLERROR(clReleaseKernel(kernel_argon2), "Release kernel");
+#endif
 		HANDLE_CLERROR(clReleaseKernel(kernel_final), "Release kernel");
 		HANDLE_CLERROR(clReleaseProgram(program[gpu_id]), "Release Program");
 
@@ -227,7 +257,7 @@ static void set_key(char *key, int index)
 
 static char *get_key(int index)
 {
-	static char ret[PLAINTEXT_LENGTH + 1];
+	static char ret[KEEPASS_PLAINTEXT_LENGTH + 1];
 	uint32_t length = inbuffer[index].length;
 
 	memcpy(ret, inbuffer[index].v, length);
@@ -237,11 +267,23 @@ static char *get_key(int index)
 
 static void set_salt(void *salt)
 {
-	keepass_salt = salt;
+	keepass_salt = *((keepass_salt_t**)salt);
 
-	HANDLE_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], mem_salt,
-		CL_FALSE, 0, saltsize, keepass_salt, 0, NULL, NULL),
-	    "Salt transfer");
+	if (sizeof(keepass_salt_t) + keepass_salt->content_size - 1 > saltsize) {
+		CLRELEASEBUFFER(mem_salt);
+		saltsize = sizeof(keepass_salt_t) + keepass_salt->content_size - 1;
+		CLCREATEBUFFER(mem_salt, CL_RO, saltsize);
+		CLKERNELARG(kernel_init, 1, mem_salt);
+		CLKERNELARG(kernel_loop_aes, 1, mem_salt);
+		CLKERNELARG(kernel_final, 1, mem_salt);
+#if KEEPASS_ARGON2
+		CLKERNELARG(kernel_argon2, 1, mem_salt);
+#endif
+	}
+
+	CLWRITE(mem_salt, CL_FALSE, 0, saltsize, keepass_salt, NULL);
+	CLWRITE(mem_autotune, CL_FALSE, 0, sizeof(ocl_autotune_running),
+	        &ocl_autotune_running, NULL);
 	HANDLE_CLERROR(clFlush(queue[gpu_id]), "clFlush failed in set_salt()");
 }
 
@@ -255,10 +297,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 
 	// Copy data to gpu
 	if (new_keys) {
-		BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], mem_in, CL_FALSE, 0,
-			insize, inbuffer, 0, NULL, multi_profilingEvent[0]),
-			"Copy data to gpu");
-
+		CLWRITE_CRYPT(mem_in, CL_FALSE, 0, insize, inbuffer, multi_profilingEvent[0]);
 		new_keys = 0;
 	}
 
@@ -269,16 +308,30 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		multi_profilingEvent[1]), "Run kernel");
 
 	WAIT_INIT(global_work_size)
-	for (i = 0; i < (ocl_autotune_running ? 1 : LOOP_COUNT); i++) {
+	if (keepass_salt->kdf == 0) {
+		for (i = 0; i < (ocl_autotune_running ? 1 : LOOP_COUNT); i++) {
+			BENCH_CLERROR(clEnqueueNDRangeKernel(queue[gpu_id],
+			                                     kernel_loop_aes, 1, NULL,
+			                                     &global_work_size, lws, 0, NULL,
+			                                     multi_profilingEvent[2]), "Run kernel");
+			WAIT_SLEEP
+			BENCH_CLERROR(clFinish(queue[gpu_id]), "Error running loop kernel");
+			WAIT_UPDATE
+			opencl_process_event();
+		}
+	}
+#if KEEPASS_ARGON2
+	else {
 		BENCH_CLERROR(clEnqueueNDRangeKernel(queue[gpu_id],
-			kernel_loop, 1, NULL,
-			&global_work_size, lws, 0, NULL,
-			multi_profilingEvent[2]), "Run kernel");
+		                                     kernel_argon2, 1, NULL,
+		                                     &global_work_size, lws, 0, NULL,
+		                                     multi_profilingEvent[2]), "Run kernel");
 		WAIT_SLEEP
 		BENCH_CLERROR(clFinish(queue[gpu_id]), "Error running loop kernel");
 		WAIT_UPDATE
 		opencl_process_event();
 	}
+#endif
 	WAIT_DONE
 
 	WAIT_INIT(global_work_size)
@@ -288,9 +341,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		multi_profilingEvent[3]), "Run kernel");
 
 	// Read the result back
-	BENCH_CLERROR(clEnqueueReadBuffer(queue[gpu_id], mem_out, CL_FALSE, 0,
-		outsize, outbuffer, 0, NULL, multi_profilingEvent[4]),
-		"Copy result back");
+	CLREAD_CRYPT(mem_out, CL_FALSE, 0, outsize, outbuffer, multi_profilingEvent[4]);
 
 	BENCH_CLERROR(clFlush(queue[gpu_id]), "Error in clFlush");
 	WAIT_SLEEP
@@ -326,23 +377,26 @@ struct fmt_main fmt_opencl_KeePass = {
 		FORMAT_LABEL,
 		FORMAT_NAME,
 		ALGORITHM_NAME,
-		BENCHMARK_COMMENT,
-		BENCHMARK_LENGTH,
+		KEEPASS_BENCHMARK_COMMENT,
+		KEEPASS_BENCHMARK_LENGTH,
 		0,
-		PLAINTEXT_LENGTH,
-		BINARY_SIZE,
-		BINARY_ALIGN,
-		SALT_SIZE,
-		SALT_ALIGN,
-		MIN_KEYS_PER_CRYPT,
-		MAX_KEYS_PER_CRYPT,
-		FMT_CASE | FMT_8_BIT | FMT_HUGE_INPUT,
+		KEEPASS_PLAINTEXT_LENGTH,
+		KEEPASS_BINARY_SIZE,
+		KEEPASS_BINARY_ALIGN,
+		KEEPASS_SALT_SIZE,
+		KEEPASS_SALT_ALIGN,
+		KEEPASS_MIN_KEYS_PER_CRYPT,
+		KEEPASS_MAX_KEYS_PER_CRYPT,
+		FMT_CASE | FMT_8_BIT | FMT_DYNA_SALT | FMT_HUGE_INPUT,
 		{
-			"iteration count",
-			"version",
-			"algorithm [0=AES 1=TwoFish 2=ChaCha]",
+			"t (rounds)",
+#if KEEPASS_ARGON2
+			"m",
+			"p",
+			"KDF [0=Argon2d 2=Argon2id 3=AES]",
+#endif
 		},
-		{ FORMAT_TAG },
+		{ KEEPASS_FORMAT_TAG },
 		keepass_tests
 	}, {
 		init,
@@ -354,9 +408,12 @@ struct fmt_main fmt_opencl_KeePass = {
 		fmt_default_binary,
 		keepass_get_salt,
 		{
-			keepass_iteration_count,
-			keepass_version,
-			keepass_algorithm,
+			keepass_cost_t,
+#if KEEPASS_ARGON2
+			keepass_cost_m,
+			keepass_cost_p,
+			keepass_kdf,
+#endif
 		},
 		fmt_default_source,
 		{

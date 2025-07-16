@@ -632,9 +632,6 @@ M4_INCLUDES
 HAVE_LIBFUZZER
 HAVE_FUZZ
 EXE_EXT
-YASM_OPTIONS
-AESNI_OS
-AESNI_ARCH
 EXTRA_AS_FLAGS
 ASFLAGS
 CPU_BIT_STR
@@ -707,7 +704,6 @@ build
 LD
 AR
 AS
-YASM
 CFLAGS_EXTRA
 target_alias
 host_alias
@@ -781,7 +777,6 @@ enable_ztex
 host_alias
 target_alias
 CFLAGS_EXTRA
-YASM
 AS
 AR
 LD
@@ -1429,7 +1424,6 @@ Some influential environment variables:
   CFLAGS_EXTRA
               additional CFLAGS for -Woptions and other things, not used
               during ./configure but put in resulting Makefile
-  YASM        full pathname of yasm (for optional AES-NI support)
   AS          full pathname of assembler to use
   AR          full pathname of "ar" to use
   LD          full pathname of linker to use
@@ -3399,7 +3393,6 @@ ac_config_headers="$ac_config_headers autoconfig.h"
 # - add Makefiles
 # - set ZTEX_SUBDIRS, ZTEX_LIBS
 #
-
 
 
 
@@ -6061,6 +6054,56 @@ if ac_fn_c_try_compile "$LINENO"; then :
 $as_echo "yes" >&6; }
 fi
       CFLAGS_EX="$CFLAGS_EX -Wall"
+
+else
+  if test 1 -gt 0; then :
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+$as_echo "no" >&6; }
+fi
+    if test "1" = 2; then :
+  as_fn_error $? "Not supported by compiler" "$LINENO" 5
+fi
+
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
+  CFLAGS="$ac_saved_cflags"
+  ac_ext=c
+ac_cpp='$CPP $CPPFLAGS'
+ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
+ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
+ac_compiler_gnu=$ac_cv_c_compiler_gnu
+
+
+
+      if test 1 -gt 0; then :
+  { $as_echo "$as_me:${as_lineno-$LINENO}: checking if $CC supports -std=gnu99" >&5
+$as_echo_n "checking if $CC supports -std=gnu99... " >&6; }
+fi
+  ac_ext=c
+ac_cpp='$CPP $CPPFLAGS'
+ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
+ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
+ac_compiler_gnu=$ac_cv_c_compiler_gnu
+
+  ac_saved_cflags="$CFLAGS"
+  CFLAGS="-Werror -std=gnu99"
+  cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int
+main ()
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"; then :
+  if test "1" -gt 0; then :
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+$as_echo "yes" >&6; }
+fi
+      CFLAGS_EX="$CFLAGS_EX -std=gnu99"
 
 else
   if test 1 -gt 0; then :
@@ -9181,6 +9224,59 @@ ac_compiler_gnu=$ac_cv_c_compiler_gnu
 
     SIMD_NAME="Altivec2"
     ;;
+  avx512)
+    if test 2 -gt 0; then :
+  { $as_echo "$as_me:${as_lineno-$LINENO}: checking if $CC supports -mavx512bw -mavx512vl -mavx512dq w/ linking" >&5
+$as_echo_n "checking if $CC supports -mavx512bw -mavx512vl -mavx512dq w/ linking... " >&6; }
+fi
+  ac_ext=c
+ac_cpp='$CPP $CPPFLAGS'
+ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
+ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
+ac_compiler_gnu=$ac_cv_c_compiler_gnu
+
+  ac_saved_cflags="$CFLAGS"
+  CFLAGS="-Werror -mavx512bw -mavx512vl -mavx512dq"
+  cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int
+main ()
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"; then :
+  if test "2" -gt 0; then :
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+$as_echo "yes" >&6; }
+fi
+      CFLAGS_EX="$CFLAGS_EX -mavx512bw -mavx512vl -mavx512dq"
+
+else
+  if test 2 -gt 0; then :
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+$as_echo "no" >&6; }
+fi
+    if test "2" = 2; then :
+  as_fn_error $? "Not supported by compiler/linker" "$LINENO" 5
+fi
+
+fi
+rm -f core conftest.err conftest.$ac_objext \
+    conftest$ac_exeext conftest.$ac_ext
+  CFLAGS="$ac_saved_cflags"
+  ac_ext=c
+ac_cpp='$CPP $CPPFLAGS'
+ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
+ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
+ac_compiler_gnu=$ac_cv_c_compiler_gnu
+
+
+    SIMD_NAME="AVX-512"
+    ;;
     mmx|sse*|ssse3|avx*|xop*)
     SIMD_NAME=`echo $simd | tr a-z A-Z`
     { $as_echo "$as_me:${as_lineno-$LINENO}: Trying to force $SIMD_NAME using default method (--enable-simd=$simd)." >&5
@@ -9332,7 +9428,12 @@ ac_compiler_gnu=$ac_cv_c_compiler_gnu
 
 fi
     ;;
-  arm*) ARCH_LINK=arm32le.h endian=little
+  arm*) endian=little
+    if test "$CPU_BIT_STR" -eq 64; then
+      ARCH_LINK=arm64le.h
+    else
+      ARCH_LINK=arm32le.h
+    fi
     { $as_echo "$as_me:${as_lineno-$LINENO}: checking special compiler flags" >&5
 $as_echo_n "checking special compiler flags... " >&6; }
     { $as_echo "$as_me:${as_lineno-$LINENO}: result: ARM" >&5
@@ -9382,10 +9483,11 @@ rm -f core *.core core.conftest.* gmon.out bb.out conftest$ac_exeext \
   conftest.$ac_objext conftest.beam conftest.$ac_ext
 fi
 
-  CC="$CC_BACKUP -march=armv8-a+simd"
-  { $as_echo "$as_me:${as_lineno-$LINENO}: checking for ASIMD" >&5
+  if test "$CPU_BIT_STR" -eq 64; then
+    CC="$CC_BACKUP -march=armv8-a+simd"
+    { $as_echo "$as_me:${as_lineno-$LINENO}: checking for ASIMD" >&5
 $as_echo_n "checking for ASIMD... " >&6; }
-  if test "$cross_compiling" = yes; then :
+    if test "$cross_compiling" = yes; then :
   { { $as_echo "$as_me:${as_lineno-$LINENO}: error: in \`$ac_pwd':" >&5
 $as_echo "$as_me: error: in \`$ac_pwd':" >&2;}
 as_fn_error $? "cannot run test program while cross compiling
@@ -9394,23 +9496,23 @@ else
   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
-    #include <arm_neon.h>
-  #include <stdio.h>
-  extern void exit(int);
-  int main(){uint32x4_t t;*((long*)&t)=1;t=veorq_u32(t,t);if((*(unsigned*)&t)==88)printf(".");exit(0);}
+      #include <arm_neon.h>
+    #include <stdio.h>
+    extern void exit(int);
+    int main(){uint32x4_t t;*((long*)&t)=1;t=veorq_u32(t,t);if((*(unsigned*)&t)==88)printf(".");exit(0);}
 
 
 _ACEOF
 if ac_fn_c_try_run "$LINENO"; then :
   CPU_BEST_FLAGS="-march=armv8-a+simd"
-     SIMD_NAME="ASIMD"
-     { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+      SIMD_NAME="ASIMD"
+      { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
 $as_echo "yes" >&6; }
-     ARCH_LINK=arm64le.h
+      ARCH_LINK=arm64le.h
 
 else
   CPU_NOTFOUND="1"
-     { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+      { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
 $as_echo "no" >&6; }
 
 fi
@@ -9418,6 +9520,7 @@ rm -f core *.core core.conftest.* gmon.out bb.out conftest$ac_exeext \
   conftest.$ac_objext conftest.beam conftest.$ac_ext
 fi
 
+  fi
 else
   { $as_echo "$as_me:${as_lineno-$LINENO}: checking for NEON" >&5
 $as_echo_n "checking for NEON... " >&6; }
@@ -9446,34 +9549,36 @@ $as_echo "no" >&6; }
 fi
 rm -f core conftest.err conftest.$ac_objext \
     conftest$ac_exeext conftest.$ac_ext
-  { $as_echo "$as_me:${as_lineno-$LINENO}: checking for ASIMD" >&5
+  if test "$CPU_BIT_STR" -eq 64; then
+    { $as_echo "$as_me:${as_lineno-$LINENO}: checking for ASIMD" >&5
 $as_echo_n "checking for ASIMD... " >&6; }
-  CC="$CC_BACKUP -march=armv8-a+simd"
-  cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+    CC="$CC_BACKUP -march=armv8-a+simd"
+    cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
-    #include <arm_neon.h>
-  #include <stdio.h>
-  extern void exit(int);
-  int main(){uint32x4_t t;*((long*)&t)=1;t=veorq_u32(t,t);if((*(unsigned*)&t)==88)printf(".");exit(0);}
+      #include <arm_neon.h>
+    #include <stdio.h>
+    extern void exit(int);
+    int main(){uint32x4_t t;*((long*)&t)=1;t=veorq_u32(t,t);if((*(unsigned*)&t)==88)printf(".");exit(0);}
 
 
 _ACEOF
 if ac_fn_c_try_link "$LINENO"; then :
   CPU_BEST_FLAGS="-march=armv8-a+simd"
-     SIMD_NAME="ASIMD"
-     ARCH_LINK=arm64le.h
-     { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+      SIMD_NAME="ASIMD"
+      ARCH_LINK=arm64le.h
+      { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
 $as_echo "yes" >&6; }
 
 else
   CPU_NOTFOUND="1"
-     { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+      { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
 $as_echo "no" >&6; }
 
 fi
 rm -f core conftest.err conftest.$ac_objext \
     conftest$ac_exeext conftest.$ac_ext
+  fi
 fi
 fi
 
@@ -11061,6 +11166,11 @@ fi
 esac
 CFLAGS="$CFLAGS $SIMD_FLAGS -O0"
 
+ALREADY_TESTED=0
+case "$simd" in
+  mmx|sse*|ssse3|avx*|xop*) ALREADY_TESTED=1 ;;
+esac
+
 if test "x$simd" != xno; then
  if test "x$enable_native_tests" != xno && test "x$simd" = xyes; then
   { $as_echo "$as_me:${as_lineno-$LINENO}: Testing build host's native CPU features" >&5
@@ -11433,10 +11543,10 @@ fi
 
   if test "x$CPU_NOTFOUND" = x0; then :
 
-  CFLAGS="$CFLAGS_BACKUP -mavx512bw -P $EXTRA_AS_FLAGS $CPPFLAGS $CFLAGS_EXTRA $CPUID_ASM"
+  CFLAGS="$CFLAGS_BACKUP -mavx512bw -mavx512vl -mavx512dq -P $EXTRA_AS_FLAGS $CPPFLAGS $CFLAGS_EXTRA $CPUID_ASM"
 
-  { $as_echo "$as_me:${as_lineno-$LINENO}: checking for AVX512BW" >&5
-$as_echo_n "checking for AVX512BW... " >&6; }
+  { $as_echo "$as_me:${as_lineno-$LINENO}: checking for AVX512BW + AVX512VL + AVX512DQ" >&5
+$as_echo_n "checking for AVX512BW + AVX512VL + AVX512DQ... " >&6; }
   if test "$cross_compiling" = yes; then :
   { { $as_echo "$as_me:${as_lineno-$LINENO}: error: in \`$ac_pwd':" >&5
 $as_echo "$as_me: error: in \`$ac_pwd':" >&2;}
@@ -11451,8 +11561,8 @@ extern int CPU_detect(void); extern char CPU_req_name[];
 
 _ACEOF
 if ac_fn_c_try_run "$LINENO"; then :
-  CPU_BEST_FLAGS="-mavx512bw"
-     SIMD_NAME="AVX512BW"
+  CPU_BEST_FLAGS="-mavx512bw -mavx512vl -mavx512dq"
+     SIMD_NAME="AVX-512"
      { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
 $as_echo "yes" >&6; }
 
@@ -11468,6 +11578,11 @@ fi
 
 
 fi
+
+ elif test "x$ALREADY_TESTED" = x1; then
+
+   # The $CFLAGS_EX already contains the required compiler flags
+   CPU_NOTFOUND=0 #nothing to do here
 
  else
 
@@ -11758,21 +11873,22 @@ fi
 
   if test "x$CPU_NOTFOUND" = x0; then :
 
-  { $as_echo "$as_me:${as_lineno-$LINENO}: checking for AVX512BW" >&5
-$as_echo_n "checking for AVX512BW... " >&6; }
+  { $as_echo "$as_me:${as_lineno-$LINENO}: checking for AVX512BW + AVX512VL + AVX512DQ" >&5
+$as_echo_n "checking for AVX512BW + AVX512VL + AVX512DQ... " >&6; }
   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
     #include <immintrin.h>
         #include <stdio.h>
         extern void exit(int);
-        int main(){__m512i t=_mm512_slli_epi16(_mm512_set1_epi16(1),1);exit(!(_mm_cvtsi128_si64x(_mm512_extracti32x4_epi32(t,0))==0x2000200020002ULL));}
+        int main(){__m512i t=_mm512_slli_epi16(_mm512_set1_epi16(1),1);__int64_t ret_value=(!(_mm_cvtsi128_si64x(_mm512_extracti32x4_epi32(t,0))==0x2000200020002ULL));
+                   __m128i u, t1;*((long long*)&u)=1;t1=u;u=_mm_rol_epi32(t1,1);if((*(long long*)&t)==88)printf(".");exit(ret_value);}
 
 
 _ACEOF
 if ac_fn_c_try_link "$LINENO"; then :
-  CPU_BEST_FLAGS="-mavx512bw"
-     SIMD_NAME="AVX512BW"
+  CPU_BEST_FLAGS="-mavx512bw -mavx512vl -mavx512dq"
+     SIMD_NAME="AVX-512"
      { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
 $as_echo "yes" >&6; }
 
@@ -11795,6 +11911,60 @@ if test $simd != yes; then
   else
     CPU_BEST_FLAGS=$SIMD_FLAGS
   fi
+fi
+
+if test "x$simd" != xno; then
+  CFLAGS_EX=""
+    if test 1 -gt 0; then :
+  { $as_echo "$as_me:${as_lineno-$LINENO}: checking if $CC supports -maes -mpclmul" >&5
+$as_echo_n "checking if $CC supports -maes -mpclmul... " >&6; }
+fi
+  ac_ext=c
+ac_cpp='$CPP $CPPFLAGS'
+ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
+ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
+ac_compiler_gnu=$ac_cv_c_compiler_gnu
+
+  ac_saved_cflags="$CFLAGS"
+  CFLAGS="-Werror -maes -mpclmul"
+  cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int
+main ()
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"; then :
+  if test "1" -gt 0; then :
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+$as_echo "yes" >&6; }
+fi
+      CFLAGS_EX="$CFLAGS_EX -maes -mpclmul"
+
+else
+  if test 1 -gt 0; then :
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+$as_echo "no" >&6; }
+fi
+    if test "1" = 2; then :
+  as_fn_error $? "Not supported by compiler" "$LINENO" 5
+fi
+
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
+  CFLAGS="$ac_saved_cflags"
+  ac_ext=c
+ac_cpp='$CPP $CPPFLAGS'
+ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
+ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
+ac_compiler_gnu=$ac_cv_c_compiler_gnu
+
+
+  CPU_BEST_FLAGS="$CPU_BEST_FLAGS $CFLAGS_EX"
 fi
 
 CC="$CC_BACKUP"
@@ -15181,7 +15351,11 @@ fi
 rm -f confcache
 
 if test "x$simd" != xno ; then
-  CPU_BEST_FLAGS_MAIN=-DJOHN_$(echo ${SIMD_NAME} | tr .a-z _A-Z)
+  if test "x$SIMD_NAME" = "xAVX-512"; then
+    CPU_BEST_FLAGS_MAIN=-DJOHN_AVX512BW
+  else
+    CPU_BEST_FLAGS_MAIN=-DJOHN_$(echo ${SIMD_NAME} | tr .a-z _A-Z)
+  fi
 fi
 
 CC_CPU="${CPU_BEST_FLAGS}"
@@ -15246,94 +15420,6 @@ fi
 cat >>confdefs.h <<_ACEOF
 #define ARCH_BITS_STR "$CPU_BIT_STR"
 _ACEOF
-
-
-if test "$CPU_BIT_STR" = "32"; then
-   aesni_arch="86"
-else
-   aesni_arch="64"
-fi
-AESNI_ARCH="$aesni_arch"
-
-
-aesni_os=""
-aesni_options="DISABLED"
-
-if test "x$ax_intel_x32" = xyes; then
-   aesni_os=linux aesni_options="-g dwarf2 -f elfx32"
-else
-   case "${host}_${CFLAGS}" in
-      *_*-mno-mmx*) ;;
-      *_*-mno-sse2*) ;;
-      x86_64*darwin*)
-         aesni_os=darwin
-         aesni_options="--prefix=_ -f macho${CPU_BIT_STR}"
-      ;;
-      i?86*darwin*)
-         aesni_os=darwin
-         aesni_options="-f macho${CPU_BIT_STR}"
-      ;;
-      *86*linux*)
-         aesni_os=linux
-         aesni_options="-g dwarf2 -f elf${CPU_BIT_STR}"
-      ;;
-      *86*cygwin*)
-         aesni_os=cygwin
-         aesni_options="-f win${CPU_BIT_STR}"
-      ;;
-   esac
-fi
-if test "x$aesni_options" != xDISABLED; then
-   { $as_echo "$as_me:${as_lineno-$LINENO}: checking for yasm that supports \"$aesni_options\"" >&5
-$as_echo_n "checking for yasm that supports \"$aesni_options\"... " >&6; }
-if ${ac_cv_path_YASM+:} false; then :
-  $as_echo_n "(cached) " >&6
-else
-  if test -z "$YASM"; then
-  ac_path_YASM_found=false
-  # Loop through the user's path and test for each of PROGNAME-LIST
-  as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
-for as_dir in $PATH
-do
-  IFS=$as_save_IFS
-  test -z "$as_dir" && as_dir=.
-    for ac_prog in yasm; do
-    for ac_exec_ext in '' $ac_executable_extensions; do
-      ac_path_YASM="$as_dir/$ac_prog$ac_exec_ext"
-      as_fn_executable_p "$ac_path_YASM" || continue
-yasmout=`$ac_path_YASM $aesni_options 2>&1 | grep "No input files"`
-           test "x$yasmout" != x \
-           && ac_cv_path_YASM=$ac_path_YASM ac_path_YASM_found=:
-
-      $ac_path_YASM_found && break 3
-    done
-  done
-  done
-IFS=$as_save_IFS
-  if test -z "$ac_cv_path_YASM"; then
-    :
-  fi
-else
-  ac_cv_path_YASM=$YASM
-fi
-
-fi
-{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_path_YASM" >&5
-$as_echo "$ac_cv_path_YASM" >&6; }
-fi
-
-if test "x$aesni_options" != xDISABLED -a "x$ac_path_YASM_found" != xfalse; then
-   using_aesni="run-time detection"
-elif test "$with_openssl" = "yes" -a "$cpu_family" = intel; then
-   using_aesni="depends on OpenSSL"
-else
-   using_aesni=no
-fi
-YASM=$ac_cv_path_YASM
-
-AESNI_OS="$aesni_os"
-
-YASM_OPTIONS="$aesni_options"
 
 
 
@@ -16484,7 +16570,8 @@ if test "`echo *_plug.c`" != "*_plug.c"; then
    if test "x$plug_deps" = xyes -a "x$PERL" != x ; then
       { $as_echo "$as_me:${as_lineno-$LINENO}: creating Makefile dependencies" >&5
 $as_echo "$as_me: creating Makefile dependencies" >&6;}
-      PLUGFORMATS_DEPS=`$PERL ./plugin_deps.pl *_plug.c`
+
+                              PLUGFORMATS_DEPS=`$PERL ./plugin_deps.pl 2>/dev/null *_plug.c`
 
    fi
 fi
@@ -16495,7 +16582,7 @@ echo "#define JOHN_BLD \"${host_os} ${CPU_BIT_STR}-bit${using_x32} ${host_cpu} $
 
 HOST_OS="$host_os"
 
-ac_config_files="$ac_config_files Makefile aes/Makefile aes/aesni/Makefile aes/openssl/Makefile secp256k1/Makefile ed25519-donna/Makefile poly1305-donna/Makefile"
+ac_config_files="$ac_config_files Makefile mbedtls/Makefile secp256k1/Makefile ed25519-donna/Makefile poly1305-donna/Makefile"
 
 
 CFLAGS_EXTRA_BACKUP=$CFLAGS_EXTRA
@@ -17207,9 +17294,7 @@ do
     "ztex/pkt_comm/Makefile") CONFIG_FILES="$CONFIG_FILES ztex/pkt_comm/Makefile" ;;
     "arch.h") CONFIG_LINKS="$CONFIG_LINKS arch.h:$ARCH_LINK" ;;
     "Makefile") CONFIG_FILES="$CONFIG_FILES Makefile" ;;
-    "aes/Makefile") CONFIG_FILES="$CONFIG_FILES aes/Makefile" ;;
-    "aes/aesni/Makefile") CONFIG_FILES="$CONFIG_FILES aes/aesni/Makefile" ;;
-    "aes/openssl/Makefile") CONFIG_FILES="$CONFIG_FILES aes/openssl/Makefile" ;;
+    "mbedtls/Makefile") CONFIG_FILES="$CONFIG_FILES mbedtls/Makefile" ;;
     "secp256k1/Makefile") CONFIG_FILES="$CONFIG_FILES secp256k1/Makefile" ;;
     "ed25519-donna/Makefile") CONFIG_FILES="$CONFIG_FILES ed25519-donna/Makefile" ;;
     "poly1305-donna/Makefile") CONFIG_FILES="$CONFIG_FILES poly1305-donna/Makefile" ;;
@@ -18013,7 +18098,6 @@ cat <<EOF
 Configured for building John the Ripper ${PACKAGE_VERSION}:
 
 Target CPU ......................................... ${CPU_NAME}, ${CPU_BIT_STR}-bit ${using_endian}${using_x32}
-AES-NI support ..................................... ${using_aesni}
 Target OS .......................................... ${host_os}
 Cross compiling .................................... ${cross_compiling}
 Legacy arch header ................................. ${ARCH_LINK}
@@ -18050,4 +18134,9 @@ fi
 
 echo "Install missing libraries to get any needed features that were omitted."
 echo ""
-echo "Configure finished.  Now \"${use_make} -s clean && ${use_make} -sj4\" to compile."
+
+NPROC=`(exec nproc) 2> /dev/null`
+test -n "$NPROC" || NPROC=`grep -c '^processor' /proc/cpuinfo 2> /dev/null`
+test -n "$NPROC" || NPROC=4
+
+echo "Configure finished.  Now \"${use_make} -s clean && ${use_make} -sj${NPROC}\" to compile."

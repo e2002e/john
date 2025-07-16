@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018 magnum
+ * Copyright (c) 2017-2024 magnum
  * Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>
  * Copyright (c) 2016 Mike Belopuhov
  *
@@ -26,14 +26,18 @@
 #ifndef _AES_BITSLICE
 #define _AES_BITSLICE
 
+typedef struct aes_tables {
+	uint32_t dummy;
+} aes_local_t;
+
 typedef struct aes_ctx {
 	uint32_t sk[60];
 	uint32_t sk_exp[120];
-
 	uint num_rounds;
+	__local aes_local_t *lt; /* Not currently used yet but here for interoperability */
 } AES_CTX;
 
-inline void
+INLINE void
 enc32le(void *dst, uint32_t x)
 {
 	uchar *buf = dst;
@@ -44,7 +48,7 @@ enc32le(void *dst, uint32_t x)
 	buf[3] = (uchar)(x >> 24);
 }
 
-inline void
+INLINE void
 enc32le_dst(AES_DST_TYPE void *dst, uint32_t x)
 {
 	AES_DST_TYPE uchar *buf = dst;
@@ -55,7 +59,7 @@ enc32le_dst(AES_DST_TYPE void *dst, uint32_t x)
 	buf[3] = (uchar)(x >> 24);
 }
 
-inline uint32_t
+INLINE uint32_t
 dec32le(const void *src)
 {
 	const uchar *buf = (const uchar*)src;
@@ -66,7 +70,7 @@ dec32le(const void *src)
 		| ((uint32_t)buf[3] << 24);
 }
 
-inline uint32_t
+INLINE uint32_t
 dec32le_src(AES_SRC_TYPE void *src)
 {
 	AES_SRC_TYPE uchar *buf = src;
@@ -77,7 +81,7 @@ dec32le_src(AES_SRC_TYPE void *src)
 		| ((uint32_t)buf[3] << 24);
 }
 
-inline uint32_t
+INLINE uint32_t
 dec32le_key(AES_KEY_TYPE void *src)
 {
 	AES_KEY_TYPE uchar *buf = src;
@@ -126,7 +130,7 @@ dec32le_key(AES_KEY_TYPE void *src)
  * parallel. Bits 0 to 7 of each S-box input (bit 0 is least significant)
  * are spread over the words 0 to 7, at the same rank.
  */
-inline void
+INLINE void
 aes_ct_bitslice_Sbox(uint32_t *q)
 {
 	/*
@@ -310,7 +314,7 @@ aes_ct_bitslice_Sbox(uint32_t *q)
  *
  * This operation is an involution.
  */
-inline void
+INLINE void
 aes_ct_ortho(uint32_t *q)
 {
 #define SWAPN(cl, ch, s, x, y)   do { \
@@ -341,7 +345,7 @@ aes_ct_ortho(uint32_t *q)
 	SWAP8(q[3], q[7]);
 }
 
-inline uint32_t
+INLINE uint32_t
 sub_word(uint32_t x)
 {
 	uint32_t q[8];
@@ -361,7 +365,7 @@ sub_word(uint32_t x)
  * below. Subkeys are produced in little-endian convention (but not
  * bitsliced). Key length is expressed in bytes.
  */
-inline uint
+INLINE uint
 aes_keysched_base(uint32_t *skey, AES_KEY_TYPE void *key, size_t key_len)
 {
 	uint num_rounds;
@@ -414,7 +418,7 @@ aes_keysched_base(uint32_t *skey, AES_KEY_TYPE void *key, size_t key_len)
  * on key size). The number of rounds is returned. If the key size is
  * invalid (not 16, 24 or 32), then 0 is returned.
  */
-inline uint
+INLINE uint
 aes_ct_keysched(uint32_t *comp_skey, AES_KEY_TYPE void *key, size_t key_len)
 {
 	uint32_t skey[60];
@@ -446,7 +450,7 @@ aes_ct_keysched(uint32_t *comp_skey, AES_KEY_TYPE void *key, size_t key_len)
  * a larger array suitable for aes_ct_bitslice_encrypt() and
  * aes_ct_bitslice_decrypt().
  */
-inline void
+INLINE void
 aes_ct_skey_expand(uint32_t *skey,
 	uint num_rounds, const uint32_t *comp_skey)
 {
@@ -464,7 +468,7 @@ aes_ct_skey_expand(uint32_t *skey,
 	}
 }
 
-inline void
+INLINE void
 add_round_key(uint32_t *q, const uint32_t *sk)
 {
 	q[0] ^= sk[0];
@@ -477,7 +481,7 @@ add_round_key(uint32_t *q, const uint32_t *sk)
 	q[7] ^= sk[7];
 }
 
-inline void
+INLINE void
 shift_rows(uint32_t *q)
 {
 	int i;
@@ -495,7 +499,7 @@ shift_rows(uint32_t *q)
 
 #define rotr16(x) rotate((uint32_t)x, 16U)
 
-inline void
+INLINE void
 mix_columns(uint32_t *q)
 {
 	uint32_t q0, q1, q2, q3, q4, q5, q6, q7;
@@ -533,7 +537,7 @@ mix_columns(uint32_t *q)
  * eight 32-bit words, two block encryptions are actually performed
  * in parallel.
  */
-inline void
+INLINE void
 aes_ct_bitslice_encrypt(uint num_rounds,
 	const uint32_t *skey, uint32_t *q)
 {
@@ -554,7 +558,7 @@ aes_ct_bitslice_encrypt(uint num_rounds,
 /*
  * Like aes_ct_bitslice_Sbox(), but for the inverse S-box.
  */
-inline void
+INLINE void
 aes_ct_bitslice_invSbox(uint32_t *q)
 {
 	/*
@@ -614,7 +618,7 @@ aes_ct_bitslice_invSbox(uint32_t *q)
 	q[0] = q2 ^ q5 ^ q7;
 }
 
-inline void
+INLINE void
 inv_shift_rows(uint32_t *q)
 {
 	int i;
@@ -630,7 +634,7 @@ inv_shift_rows(uint32_t *q)
 	}
 }
 
-inline void
+INLINE void
 inv_mix_columns(uint32_t *q)
 {
 	uint32_t q0, q1, q2, q3, q4, q5, q6, q7;
@@ -668,7 +672,7 @@ inv_mix_columns(uint32_t *q)
  * eight 32-bit words, two block decryptions are actually performed
  * in parallel.
  */
-inline void
+INLINE void
 aes_ct_bitslice_decrypt(uint num_rounds,
 	const uint32_t *skey, uint32_t *q)
 {
@@ -686,7 +690,7 @@ aes_ct_bitslice_decrypt(uint num_rounds,
 	add_round_key(q, skey);
 }
 
-inline int
+INLINE int
 AES_Setkey(AES_CTX *ctx, AES_KEY_TYPE void *key, int len)
 {
 	ctx->num_rounds = aes_ct_keysched(ctx->sk, (AES_KEY_TYPE char*)key, len);
@@ -696,7 +700,7 @@ AES_Setkey(AES_CTX *ctx, AES_KEY_TYPE void *key, int len)
 	return 0;
 }
 
-inline void
+INLINE void
 AES_Encrypt_ECB_pp(AES_CTX *ctx, const void *_src,
                    void *_dst, size_t num_blocks)
 {
@@ -742,7 +746,7 @@ AES_Encrypt_ECB_pp(AES_CTX *ctx, const void *_src,
 	}
 }
 
-inline void
+INLINE void
 AES_Encrypt_ECB(AES_CTX *ctx, AES_SRC_TYPE void *_src,
                 AES_DST_TYPE void *_dst, size_t num_blocks)
 {
@@ -788,7 +792,7 @@ AES_Encrypt_ECB(AES_CTX *ctx, AES_SRC_TYPE void *_src,
 	}
 }
 
-inline void
+INLINE void
 AES_Decrypt_ECB_pp(AES_CTX *ctx, const void *_src,
                    void *_dst, size_t num_blocks)
 {
@@ -834,7 +838,7 @@ AES_Decrypt_ECB_pp(AES_CTX *ctx, const void *_src,
 	}
 }
 
-inline void
+INLINE void
 AES_Decrypt_ECB(AES_CTX *ctx, AES_SRC_TYPE void *_src,
                 AES_DST_TYPE void *_dst, size_t num_blocks)
 {
@@ -880,7 +884,7 @@ AES_Decrypt_ECB(AES_CTX *ctx, AES_SRC_TYPE void *_src,
 	}
 }
 
-inline int
+INLINE int
 AES_KeySetup_Encrypt(uint32_t *skey, AES_KEY_TYPE uint8_t *key, int len)
 {
 	uint r, u;
@@ -906,7 +910,7 @@ AES_KeySetup_Encrypt(uint32_t *skey, AES_KEY_TYPE uint8_t *key, int len)
  * Reduce value x modulo polynomial x^8+x^4+x^3+x+1. This works as
  * long as x fits on 12 bits at most.
  */
-inline uint32_t
+INLINE uint32_t
 redgf256(uint32_t x)
 {
 	uint32_t h;
@@ -918,7 +922,7 @@ redgf256(uint32_t x)
 /*
  * Multiplication by 0x09 in GF(256).
  */
-inline uint32_t
+INLINE uint32_t
 mul9(uint32_t x)
 {
 	return redgf256(x ^ (x << 3));
@@ -927,7 +931,7 @@ mul9(uint32_t x)
 /*
  * Multiplication by 0x0B in GF(256).
  */
-inline uint32_t
+INLINE uint32_t
 mulb(uint32_t x)
 {
 	return redgf256(x ^ (x << 1) ^ (x << 3));
@@ -936,7 +940,7 @@ mulb(uint32_t x)
 /*
  * Multiplication by 0x0D in GF(256).
  */
-inline uint32_t
+INLINE uint32_t
 muld(uint32_t x)
 {
 	return redgf256(x ^ (x << 2) ^ (x << 3));
@@ -945,13 +949,13 @@ muld(uint32_t x)
 /*
  * Multiplication by 0x0E in GF(256).
  */
-inline uint32_t
+INLINE uint32_t
 mule(uint32_t x)
 {
 	return redgf256((x << 1) ^ (x << 2) ^ (x << 3));
 }
 
-inline int
+INLINE int
 AES_KeySetup_Decrypt(uint32_t *skey, AES_KEY_TYPE uint8_t *key, int len)
 {
 	uint i, r, u;
@@ -1001,11 +1005,13 @@ typedef AES_CTX  AES_KEY;
 #define AES_set_encrypt_key(key, bits, ctx) AES_Setkey(ctx, key, (bits) / 8)
 #define AES_set_decrypt_key(key, bits, ctx) AES_Setkey(ctx, key, (bits) / 8)
 
-#define AES_Encrypt(ctx, in, out)           AES_Encrypt_ECB_pp(ctx, in, out, 1)
-#define AES_Decrypt(ctx, in, out)           AES_Decrypt_ECB_pp(ctx, in, out, 1)
+#define AES_encrypt(in, out, ctx)           AES_Encrypt_ECB_pp(ctx, in, out, 1)
+#define AES_decrypt(in, out, ctx)           AES_Decrypt_ECB_pp(ctx, in, out, 1)
 
-#define AES_encrypt(in, out, ctx)           AES_Encrypt(ctx, in, out)
-#define AES_decrypt(in, out, ctx)           AES_Decrypt(ctx, in, out)
+#define AES_ecb_encrypt_pp(in, out, len, ctx)	  \
+	AES_Encrypt_ECB_pp(ctx, in, out, (len) / AES_BLOCK_SIZE)
+#define AES_ecb_decrypt_pp(in, out, len, ctx)	  \
+	AES_Decrypt_ECB_pp(ctx, in, out, (len) / AES_BLOCK_SIZE)
 
 #if DO_MEMCPY
 #define AES_ecb_encrypt(in, out, len, ctx)	  \

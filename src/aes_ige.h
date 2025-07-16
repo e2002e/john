@@ -57,5 +57,5 @@
 
 /* NB: the IV is _two_ blocks long */
 void JtR_AES_ige_encrypt(const unsigned char *in, unsigned char *out,
-                     size_t length, const AES_KEY *key,
+                     size_t length, AES_KEY *key,
                      unsigned char *ivec, const int enc);

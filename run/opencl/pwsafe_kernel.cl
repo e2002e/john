@@ -6,6 +6,7 @@
 */
 #include "opencl_device_info.h"
 #include "opencl_misc.h"
+#include "opencl_rotate.h"
 
 #if HAVE_LUT3
 #define Ch(x, y, z) lut3(x, y, z, 0xca)
@@ -28,7 +29,7 @@
 #endif
 #endif
 
-#define ror(x,n) rotate(x, 32U-n)
+#define ror(x, n) ror32(x, n)
 
 #define Sigma0(x) ((ror(x, 2))  ^ (ror(x, 13)) ^ (ror(x, 22)))
 #define Sigma1(x) ((ror(x, 6))  ^ (ror(x, 11)) ^ (ror(x, 25)))
@@ -80,7 +81,7 @@ typedef struct {
 	uint8_t salt[32];
 } pwsafe_salt;
 
-inline void sha256_transform(uint32_t *w, uint32_t *state)
+INLINE void sha256_transform(uint32_t *w, uint32_t *state)
 {
 	uint32_t a = state[0];
 	uint32_t b = state[1];

@@ -15,9 +15,9 @@
  */
 
 #if FMT_EXTERNS_H
-extern struct fmt_main fmt_xmpp_scram;
+extern struct fmt_main fmt_scram_sha1;
 #elif FMT_REGISTERS_H
-john_register_one(&fmt_xmpp_scram);
+john_register_one(&fmt_scram_sha1);
 #else
 
 #include <string.h>
@@ -41,16 +41,16 @@ john_register_one(&fmt_xmpp_scram);
 #define SIMD_KEYS               (SIMD_COEF_32 * SIMD_PARA_SHA1)
 #endif
 
-#define FORMAT_LABEL            "xmpp-scram"
+#define FORMAT_LABEL            "SCRAM-PBKDF2-SHA1"
 #define FORMAT_NAME             ""
-#define ALGORITHM_NAME          "XMPP SCRAM PBKDF2-SHA1 " SHA1_ALGORITHM_NAME
+#define ALGORITHM_NAME          "PBKDF2-SHA1/SCRAM " SHA1_ALGORITHM_NAME
 #define PLAINTEXT_LENGTH        125
 #define HASH_LENGTH             28
 #define SALT_SIZE               sizeof(struct custom_salt)
 #define SALT_ALIGN              sizeof(uint32_t)
 #define BINARY_SIZE             20
 #define BINARY_ALIGN            sizeof(uint32_t)
-#define BENCHMARK_COMMENT       ""
+#define BENCHMARK_COMMENT       " (as used in XMPP)"
 #define BENCHMARK_LENGTH        0x107
 #define FORMAT_TAG              "$xmpp-scram$"
 #define FORMAT_TAG_LENGTH       (sizeof(FORMAT_TAG) - 1)
@@ -283,7 +283,13 @@ static char *get_key(int index)
 	return saved_key[index];
 }
 
-struct fmt_main fmt_xmpp_scram = {
+static unsigned int tunable_cost_iterations(void *_salt)
+{
+	struct custom_salt *salt = (struct custom_salt *)_salt;
+	return salt->iterations;
+}
+
+struct fmt_main fmt_scram_sha1 = {
 	{
 		FORMAT_LABEL,
 		FORMAT_NAME,
@@ -299,7 +305,7 @@ struct fmt_main fmt_xmpp_scram = {
 		MIN_KEYS_PER_CRYPT,
 		MAX_KEYS_PER_CRYPT,
 		FMT_CASE | FMT_8_BIT | FMT_OMP,
-		{ NULL },
+		{"iterations"},
 		{ FORMAT_TAG },
 		tests
 	}, {
@@ -311,7 +317,7 @@ struct fmt_main fmt_xmpp_scram = {
 		fmt_default_split,
 		get_binary,
 		get_salt,
-		{ NULL },
+		{tunable_cost_iterations},
 		fmt_default_source,
 		{
 			fmt_default_binary_hash_0,

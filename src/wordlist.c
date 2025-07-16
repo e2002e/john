@@ -1,8 +1,8 @@
 /*
  * This file is part of John the Ripper password cracker,
  * Copyright (c) 1996-99,2003,2004,2006,2009,2013,2017 by Solar Designer
- *
- * Heavily modified by JimF, magnum and maybe by others.
+ * Copyright (c) 2009-2025, magnum
+ * Copyright (c) 2009-2018, JimF
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted.
@@ -303,7 +303,7 @@ static double get_progress(void)
 	        (rule_count * size * mask_mult));
 }
 
-static char *dummy_rules_apply(char *word, char *rule, int split, char *last)
+static char *dummy_rules_apply(char *word, char *rule, int split)
 {
 	return word;
 }
@@ -456,21 +456,63 @@ static MAYBE_INLINE int wbuf_unique(char *line)
 	return 1;
 }
 
+#ifdef HAVE_MMAP
+static int mmap_init(int64_t file_len)
+{
+	if (mem_map)
+		return 1;
+
+	int mmap_max = cfg_get_int(SECTION_OPTIONS, NULL, "WordlistMemoryMapMaxSize");
+
+	if (mmap_max == -1)
+		mmap_max = 1 << 10;
+
+	if (file_len <= ((uint64_t)mmap_max << 20)) {
+		if (john_main_process)
+			log_event("- Memory mapping wordlist (%"PRIu64" bytes)",
+			          (uint64_t)file_len);
+#if (SIZEOF_SIZE_T < 8)
+/*
+ * Now even though we are 64 bit file size, we must still deal with some
+ * 32 bit functions ;)
+ */
+		mem_map = MAP_FAILED;
+		if (file_len < ((1LL)<<32))
+#endif
+			mem_map = mmap(NULL, file_len,
+			               PROT_READ, MAP_SHARED,
+			               fileno(word_file), 0);
+		if (mem_map == MAP_FAILED) {
+			mem_map = NULL;
+			log_event("- Memory mapping failed (%s) - but we'll do fine without it.",
+			          strerror(errno));
+		} else {
+			map_pos = mem_map;
+			map_end = mem_map + file_len;
+#if MGETL_HAS_SIMD
+			map_scan_end = map_end - VSCANSZ;
+#endif
+		}
+	}
+
+	return mem_map != NULL;
+}
+#endif
+
 void do_wordlist_crack(struct db_main *db, const char *name, int rules)
 {
 	union {
-		char buffer[2][LINE_BUFFER_SIZE + CACHE_BANK_SHIFT];
+		char buffer[LINE_BUFFER_SIZE];
 #if MGETL_HAS_SIMD
 		vtype dummy;
 #else
 		ARCH_WORD dummy;
 #endif
 	} aligned;
-	char *line = aligned.buffer[0];
-	char *last = aligned.buffer[1];
+	char *line = aligned.buffer;
 	struct rpp_context ctx;
 	char *prerule="", *rule="", *word="";
-	char *(*apply)(char *word, char *rule, int split, char *last) = NULL;
+	char *(*apply)(char *word, char *rule, int split) = NULL;
 	int dist_switch=0;
 	uint64_t my_words=0, their_words=0, my_words_left=0;
 	int64_t i, file_len = 0;
@@ -595,14 +637,6 @@ void do_wordlist_crack(struct db_main *db, const char *name, int rules)
 	if (name && !file_is_fifo) {
 		char *cp, csearch;
 		int64_t ourshare = 0;
-#ifdef HAVE_MMAP
-		int mmap_max =
-			cfg_get_int(SECTION_OPTIONS, NULL,
-			            "WordlistMemoryMapMaxSize");
-
-		if (mmap_max == -1)
-			mmap_max = 1 << 10;
-#endif
 		jtr_fseek64(word_file, 0, SEEK_END);
 		if ((file_len = jtr_ftell64(word_file)) == -1)
 			pexit(STR_MACRO(jtr_ftell64));
@@ -613,49 +647,17 @@ void do_wordlist_crack(struct db_main *db, const char *name, int rules)
 			error();
 		}
 
-#ifdef HAVE_MMAP
-		if (mmap_max && mmap_max >= (file_len >> 20)) {
-			if (john_main_process)
-				log_event("- memory mapping wordlist (%"PRId64" bytes)",
-				          (int64_t)file_len);
-#if (SIZEOF_SIZE_T < 8)
-/*
- * Now even though we are 64 bit file size, we must still deal with some
- * 32 bit functions ;)
- */
-			mem_map = MAP_FAILED;
-			if (file_len < ((1LL)<<32))
-#endif
-			mem_map = mmap(NULL, file_len,
-			               PROT_READ, MAP_SHARED,
-			               fileno(word_file), 0);
-			if (mem_map == MAP_FAILED) {
-				mem_map = NULL;
-#ifdef DEBUG
-				fprintf(stderr, "wordlist: memory mapping failed (%s) (non-fatal)\n",
-				        strerror(errno));
-#endif
-				log_event("- memory mapping failed (%s) - but we'll do fine without it.",
-				          strerror(errno));
-			} else {
-				map_pos = mem_map;
-				map_end = mem_map + file_len;
-#if MGETL_HAS_SIMD
-				map_scan_end = map_end - VSCANSZ;
-#endif
-			}
-		}
-#endif
-
 		ourshare = file_len;
 
+#ifdef HAVE_MMAP
 		// Load only this node's share of words to memory
-		if (mem_map && options.node_count > 1 &&
+		if (options.node_count > 1 &&
 		    (file_len > options.node_count * (length * 100))) {
-			ourshare = (file_len / options.node_count) *
-				(options.node_max - options.node_min + 1);
+			if (mmap_init(file_len))
+				ourshare = (file_len / options.node_count) *
+					(options.node_max - options.node_min + 1);
 		}
-
+#endif
 		if (ourshare <= options.max_wordfile_memory &&
 		    mem_saving_level < 2 &&
 		    (options.flags & FLG_RULES_CHK))
@@ -707,7 +709,6 @@ void do_wordlist_crack(struct db_main *db, const char *name, int rules)
 
 					if (!mgetl(line))
 						break;
-					check_bom(line);
 					if (!strncmp(line, "#!comment", 9))
 						continue;
 					lp = convert(line);
@@ -729,15 +730,15 @@ void do_wordlist_crack(struct db_main *db, const char *name, int rules)
 				if (nWordFileLines != myWordFileLines)
 					fprintf(stderr, "Warning: wordlist changed as"
 					        " we read it\n");
-				log_event("- loaded this node's share of "
-				          "wordfile %s into memory "
+				log_event("- Loaded this node's share of "
+				          "wordlist %s into memory "
 				          "(%"PRIu64" bytes of %"PRId64", max_size="Zu
 				          " avg/node)", name, my_size,
 				          (int64_t)file_len,
 				          options.max_wordfile_memory);
 				if (john_main_process)
 				fprintf(stderr,"Each node loaded 1/%d "
-				        "of wordfile to memory (about "
+				        "of wordlist to memory (about "
 				        "%"PRIu64" %s/node)\n",
 				        options.node_count,
 				        my_size > 1<<23 ?
@@ -747,13 +748,13 @@ void do_wordlist_crack(struct db_main *db, const char *name, int rules)
 			}
 			else {
 				if (john_main_process) {
-					log_event("- loading wordfile %s into memory "
+					log_event("- Loading wordlist %s into memory "
 					          "(%"PRId64" bytes, max_size="Zu")",
 					          name, (int64_t)file_len,
 					          options.max_wordfile_memory);
 					if (options.node_count > 1)
 						fprintf(stderr,"Each node loaded the whole "
-						        "wordfile to memory\n");
+						        "wordlist to memory\n");
 				}
 				word_file_str =
 					mem_alloc_tiny((size_t)file_len +
@@ -789,7 +790,7 @@ void do_wordlist_crack(struct db_main *db, const char *name, int rules)
 			if (aep[-1] != csearch)
 				++nWordFileLines;
 			words = mem_alloc((nWordFileLines + 1) * sizeof(char*));
-			log_event("- wordfile had %"PRId64" lines and required %"PRId64
+			log_event("- Wordlist had %"PRId64" lines and required %"PRId64
 			          " bytes for index.",
 			          (int64_t)nWordFileLines,
 			          (int64_t)(nWordFileLines * sizeof(char*)));
@@ -807,7 +808,7 @@ void do_wordlist_crack(struct db_main *db, const char *name, int rules)
 					hash_log++;
 				hash_size = (1 << hash_log);
 				hash_mask = (hash_size - 1);
-				log_event("- dupe suppression: hash size %u, "
+				log_event("- Dupe suppression: hash size %u, "
 					"temporarily allocating %"PRId64" bytes",
 					hash_size,
 					(hash_size * sizeof(unsigned int)) +
@@ -877,13 +878,17 @@ skip:
 				if (ec == '\n' && *cp == '\r') cp++;
 			} while (cp < aep);
 			if ((int64_t)nWordFileLines - i > 0)
-				log_event("- suppressed %"PRId64" duplicate lines "
+				log_event("- Suppressed %"PRId64" duplicate lines "
 				          "and/or comments from wordlist.",
 				          (int64_t)nWordFileLines - i);
 			MEM_FREE(buffer.hash);
 			MEM_FREE(buffer.data);
 			nWordFileLines = i;
 		}
+#ifdef HAVE_MMAP
+		else
+			mmap_init(file_len);
+#endif
 	} else {
 /*
  * Ok, we can be in --stdin or --pipe mode.  In --stdin, we simply copy over
@@ -1037,16 +1042,6 @@ REDO_AFTER_LMLOOP:
 		rules_init(db, length);
 		rule_count = rules_count(&ctx, -1);
 
-		if (do_lmloop || !db->plaintexts->head) {
-			if (rules_stacked_after)
-				log_event("- Total %u (%d x %u) preprocessed word mangling rules",
-				          rule_count * crk_stacked_rule_count,
-				          rule_count, crk_stacked_rule_count);
-			else
-				log_event("- %d preprocessed word mangling rules", rule_count);
-		}
-
-
 		apply = rules_apply;
 	} else {
 		rule_ctx = NULL;
@@ -1077,6 +1072,15 @@ REDO_AFTER_LMLOOP:
 		crk_init(db, fix_state, NULL);
 	}
 
+	if (rules && (do_lmloop || !db->plaintexts->head)) {
+		if (rules_stacked_after)
+			log_event("- Total %u (%d x %u) preprocessed word mangling rules",
+			          rule_count * crk_stacked_rule_count,
+			          rule_count, crk_stacked_rule_count);
+		else
+			log_event("- %d preprocessed word mangling rules", rule_count);
+	}
+
 	if (dupeCheck || rules) {
 		int force = (dupeCheck || (options.flags & FLG_STDOUT)) && options.suppressor_size;
 		suppressor_init(SUPPRESSOR_UPDATE | (force ? SUPPRESSOR_FORCE : 0));
@@ -1085,11 +1089,6 @@ REDO_AFTER_LMLOOP:
 	prerule = rule = "";
 	if (rules)
 		prerule = rpp_next(&ctx);
-
-/* A string that can't be produced by fgetl(). */
-	last = aligned.buffer[1];
-	last[0] = '\n';
-	last[1] = 0;
 
 	dist_rules = 0;
 	dist_switch = rule_count; /* never */
@@ -1152,7 +1151,7 @@ REDO_AFTER_LMLOOP:
 				    for_node > options.node_max)
 					goto next_rule;
 			}
-			if ((rule = rules_reject(prerule, -1, last, db))) {
+			if ((rule = rules_reject(prerule, -1, db))) {
 				if (strcmp(prerule, rule)) {
 					if (!rules_mute)
 					log_event("- Rule #%d: '%.100s'"
@@ -1187,8 +1186,7 @@ REDO_AFTER_LMLOOP:
 				}
 			}
 			loop_line_no++;
-			if ((word = apply(joined->data, rule, -1, last))) {
-				last = word;
+			if ((word = apply(joined->data, rule, -1))) {
 #if HAVE_REXGEN
 				if (regex) {
 					if (do_regex_hybrid_crack(db, regex,
@@ -1256,8 +1254,7 @@ REDO_AFTER_LMLOOP:
 #endif
 			line_number++;
 
-			if ((word = apply(line, rule, -1, last))) {
-				last = word;
+			if ((word = apply(line, rule, -1))) {
 #if HAVE_REXGEN
 				if (regex) {
 					if (do_regex_hybrid_crack(db, regex,
@@ -1327,16 +1324,9 @@ process_word:
 							goto next_word;
 					}
 					line[length] = 0;
-
-					if (!strcmp(line, last))
-						goto next_word;
 				}
 
-				if ((word = apply(line, rule, -1, last))) {
-					if (rules)
-						last = word;
-					else
-						strcpy(last, word);
+				if ((word = apply(line, rule, -1))) {
 #if HAVE_REXGEN
 					if (regex) {
 						if (do_regex_hybrid_crack(

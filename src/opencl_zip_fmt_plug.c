@@ -325,6 +325,10 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		if (idx_offset > 4 * (gws + 1))
 			idx_offset = 0;	/* Self-test kludge */
 
+		/* Safety for when count < GWS */
+		for (int i = count; i <= gws; i++)
+			saved_idx[i] = key_idx;
+
 		BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], cl_saved_key, CL_FALSE, key_offset, key_idx - key_offset, saved_key + key_offset, 0, NULL, multi_profilingEvent[0]), "Failed transferring keys");
 		BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], cl_saved_idx, CL_FALSE, idx_offset, 4 * (gws + 1) - idx_offset, saved_idx + (idx_offset / 4), 0, NULL, multi_profilingEvent[0]), "Failed transferring index");
 		BENCH_CLERROR(clFinish(queue[gpu_id]), "failed in clFinish");
@@ -360,7 +364,12 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 
 static int cmp_all(void *binary, int count)
 {
-	return crack_count_ret;
+	int i;
+
+	for (i = 0; i < count; i++)
+		if (*(uint8_t *)binary == outbuffer[i].v[0] && !memcmp(outbuffer[i].v, binary, WINZIP_BINARY_SIZE))
+			return 1;
+	return 0;
 }
 
 static int cmp_one(void *binary, int index)
@@ -373,13 +382,6 @@ static int cmp_exact(char *source, int index)
 	return 1;
 }
 
-
-static unsigned int cost_hmac_len(void *salt)
-{
-	winzip_salt *s = *((winzip_salt**)salt);
-
-	return s->comp_len;
-}
 
 struct fmt_main fmt_opencl_zip = {
 	{
@@ -398,7 +400,7 @@ struct fmt_main fmt_opencl_zip = {
 		MAX_KEYS_PER_CRYPT,
 		FMT_CASE | FMT_8_BIT | FMT_DYNA_SALT | FMT_HUGE_INPUT,
 		{
-			"HMAC size"
+			"HMAC size [KiB]"
 		},
 		{ WINZIP_FORMAT_TAG },
 		winzip_common_tests
@@ -412,7 +414,7 @@ struct fmt_main fmt_opencl_zip = {
 		winzip_common_binary,
 		winzip_common_get_salt,
 		{
-			cost_hmac_len
+			winzip_common_cost_hmac_len
 		},
 		fmt_default_source,
 		{

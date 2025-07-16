@@ -1,7 +1,7 @@
 /*
  * AES OpenCL functions
  *
- * Copyright (c) 2017-2018, magnum.
+ * Copyright (c) 2017-2024, magnum.
  * This software is hereby released to the general public under
  * the following terms: Redistribution and use in source and binary
  * forms, with or without modification, are permitted.
@@ -42,13 +42,13 @@
 #define AES_BLOCK_SIZE 16
 
 /*
- * Source the basic AES code. We use a fancy bitsliced version that can
- * do two blocks in parallel except with some devices that are either too
- * buggy to use it, or actually perform slower with it.
- * CPU's seem to generally perform worse with it. Nvidia GPU's love it.
- * macOS may crash just trying to build it.
+ * Source the basic AES code, with local memory-cached tables.
+ *
+ * There is also a fancy bitsliced version that can do two blocks in parallel.
+ * CPU's seem to generally perform worse with it. Nvidia GPU's love it but
+ * right now no formats seem to end up faster with. It's left as opt-in.
  */
-#if defined(AES_NO_BITSLICE) || cpu(DEVICE_INFO) || (__OS_X__ && gpu_amd(DEVICE_INFO))
+#ifndef AES_BITSLICE
 #include "opencl_aes_plain.h"
 #else
 #include "opencl_aes_bitslice.h"
@@ -62,7 +62,7 @@
  */
 
 #ifndef AES_ecb_encrypt
-inline void
+INLINE void
 AES_ecb_encrypt(AES_SRC_TYPE void *_in, AES_DST_TYPE void *_out, uint len,
                 AES_KEY *akey)
 {
@@ -92,10 +92,25 @@ AES_ecb_encrypt(AES_SRC_TYPE void *_in, AES_DST_TYPE void *_out, uint len,
 	AES_encrypt(in, out, akey);
 #endif
 }
+
+INLINE void
+AES_ecb_encrypt_pp(const void *_in, void *_out, uint len, AES_KEY *akey)
+{
+	const uchar *in = _in;
+	uchar *out = _out;
+
+	while (len > 16) {
+		AES_encrypt(in, out, akey);
+		len -= 16;
+		in += 16;
+		out += 16;
+	}
+	AES_encrypt(in, out, akey);
+}
 #endif /* AES_ecb_encrypt */
 
 #ifndef AES_ecb_decrypt
-inline void
+INLINE void
 AES_ecb_decrypt(AES_SRC_TYPE void *_in, AES_DST_TYPE void *_out, uint len,
                 AES_KEY *akey)
 {
@@ -125,9 +140,24 @@ AES_ecb_decrypt(AES_SRC_TYPE void *_in, AES_DST_TYPE void *_out, uint len,
 	AES_decrypt(in, out, akey);
 #endif
 }
+
+INLINE void
+AES_ecb_decrypt_pp(const void *_in, void *_out, uint len, AES_KEY *akey)
+{
+	const uchar *in = _in;
+	uchar *out = _out;
+
+	while (len > 16) {
+		AES_decrypt(in, out, akey);
+		len -= 16;
+		in += 16;
+		out += 16;
+	}
+	AES_decrypt(in, out, akey);
+}
 #endif /* AES_ecb_decrypt */
 
-inline void
+INLINE void
 AES_cbc_encrypt(AES_SRC_TYPE void *_in, AES_DST_TYPE void *_out,
                 uint len, AES_KEY *akey, void *_iv)
 {
@@ -155,38 +185,42 @@ AES_cbc_encrypt(AES_SRC_TYPE void *_in, AES_DST_TYPE void *_out,
 	memcpy_macro(iv, ivec, 16);
 }
 
-inline void
+/*
+ * This function decrypts two blocks at a time, to utilize
+ * that our bitsliced AES can do them in parallel.
+ */
+INLINE void
 AES_cbc_decrypt(AES_SRC_TYPE void *_in, AES_DST_TYPE void *_out,
-                uint len, AES_KEY *akey,
-                void *_iv)
+                uint len, AES_KEY *akey, void *iv)
 {
 	AES_SRC_TYPE uchar *in = _in;
 	AES_DST_TYPE uchar *out = _out;
-	uchar *iv = _iv;
+	uchar *ivec = iv;
 
 	while (len) {
 		uint n;
-		uchar tmp[16];
+		uchar tmp[32];
+		uint dec_len = (len > 16) ? 32 : 16;
 
-		memcpy_macro(tmp, in, 16);
-		AES_decrypt(tmp, tmp, akey);
-		for (n = 0; n < 16 && n < len; ++n) {
+		memcpy_macro(tmp, in, dec_len);
+		AES_ecb_decrypt_pp(tmp, tmp, dec_len, akey);
+		for (n = 0; n < dec_len && n < len; ++n) {
 			uchar c = in[n];
-			out[n] = tmp[n] ^ iv[n];
-			iv[n] = c;
+			out[n] = tmp[n] ^ ivec[n & 15];
+			ivec[n & 15] = c;
 		}
-		if (len <= 16) {
-			for (; n < 16; ++n)
-				iv[n] = in[n];
+		if (len <= dec_len) {
+			for (; n < dec_len; ++n)
+				ivec[n & 15] = in[n & 15];
 			break;
 		}
-		len -= 16;
-		in  += 16;
-		out += 16;
+		len -= dec_len;
+		in  += dec_len;
+		out += dec_len;
 	}
 }
 
-inline void
+INLINE void
 AES_cts_encrypt(AES_CTS_SRC_TYPE void *_in, AES_CTS_DST_TYPE void *_out,
                 uint len, AES_KEY *akey, void *_iv)
 {
@@ -218,7 +252,7 @@ AES_cts_encrypt(AES_CTS_SRC_TYPE void *_in, AES_CTS_DST_TYPE void *_out,
 	memcpy_macro(iv, out - AES_BLOCK_SIZE, AES_BLOCK_SIZE);
 }
 
-inline void
+INLINE void
 AES_cts_decrypt(AES_CTS_SRC_TYPE void *_in, AES_CTS_DST_TYPE void *_out,
                 uint len, AES_KEY *akey, void *_iv)
 {
@@ -256,7 +290,7 @@ AES_cts_decrypt(AES_CTS_SRC_TYPE void *_in, AES_CTS_DST_TYPE void *_out,
 	memcpy_macro(iv, tmp, AES_BLOCK_SIZE);
 }
 
-inline void AES_cfb_decrypt(AES_SRC_TYPE void *_in,
+INLINE void AES_cfb_decrypt(AES_SRC_TYPE void *_in,
                             AES_DST_TYPE void *_out,
                             uint len, AES_KEY *akey, void *_iv)
 {
@@ -279,14 +313,14 @@ inline void AES_cfb_decrypt(AES_SRC_TYPE void *_in,
 	}
 }
 
-inline void AES_256_XTS_first_sector(AES_SRC_TYPE uint *in,
-                                     AES_DST_TYPE uint *out,
-                                     AES_KEY_TYPE uchar *double_key)
+INLINE void AES_256_XTS_first_sector(AES_SRC_TYPE uint *in, AES_DST_TYPE uint *out,
+                                     AES_KEY_TYPE uchar *double_key, __local aes_local_t *lt)
 {
 	uint tweak[4] = { 0 };
 	uint buf[4];
 	int i;
-	AES_KEY akey1, akey2;
+	AES_KEY akey1; akey1.lt = lt;
+	AES_KEY akey2; akey2.lt = lt;
 
 	AES_set_decrypt_key(double_key, 256, &akey1);
 	AES_set_encrypt_key(double_key + 32, 256, &akey2);
@@ -302,12 +336,13 @@ inline void AES_256_XTS_first_sector(AES_SRC_TYPE uint *in,
 		out[i] = buf[i] ^ tweak[i];
 }
 
-inline void AES_256_XTS_DiskCryptor(AES_SRC_TYPE uchar *data, AES_DST_TYPE uchar *output,
-		AES_KEY_TYPE uchar *double_key, int len)
+INLINE void AES_256_XTS_DiskCryptor(AES_SRC_TYPE uchar *data, AES_DST_TYPE uchar *output,
+                                    AES_KEY_TYPE uchar *double_key, int len, __local aes_local_t *lt)
 {
 	uchar buf[16];
 	int i, j, cnt;
-	AES_KEY key1, key2;
+	AES_KEY key1; key1.lt = lt;
+	AES_KEY key2; key2.lt = lt;
 	int bits = 256;
 	uchar buffer[96];
 	uchar *out = buffer;
@@ -348,7 +383,7 @@ inline void AES_256_XTS_DiskCryptor(AES_SRC_TYPE uchar *data, AES_DST_TYPE uchar
 
 #define N_WORDS (AES_BLOCK_SIZE / sizeof(unsigned long))
 
-inline void
+INLINE void
 AES_ige_decrypt(AES_SRC_TYPE void *_in, AES_DST_TYPE void *_out,
                 uint length, AES_KEY *akey, uchar *_iv)
 {

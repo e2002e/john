@@ -87,6 +87,13 @@
 #include "john.h"
 #include "version.h"
 #include "listconf.h" /* must be included after version.h and misc.h */
+#include "aes.h"
+#if defined(MBEDTLS_AESNI_C)
+#include "mbedtls/aesni.h"
+#endif
+#if defined(MBEDTLS_AESCE_C)
+#include "mbedtls/aesce.h"
+#endif
 
 #ifdef NO_JOHN_BLD
 #define JOHN_BLD "unk-build-type"
@@ -148,12 +155,22 @@ static void listconf_list_build_info(void)
 #endif
 	puts("Version: " JTR_GIT_VERSION);
 	puts("Build: " JOHN_BLD _MP_VERSION OCL_STRING ZTEX_STRING DEBUG_STRING ASAN_STRING UBSAN_STRING);
+
 #ifdef SIMD_COEF_32
 	printf("SIMD: %s, interleaving: MD4:%d MD5:%d SHA1:%d SHA256:%d SHA512:%d\n",
 	       SIMD_TYPE,
 	       SIMD_PARA_MD4, SIMD_PARA_MD5, SIMD_PARA_SHA1,
 	       SIMD_PARA_SHA256, SIMD_PARA_SHA512);
 #endif
+	printf("AES hardware acceleration: %s\n",
+#if defined(MBEDTLS_AESNI_HAVE_CODE)
+	       mbedtls_aesni_has_support(MBEDTLS_AESNI_AES) ? "AES-NI" :
+#endif
+#if defined(MBEDTLS_AESCE_HAVE_CODE)
+	       MBEDTLS_AESCE_HAS_SUPPORT() ? "AES-CE" :
+#endif
+	       "no");
+
 #if JOHN_SYSTEMWIDE
 	puts("System-wide exec: " JOHN_SYSTEMWIDE_EXEC);
 	puts("System-wide home: " JOHN_SYSTEMWIDE_HOME);
@@ -171,14 +188,10 @@ static void listconf_list_build_info(void)
 	printf("$JOHN is %s\n", path_expand("$JOHN/"));
 	printf("Format interface version: %d\n", FMT_MAIN_VERSION);
 	printf("Max. number of reported tunable costs: %d\n", FMT_TUNABLE_COSTS);
-	puts("Rec file version: " RECOVERY_V);
-	puts("Charset file version: " CHARSET_V);
-	printf("CHARSET_MIN: %d (0x%02x)\n", CHARSET_MIN, CHARSET_MIN);
-	printf("CHARSET_MAX: %d (0x%02x)\n", CHARSET_MAX, CHARSET_MAX);
-	printf("CHARSET_LENGTH: %d\n", CHARSET_LENGTH);
+	puts("Rec file version: " RECOVERY_V ", charset file version: " CHARSET_V);
+	printf("CHARSET_MIN: %d (0x%02x), CHARSET_MAX: %d (0x%02x), CHARSET_LENGTH: %d\n", CHARSET_MIN, CHARSET_MIN, CHARSET_MAX, CHARSET_MAX, CHARSET_LENGTH);
 	printf("SALT_HASH_SIZE: %u\n", SALT_HASH_SIZE);
-	printf("SINGLE_IDX_MAX: %u\n", SINGLE_IDX_MAX);
-	printf("SINGLE_BUF_MAX: %u\n", SINGLE_BUF_MAX);
+	printf("SINGLE_IDX_MAX: %u, SINGLE_BUF_MAX: %u\n", SINGLE_IDX_MAX, SINGLE_BUF_MAX);
 	printf("Effective limit: ");
 	if (sizeof(SINGLE_KEYS_TYPE) < 4 || sizeof(SINGLE_KEYS_UTYPE) < 4) {
 		if (SINGLE_MAX_WORDS(125) < SINGLE_MAX_WORDS(16))
@@ -188,8 +201,7 @@ static void listconf_list_build_info(void)
 			printf("Max. KPC %d\n", SINGLE_MAX_WORDS(125));
 	} else
 		printf("Number of salts vs. SingleMaxBufferSize\n");
-	printf("Max. Markov mode level: %d\n", MAX_MKV_LVL);
-	printf("Max. Markov mode password length: %d\n", MAX_MKV_LEN);
+	printf("Markov mode max. level: %d, length %d\n", MAX_MKV_LVL, MAX_MKV_LEN);
 
 #if __ICC
 	printf("icc version: %d.%d.%d (gcc %d.%d.%d compatibility)\n",
@@ -232,11 +244,6 @@ static void listconf_list_build_info(void)
 	printf("OpenCL headers version: %s\n",get_opencl_header_version());
 #endif
 #if HAVE_LIBCRYPTO
-	printf("Crypto library: OpenSSL\n");
-#else
-	printf("Crypto library: None\n");
-#endif
-
 #if HAVE_LIBDL && defined(RTLD_DEFAULT)
 
 #if defined SSLEAY_VERSION && !defined OPENSSL_VERSION
@@ -245,8 +252,22 @@ static void listconf_list_build_info(void)
 #define SSLEAY_VERSION OPENSSL_VERSION
 #endif
 
-#ifdef OPENSSL_VERSION_NUMBER
-	printf("OpenSSL library version: %09lx", (unsigned long)OPENSSL_VERSION_NUMBER);
+#ifdef OPENSSL_VERSION_TEXT
+	printf("Crypto library: %s", OPENSSL_VERSION_TEXT);
+	if (dlsym(RTLD_DEFAULT, "OpenSSL_version")) {
+		const char* (*OpenSSL_version)(int) =
+			dlsym(RTLD_DEFAULT, "OpenSSL_version");
+
+		if (strcmp(OPENSSL_VERSION_TEXT, OpenSSL_version(OPENSSL_VERSION)))
+			printf("\t(loaded: %s)", OpenSSL_version(OPENSSL_VERSION));
+	} else if (dlsym(RTLD_DEFAULT, "SSLeay_version")) {
+		const char* (*SSLeay_version)(int) = dlsym(RTLD_DEFAULT, "SSLeay_version");
+		if (strcmp(OPENSSL_VERSION_TEXT, SSLeay_version(SSLEAY_VERSION)))
+			printf("\t(loaded: %s)", SSLeay_version(SSLEAY_VERSION));
+	}
+	printf("\n");
+#elif defined OPENSSL_VERSION_NUMBER
+	printf("Crypto library: OpenSSL version: %09lx", (unsigned long)OPENSSL_VERSION_NUMBER);
 	if (dlsym(RTLD_DEFAULT, "OpenSSL_version_num")) {
 		unsigned long (*OpenSSL_version_num)(void) =
 			dlsym(RTLD_DEFAULT, "OpenSSL_version_num");
@@ -261,22 +282,12 @@ static void listconf_list_build_info(void)
 	}
 	printf("\n");
 #endif
-#ifdef OPENSSL_VERSION_TEXT
-	printf("%s", OPENSSL_VERSION_TEXT);
-	if (dlsym(RTLD_DEFAULT, "OpenSSL_version")) {
-		const char* (*OpenSSL_version)(int) =
-			dlsym(RTLD_DEFAULT, "OpenSSL_version");
-
-		if (strcmp(OPENSSL_VERSION_TEXT, OpenSSL_version(OPENSSL_VERSION)))
-			printf("\t(loaded: %s)", OpenSSL_version(OPENSSL_VERSION));
-	} else if (dlsym(RTLD_DEFAULT, "SSLeay_version")) {
-		const char* (*SSLeay_version)(int) = dlsym(RTLD_DEFAULT, "SSLeay_version");
-		if (strcmp(OPENSSL_VERSION_TEXT, SSLeay_version(SSLEAY_VERSION)))
-			printf("\t(loaded: %s)", SSLeay_version(SSLEAY_VERSION));
-	}
-	printf("\n");
-#endif
+#else
+	printf("Crypto library: OpenSSL\n");
 #endif /* HAVE_LIBDL && defined(RTLD_DEFAULT) */
+#else
+	printf("Crypto library: None\n");
+#endif
 
 #ifdef __GNU_MP_VERSION
 	printf("GMP library version: %d.%d.%d",
@@ -305,15 +316,12 @@ static void listconf_list_build_info(void)
 #else
 	puts("File locking: NOT supported by this build - do not run concurrent sessions!");
 #endif
-	printf("fseek(): " STR_MACRO(jtr_fseek64) "\n");
-	printf("ftell(): " STR_MACRO(jtr_ftell64) "\n");
-	printf("fopen(): " STR_MACRO(jtr_fopen) "\n");
 #if HAVE_MEMMEM
 #define memmem_func	"System's"
 #else
 #define memmem_func	"JtR internal"
 #endif
-	printf("memmem(): " memmem_func "\n");
+	printf("fseek(): " STR_MACRO(jtr_fseek64) ", ftell(): " STR_MACRO(jtr_ftell64) ", fopen(): " STR_MACRO(jtr_fopen) ", memmem(): " memmem_func "\n");
 
 	clk_tck_init();
 #if defined(_SC_CLK_TCK) || !defined(CLK_TCK)

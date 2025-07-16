@@ -39,7 +39,7 @@ PEFLAGS = peflags --dynamicbase=true --nxcompat=true
 SHELL = /bin/sh
 VPATH = @srcdir@
 
-subdirs = aes secp256k1 ed25519-donna poly1305-donna @ZTEX_SUBDIRS@
+subdirs = mbedtls secp256k1 ed25519-donna poly1305-donna @ZTEX_SUBDIRS@
 top_srcdir = @top_srcdir@
 srcdir = @srcdir@
 prefix = @prefix@
@@ -192,8 +192,7 @@ endif
 default:
 	$(MAKE) find_version
 	@$(MAKE) $(PROJ) \
-		JOHN_OBJS="$(JOHN_OBJS) @CC_ASM_OBJS@" \
-		AESNI_ARCH=@AESNI_ARCH@
+		JOHN_OBJS="$(JOHN_OBJS) @CC_ASM_OBJS@"
 
 	@if [ "$(OS)" = "Windows_NT" ]; then \
 		$(MAKE) peflags; \
@@ -511,15 +510,15 @@ unicode.o:	unicode.c common.h arch.h memory.h byteorder.h unicode.h options.h au
 
 unique.o:	unique.c autoconfig.h arch.h misc.h jumbo.h params.h memory.h os.h os-autoconf.h
 
-unrar.o:	unrar.c arch.h unrar.h aes.h autoconfig.h aes/aes_func.h unrarhlp.h memory.h jumbo.h unrarppm.h unrarvm.h unrarcmd.h unrarfilter.h os.h os-autoconf.h
+unrar.o:	unrar.c arch.h unrar.h aes.h autoconfig.h unrarhlp.h memory.h jumbo.h unrarppm.h unrarvm.h unrarcmd.h unrarfilter.h os.h os-autoconf.h
 
-unrarcmd.o:	unrarcmd.c aes.h autoconfig.h aes/aes_func.h unrar.h arch.h unrarhlp.h memory.h jumbo.h unrarppm.h unrarvm.h unrarcmd.h unrarfilter.h os.h os-autoconf.h
+unrarcmd.o:	unrarcmd.c aes.h autoconfig.h unrar.h arch.h unrarhlp.h memory.h jumbo.h unrarppm.h unrarvm.h unrarcmd.h unrarfilter.h os.h os-autoconf.h
 
-unrarfilter.o:	unrarfilter.c arch.h aes.h autoconfig.h aes/aes_func.h unrar.h unrarhlp.h memory.h jumbo.h unrarppm.h unrarvm.h unrarcmd.h unrarfilter.h os.h os-autoconf.h
+unrarfilter.o:	unrarfilter.c arch.h aes.h autoconfig.h unrar.h unrarhlp.h memory.h jumbo.h unrarppm.h unrarvm.h unrarcmd.h unrarfilter.h os.h os-autoconf.h
 
 unrarhlp.o:	unrarhlp.c jumbo.h arch.h unrarhlp.h memory.h os.h os-autoconf.h autoconfig.h
 
-unrarvm.o:	unrarvm.c arch.h aes.h autoconfig.h aes/aes_func.h unrar.h unrarhlp.h memory.h jumbo.h unrarppm.h unrarvm.h unrarcmd.h unrarfilter.h common.h os.h os-autoconf.h
+unrarvm.o:	unrarvm.c arch.h aes.h autoconfig.h unrar.h unrarhlp.h memory.h jumbo.h unrarppm.h unrarvm.h unrarcmd.h unrarfilter.h common.h os.h os-autoconf.h
 
 unshadow.o:	unshadow.c misc.h jumbo.h arch.h autoconfig.h params.h memory.h os.h os-autoconf.h
 
@@ -549,10 +548,10 @@ zip2john.o:	zip2john.c arch.h common.h memory.h jumbo.h formats.h params.h misc.
 ######## End auto-generated
 
 princeprocessor:
-	$(CC) @CFLAGS@ @JOHN_NO_SIMD@ @CFLAGS_EXTRA@ @OPENSSL_CFLAGS@ @OPENMP_CFLAGS@ @HAVE_MPI@ @PTHREAD_CFLAGS@ $(CPPFLAGS) $(OPT_NORMAL) -std=c99 -DLINUX pp.c $(LDFLAGS) -o ../run/pp
+	$(CC) @CFLAGS@ @JOHN_NO_SIMD@ @CFLAGS_EXTRA@ @OPENSSL_CFLAGS@ @OPENMP_CFLAGS@ @HAVE_MPI@ @PTHREAD_CFLAGS@ $(CPPFLAGS) $(OPT_NORMAL) -DLINUX pp.c $(LDFLAGS) -o ../run/pp
 
 pp.o:	pp.c autoconfig.h arch.h mem_map.h os.h os-autoconf.h jumbo.h mmap-windows.c memory.h mpz_int128.h int128.h misc.h config.h params.h common.h path.h signals.h loader.h list.h formats.h logger.h status.h recovery.h options.h getopt.h external.h compiler.h cracker.h john.h unicode.h prince.h rpp.h rules.h mask.h
-	$(CC) $(CFLAGS) $(OPT_NORMAL) -DJTR_MODE -std=c99 -c pp.c
+	$(CC) $(CFLAGS) $(OPT_NORMAL) -DJTR_MODE -c pp.c
 
 version.h: find_version
 
@@ -560,7 +559,7 @@ find_version:
 	echo "#define JTR_GIT_VERSION $(JTR_GIT_VERSION)" > version.h.new
 	diff >/dev/null 2>/dev/null version.h.new version.h && $(RM) version.h.new || $(MV) version.h.new version.h
 
-SUBDIRS = aes secp256k1 ed25519-donna poly1305-donna @ZTEX_SUBDIRS@
+SUBDIRS = mbedtls secp256k1 ed25519-donna poly1305-donna @ZTEX_SUBDIRS@
 
 .PHONY: subdirs $(SUBDIRS) find_version
 
@@ -570,14 +569,14 @@ $(SUBDIRS):
 	$(MAKE) -C $@ all
 
 # Inlining the S-boxes produces faster code as long as they fit in the cache.
-DES_bs_b.o:	DES_bs_b.c arch.h common.h memory.h DES_bs.h loader.h params.h list.h formats.h misc.h jumbo.h autoconfig.h os.h os-autoconf.h sboxes-s.c sboxes.c nonstd.c
+DES_bs_b.o:	DES_bs_b.c arch.h common.h memory.h DES_bs.h loader.h params.h list.h formats.h misc.h jumbo.h autoconfig.h os.h os-autoconf.h sboxes.c nonstd.c sboxes-s.c sboxes-t.c
 	$(CC) $(CFLAGS) $(OPT_INLINE) DES_bs_b.c
 
 miscnl.o: misc.c
 	$(CC) $(CFLAGS) $(OPT_NORMAL) -D_JOHN_MISC_NO_LOG misc.c -o miscnl.o
 
-aes/aes.a:
-	$(MAKE) -C aes all
+mbedtls/aes.a:
+	$(MAKE) -C mbedtls all
 
 secp256k1/secp256k1.a:
 	$(MAKE) -C secp256k1 all
@@ -600,8 +599,8 @@ poly1305-donna/poly1305-donna.a:
 
 # PTHREAD_CFLAGS and OPENMP_CFLAGS may actually contain linker options,
 # like -fopenmp
-../run/john@EXE_EXT@: $(JOHN_OBJS) aes/aes.a secp256k1/secp256k1.a ed25519-donna/ed25519-donna.a poly1305-donna/poly1305-donna.a @ZTEX_SUBDIRS@
-	$(LD) $(JOHN_OBJS) $(LDFLAGS) @OPENSSL_LIBS@ @OPENMP_CFLAGS@ @GMP_LIBS@ @SKEY_LIBS@ @REXGEN_LIBS@ @CL_LIBS@ @PTHREAD_CFLAGS@ @PTHREAD_LIBS@ @M_LIBS@ @RT_LIBS@ @Z_LIBS@ @DL_LIBS@ @CRYPT_LIBS@ @BZ2_LIBS@ @ZTEX_LIBS@ aes/aes.a secp256k1/secp256k1.a ed25519-donna/ed25519-donna.a poly1305-donna/poly1305-donna.a -o $@
+../run/john@EXE_EXT@: $(JOHN_OBJS) mbedtls/aes.a secp256k1/secp256k1.a ed25519-donna/ed25519-donna.a poly1305-donna/poly1305-donna.a @ZTEX_SUBDIRS@
+	$(LD) $(JOHN_OBJS) $(LDFLAGS) @OPENSSL_LIBS@ @OPENMP_CFLAGS@ @GMP_LIBS@ @SKEY_LIBS@ @REXGEN_LIBS@ @CL_LIBS@ @PTHREAD_CFLAGS@ @PTHREAD_LIBS@ @M_LIBS@ @RT_LIBS@ @Z_LIBS@ @DL_LIBS@ @CRYPT_LIBS@ @BZ2_LIBS@ @ZTEX_LIBS@ mbedtls/aes.a secp256k1/secp256k1.a ed25519-donna/ed25519-donna.a poly1305-donna/poly1305-donna.a -o $@
 
 ../run/unshadow: ../run/john
 	$(RM) ../run/unshadow
@@ -738,8 +737,11 @@ poly1305-donna/poly1305-donna.a:
 john.o:	john.c autoconfig.h os.h os-autoconf.h jumbo.h arch.h params.h openssl_local_overrides.h misc.h path.h memory.h list.h tty.h signals.h common.h idle.h formats.h dyna_salt.h loader.h logger.h status.h recovery.h options.h getopt.h config.h bench.h fuzz.h charset.h single.h wordlist.h prince.h inc.h mask.h mkv.h mkvlib.h external.h compiler.h batch.h dynamic.h simd-intrinsics.h pseudo_intrinsics.h aligned.h simd-intrinsics-load-flags.h dynamic_compiler.h fake_salts.h listconf.h crc32.h john_mpi.h regex.h unicode.h $(CL_COMMON_HEADER) $(CL_DEVICE_HEADER) john_build_rule.h fmt_externs.h fmt_registers.h subsets.h
 	$(CC) $(CFLAGS_MAIN) $(OPT_NORMAL) -O1 $*.c
 
+path.o: path.c path.h autoconfig.h arch.h params.h misc.h memory.h
+	$(CC) $(CFLAGS_MAIN) $(OPT_NORMAL) -O1 $*.c
+
 # Workaround for gcc 3.4.6 (seen on Sparc32) (do not use -funroll-loops)
-unrarppm.o:	unrarppm.c arch.h aes.h autoconfig.h aes/aes_func.h unrar.h unrarhlp.h memory.h jumbo.h unrarppm.h unrarvm.h unrarcmd.h unrarfilter.h common.h os.h os-autoconf.h
+unrarppm.o:	unrarppm.c arch.h aes.h autoconfig.h unrar.h unrarhlp.h memory.h jumbo.h unrarppm.h unrarvm.h unrarcmd.h unrarfilter.h common.h os.h os-autoconf.h
 	$(CC) -DAC_BUILT $(CFLAGS) $< -o $@
 
 .c.o:
@@ -758,6 +760,9 @@ check: default
 	$(MAKE) unit-tests
 	../run/john --test=0 --verbosity=2 --format=cpu
 	../run/john --test=0 --verbosity=2 --format=+dynamic,all
+	if [ -x /usr/bin/md5sum ]; then \
+		JOHN=../run/john tests/test_externals.sh | md5sum -c tests/test_externals.md5; \
+	fi
 
 depend:
 	makedepend -fMakefile.dep -Y *.c 2>> /dev/null
@@ -797,7 +802,10 @@ testfiles:
 ###############################################################################
 
 UNIT_TEST_OBJS = \
-	tests/unit-tests.o tests/misc.o tests/common.o tests/memory.o tests/sha2.o
+	tests/unit-tests.o tests/misc.o tests/common.o tests/memory.o tests/sha2.o tests/unicode.o
+
+UNIT_TEST_INCLUDED_PIECES = \
+	tests/test_valid_utf8.c
 
 tests/unit-tests.o:	tests/unit-tests.c common.h memory.h misc.h
 	$(CC) -o tests/unit-tests.o $(CFLAGS) -DFORCE_GENERIC_SHA2 -D_JOHN_MISC_NO_LOG  tests/unit-tests.c
@@ -814,10 +822,13 @@ tests/common.o:	common.c arch.h common.h memory.h os.h os-autoconf.h autoconfig.
 tests/memory.o:	memory.c arch.h misc.h jumbo.h autoconfig.h memory.h common.h johnswap.h os.h os-autoconf.h
 	$(CC) -o tests/memory.o $(CFLAGS) -D_JOHN_MISC_NO_LOG  memory.c
 
+tests/unicode.o:	unicode.o # just to have all the same deps
+	$(CC) -o tests/unicode.o $(CFLAGS) -DUNICODE_NO_OPTIONS -DNOT_JOHN  unicode.c
+
 # keep the 'easy name' build target of unit-tests   The 'real' target is ../run/unit-tests[.exe]
 unit-tests:	../run/unit-tests@EXE_EXT@
 
-../run/unit-tests@EXE_EXT@:	$(UNIT_TEST_OBJS)
+../run/unit-tests@EXE_EXT@:	$(UNIT_TEST_OBJS) $(UNIT_TEST_INCLUDED_PIECES)
 	$(LD) $(UNIT_TEST_OBJS) $(LDFLAGS) @OPENSSL_LIBS@ -o $@
 	@ echo "Now Running the Unit Tests"
 	@ ${POSSIBLE_WINE_MSG}

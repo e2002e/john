@@ -10,7 +10,7 @@
  * implied. See the following for more information on the GPLv2 license:
  * http://www.gnu.org/licenses/gpl-2.0.html
  *
- * More info here: http://openwall.info/wiki/john/OpenCL-BitLocker
+ * More info here: https://openwall.info/wiki/john/OpenCL-BitLocker
  *
  * A standalone CUDA implementation is available here: https://github.com/e-ago/bitcracker.
  */
@@ -19,7 +19,8 @@
 #ifndef _BITCRACKER_H
 #define _BITCRACKER_H
 
-#define ROR(x, i)	(rotate((x), 32U - (i)))
+#include "opencl_rotate.h"
+#define ROR(x, i)	ror32(x, i)
 
 #define SCHEDULE0()  \
         schedule0 = schedule16 + schedule25 \

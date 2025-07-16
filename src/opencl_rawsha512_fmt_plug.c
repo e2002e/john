@@ -2,7 +2,7 @@
  * SHA-512 hashing, OpenCL interface.
  * Please note that in current comparison function, we use computed a77
  * compares with ciphertext d80. For more details, refer to:
- * http://www.openwall.com/lists/john-dev/2012/04/11/13
+ * https://www.openwall.com/lists/john-dev/2012/04/11/13
  *
  * Copyright (c) 2012 myrice
  *

@@ -496,11 +496,8 @@ int do_subsets_crack(struct db_main *db, char *req_charset)
 		req_charset = default_set;
 
 	if (req_charset && *req_charset) {
-		if (strlen(req_charset) == 1 && isdigit(req_charset[0])) {
-			int cnum = atoi(req_charset);
-			char pl[2] = { '0' + cnum, 0 };
-			char *c = (char*)cfg_get_param("Subsets", NULL, pl);
-
+		if (req_charset[0] >= '0' && req_charset[0] <= '9' && !req_charset[1]) {
+			char *c = (char*)cfg_get_param("Subsets", NULL, req_charset);
 			if (c)
 				req_charset = c;
 		}
@@ -517,7 +514,7 @@ int do_subsets_crack(struct db_main *db, char *req_charset)
 
 	/* Convert charset to UTF-32 */
 	if (!strcasecmp(charset, "full-unicode")) {
-		charset_utf32 = mem_alloc(0x24000 * sizeof(UTF32));
+		charset_utf32 = mem_alloc(0x25c30 * sizeof(UTF32));
 		charcount = full_unicode_charset(charset_utf32);
 	}
 	else if (options.input_enc == UTF_8) {

@@ -89,6 +89,8 @@ static char (*saved_key)[PLAINTEXT_LENGTH + 1];
 static size_t *saved_len;
 static int *cracked, any_cracked;  // "cracked array" approach is required for UBER keystores
 
+struct fmt_main fmt_bks; /* patched by crypt_all() */
+
 static void init(struct fmt_main *self)
 {
 	omp_autotune(self, OMP_SCALE);
@@ -267,6 +269,8 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 
 			if (!memcmp(store_hmac_calculated, cur_salt->store_hmac, 20))
 			{
+				if (mackeylen < 7)
+					fmt_bks.params.flags |= FMT_NOT_EXACT;
 				cracked[index] = 1;
 #ifdef _OPENMP
 #pragma omp atomic
@@ -335,13 +339,15 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 					keys, lens, cur_salt->salt,
 					cur_salt->saltlen, mackey, mackeylen);
 
-			for (j = 0; j < SSE_GROUP_SZ_SHA1; ++j) {
+			for (j = 0; j < SSE_GROUP_SZ_SHA1 && index+j < count; ++j) {
 				hmac_sha1(mackey[j], mackeylen, cur_salt->store_data,
 						cur_salt->store_data_length,
 						store_hmac_calculated, 20);
 
 				if (!memcmp(store_hmac_calculated, cur_salt->store_hmac, 20))
 				{
+					if (mackeylen < 7)
+						fmt_bks.params.flags |= FMT_NOT_EXACT;
 					cracked[index+j] = 1;
 #ifdef _OPENMP
 #pragma omp atomic
@@ -374,7 +380,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 					keys,
 					lens, cur_salt->salt,
 					cur_salt->saltlen, ckey, 32);
-			for (j = 0; j < SSE_GROUP_SZ_SHA1; ++j) {
+			for (j = 0; j < SSE_GROUP_SZ_SHA1 && index+j < count; ++j) {
 				unsigned char compute_checkum[20];
 				Twofish_prepare_key(ckey[j], 32, &tkey);
 				datalen = Twofish_Decrypt(&tkey, cur_salt->store_data, store_data_decrypted, cur_salt->store_data_length, iv[j]);

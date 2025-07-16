@@ -366,7 +366,7 @@ void dump_text_msg(const void *msg, const void *in, int len)
 
 	printf("%s : ", (char *)msg);
 	while (len--) {
-		fputc(isprint(*p) ? *p : '.', stdout);
+		fputc(isprint((int)*p) ? *p : '.', stdout);
 		p++;
 	}
 	fputc('\n', stdout);
@@ -629,95 +629,4 @@ void alter_endianity_w64(void *_x, unsigned int count) {
 		cpX += 8;
 	}
 #endif
-}
-
-#ifdef __unix__
-#include <sys/mman.h>
-#endif
-
-#define HUGEPAGE_THRESHOLD		(12 * 1024 * 1024)
-
-#ifdef __x86_64__
-#define HUGEPAGE_SIZE			(2 * 1024 * 1024)
-#else
-#undef HUGEPAGE_SIZE
-#endif
-
-void *
-alloc_region_t(region_t * region, size_t size)
-{
-	size_t base_size = size;
-	void * base, * aligned;
-#ifdef MAP_ANON
-	int flags =
-#ifdef MAP_NOCORE
-	    MAP_NOCORE |
-#endif
-	    MAP_ANON | MAP_PRIVATE;
-#if defined(MAP_HUGETLB) && defined(HUGEPAGE_SIZE)
-	size_t new_size = size;
-	const size_t hugepage_mask = (size_t)HUGEPAGE_SIZE - 1;
-	if (size >= HUGEPAGE_THRESHOLD && size + hugepage_mask >= size) {
-		flags |= MAP_HUGETLB;
-/*
- * Linux's munmap() fails on MAP_HUGETLB mappings if size is not a multiple of
- * huge page size, so let's round up to huge page size here.
- */
-		new_size = size + hugepage_mask;
-		new_size &= ~hugepage_mask;
-	}
-	base = mmap(NULL, new_size, PROT_READ | PROT_WRITE, flags, -1, 0);
-	if (base != MAP_FAILED) {
-		base_size = new_size;
-	} else
-	if (flags & MAP_HUGETLB) {
-		flags &= ~MAP_HUGETLB;
-		base = mmap(NULL, size, PROT_READ | PROT_WRITE, flags, -1, 0);
-	}
-
-#else
-	base = mmap(NULL, size, PROT_READ | PROT_WRITE, flags, -1, 0);
-#endif
-	if (base == MAP_FAILED)
-		base = NULL;
-	aligned = base;
-#elif defined(HAVE_POSIX_MEMALIGN)
-	if ((errno = posix_memalign(&base, 64, size)) != 0)
-		base = NULL;
-	aligned = base;
-#else
-	base = aligned = NULL;
-	if (size + 63 < size) {
-		errno = ENOMEM;
-	} else if ((base = malloc(size + 63)) != NULL) {
-		aligned = (uint8_t *)base + 63;
-		aligned = (uint8_t *)aligned - ((uintptr_t)aligned & 63);
-	}
-#endif
-	region->base = base;
-	region->aligned = aligned;
-	region->base_size = base ? base_size : 0;
-	region->aligned_size = base ? size : 0;
-	mem_debug_fill(aligned, size);
-	return aligned;
-}
-
-inline void init_region_t(region_t * region)
-{
-	region->base = region->aligned = NULL;
-	region->base_size = region->aligned_size = 0;
-}
-
-int free_region_t(region_t * region)
-{
-	if (region->base) {
-#ifdef MAP_ANON
-		if (munmap(region->base, region->base_size))
-			return -1;
-#else
-		free(region->base);
-#endif
-	}
-	init_region_t(region);
-	return 0;
 }

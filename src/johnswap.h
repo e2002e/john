@@ -37,7 +37,7 @@
 #elif (_MSC_VER > 1300) && (_M_IX86 >= 400 || defined(CPU_IA32) ||  defined(CPU_X64)) /* MS VC */
 	#define JOHNSWAP(x)		_byteswap_ulong((x))
 	#define JOHNSWAP64(x)	_byteswap_uint64 (((unsigned __int64)x))
-#elif !defined(__STRICT_ANSI__)
+#else /* was elif !defined(__STRICT_ANSI__) - no idea why - and a catch-all #else were missing*/
 	#define JOHNSWAP(x)	john_bswap_32((x))
 	#define JOHNSWAP64(x)	john_bswap_64((x))
 	#define ROTATE_LEFT(x, n) (x) = (((x)<<(n))|((uint32_t)(x)>>(32-(n))))

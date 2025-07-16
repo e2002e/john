@@ -9,7 +9,7 @@
  * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
  * A PARTICULAR PURPOSE. See the GNU General Public License for more details.
  *
- * More info here: http://openwall.info/wiki/john/OpenCL-BitLocker
+ * More info here: https://openwall.info/wiki/john/OpenCL-BitLocker
  */
 
 #if AC_BUILT

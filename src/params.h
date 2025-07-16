@@ -30,9 +30,7 @@
 
 /*
  * Define this for release tarballs. It affects the version reporting (will
- * be the string above and below and never a Git hash) as well as some other
- * details. Eg. it mutes output of OpenCL run-time build log unless the build
- * failed.
+ * be the string above and below and never a Git hash).
  */
 //#define JTR_RELEASE_BUILD 1
 
@@ -359,6 +357,12 @@ extern unsigned int password_hash_thresholds[PASSWORD_HASH_SIZES];
  * hashes (since it could be too slow).
  */
 #define LDR_HASH_COLLISIONS_MAX		1000
+
+/*
+ * Same as above but for salt-only formats, higher because they can't currently
+ * be "fixed" for the issue but still used for explaining the long load time.
+ */
+#define LDR_HASH_COLLISIONS_SALT_ONLY	10000
 
 /*
  * How many bitmap entries should the cracker prefetch at once.  Set this to 0

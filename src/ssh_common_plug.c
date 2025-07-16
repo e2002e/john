@@ -16,7 +16,7 @@
 int ssh_valid(char *ciphertext, struct fmt_main *self)
 {
 	char *ctcopy, *keeptr, *p;
-	int len, cipher, extra;
+	int slen, clen, cipher, extra;
 
 	if (strncmp(ciphertext, FORMAT_TAG, FORMAT_TAG_LEN))
 		return 0;
@@ -32,45 +32,58 @@ int ssh_valid(char *ciphertext, struct fmt_main *self)
 		goto err;
 	if (!isdec(p))
 		goto err;
-	len = atoi(p);
-	if (len > 16 || len < 8)
+	slen = atoi(p);
+	if (slen > 16 || slen < 8)
 		goto err;
 	if ((p = strtokm(NULL, "$")) == NULL)	/* salt */
 		goto err;
-	if (hexlen(p, &extra) != len * 2 || extra)
+	if (hexlen(p, &extra) != slen * 2 || extra)
 		goto err;
 	if ((p = strtokm(NULL, "$")) == NULL)	/* ciphertext length */
 		goto err;
 	if (!isdec(p))
 		goto err;
-	len = atoi(p);
-	if (len > N)
+	clen = atoi(p);
+	if (clen < 128 || clen > N)
 		goto err;
 	if ((p = strtokm(NULL, "$")) == NULL)	/* ciphertext */
 		goto err;
-	if (hexlen(p, &extra) != len * 2 || extra)
+	if (hexlen(p, &extra) != clen * 2 || extra)
 		goto err;
-	if (cipher == 2 || cipher == 6) {
-		if ((p = strtokm(NULL, "$")) == NULL)	/* rounds */
-			goto err;
-		if (!isdec(p))
-			goto err;
-		if ((p = strtokm(NULL, "$")) == NULL)	/* ciphertext_begin_offset */
-			goto err;
-		if (!isdec(p))
-			goto err;
-		if (atoi(p) + 16 > len)
-		       goto err;
-	}
 
 	if (cipher < 0 || cipher > 6) {
-		fprintf(stderr, "[%s] cipher value of %d is not supported!\n",
+		fprintf(stderr, "%s: Cipher value of %d is not supported\n",
 		        self->params.label, cipher);
 		goto err;
 	}
 
+	if (cipher == 2 || cipher == 6) {
+		if ((p = strtokm(NULL, "$")) == NULL) {	/* rounds */
+			if (cipher != 6 || slen != 8) /* MD5 + single DES */
+				goto err;
+			cipher = 7;
+		} else { /* bcrypt-pbkdf + AES-256-CBC or -CTR */
+			if (!isdec(p))
+				goto err;
+			if ((p = strtokm(NULL, "$")) == NULL)	/* ciphertext_begin_offset */
+				goto err;
+			if (!isdec(p))
+				goto err;
+			if (atoi(p) > clen - 16)
+				goto err;
+		}
+	}
+
+#if !HAVE_LIBCRYPTO
+	if (!strcasestr(self->params.label, "-opencl") && (cipher == 0 || cipher == 7)) {
+		fprintf(stderr, "%s: [3]DES is not supported in this build (need OpenSSL)\n",
+		        self->params.label);
+		goto err;
+	}
+#endif
+
 	if (strcasestr(self->params.label, "-opencl") && (cipher == 2 || cipher == 6)) {
-		fprintf(stderr, "[%s] cipher value of %d is not yet supported with OpenCL!\n",
+		fprintf(stderr, "%s: Cipher value of %d is not yet supported with OpenCL\n",
 		        self->params.label, cipher);
 		goto err;
 	}
@@ -123,9 +136,13 @@ void *ssh_get_salt(char *ciphertext)
 			+ atoi16[ARCH_INDEX(p[i * 2 + 1])];
 	if (cs.cipher == 2 || cs.cipher == 6) {
 		p = strtokm(NULL, "$");
-		cs.rounds = atoi(p);
-		p = strtokm(NULL, "$");
-		cs.ciphertext_begin_offset = atoi(p);
+		if (!p && cs.cipher == 6 && cs.sl == 8) {
+			cs.cipher = 7;
+		} else {
+			cs.rounds = atoi(p);
+			p = strtokm(NULL, "$");
+			cs.ciphertext_begin_offset = atoi(p);
+		}
 	}
 	MEM_FREE(keeptr);
 
@@ -137,6 +154,10 @@ unsigned int ssh_iteration_count(void *salt)
 	struct custom_salt *cur_salt = salt;
 
 	switch (cur_salt->cipher) {
+	case 7:
+		return 1; // generate 8 bytes of key + DES
+	case 0:
+		return 2; // generate 24 bytes of key + 3DES
 	case 1:
 	case 3:
 		return 1; // generate 16 bytes of key + AES-128
@@ -144,8 +165,6 @@ unsigned int ssh_iteration_count(void *salt)
 		return 2; // generate 24 bytes of key + AES-192
 	case 5:
 		return 2; // generate 32 bytes of key + AES-256
-	case 0:
-		return 2; // generate 24 bytes of key + 3DES
 	default:
 		return cur_salt->rounds; // bcrypt KDF + AES-256 (ed25519)
 	}
@@ -157,7 +176,8 @@ unsigned int ssh_kdf(void *salt)
 
 	switch (cur_salt->cipher) {
 	case 0:
-		return 1; // MD5 KDF + 3DES
+	case 7:
+		return 1; // MD5 KDF + 3DES or DES
 	case 2:
 	case 6:
 		return 2; // bcrypt-pbkdf

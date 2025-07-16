@@ -18,7 +18,7 @@
 #define SALT_ALIGN           sizeof(struct custom_salt *)
 
 typedef struct {
-	dyna_salt dsalt;
+	dyna_salt_t dsalt;
 	unsigned char edata1[16];
 	uint32_t edata2len;
 	unsigned char edata2[1];

@@ -106,7 +106,6 @@
 #include "common.h"
 #include "path.h"
 #include "signals.h"
-#include "mem_map.h"
 #include "memory.h"
 #include "loader.h"
 #include "logger.h"
@@ -134,7 +133,6 @@ char *prince_skip_str;
 char *prince_limit_str;
 
 static double progress;
-static char *mem_map, *map_pos, *map_end;
 #if HAVE_REXGEN
 static char *regex_alpha;
 static int regex_case;
@@ -745,22 +743,9 @@ static char *add_elem (db_entry_t *db_entry, char *input_buf, int input_len)
 
   elem_t *elem_buf = &db_entry->elems_buf[db_entry->elems_cnt];
 
-#ifndef JTR_MODE
   elem_buf->buf = malloc_tiny (input_len);
 
   memcpy (elem_buf->buf, input_buf, input_len);
-#else
-  if (mem_map && options.input_enc == options.target_enc)
-  {
-    elem_buf->buf = (u8*)input_buf;
-  }
-  else
-  {
-    elem_buf->buf = malloc_tiny (input_len);
-
-    memcpy (elem_buf->buf, input_buf, input_len);
-  }
-#endif
 
   db_entry->elems_cnt++;
 
@@ -814,6 +799,16 @@ static void add_uniq (db_entry_t *db_entry, char *input_buf, int input_len)
     uniq->alloc += ALLOC_NEW_DUPES;
 
     uniq->data = realloc (uniq->data, uniq->alloc * sizeof (uniq_data_t));
+    if (uniq->data == NULL)
+    {
+#ifdef JTR_MODE
+      fprintf (stderr, "Out of memory trying to allocate "Zu" bytes\n", (size_t) uniq->alloc * sizeof (uniq_data_t));
+      error();
+#else
+      fprintf (stderr, "Out of memory trying to allocate %zu bytes\n", (size_t) uniq->alloc * sizeof (uniq_data_t));
+      exit (-1);
+#endif
+    }
   }
 
   uniq->data[index].element = add_elem (db_entry, input_buf, input_len);
@@ -952,26 +947,6 @@ static MAYBE_INLINE char *check_bom(char *string)
     string += 2;
   }
   return string;
-}
-
-/* Sort-of fgets() but for a memory-mapped file. Updates len, returns pointer to string */
-static MAYBE_INLINE char *mgets(int *len)
-{
-  char *pos = map_pos;
-  char *end = MIN(map_end, pos + BUFSIZ);
-
-  if (map_pos >= map_end)
-    return NULL;
-
-  while (map_pos < end && *map_pos != '\n' && *map_pos != '\r')
-    map_pos++;
-
-  *len = map_pos - pos;
-
-  while (map_pos < end && (*map_pos == '\n' || *map_pos == '\r'))
-    map_pos++;
-
-  return pos;
 }
 
 void do_prince_crack(struct db_main *db, const char *wordlist, int rules)
@@ -1182,11 +1157,6 @@ void do_prince_crack(struct db_main *db, const char *wordlist, int rules)
   setmode (fileno (stdout), O_BINARY);
   #endif
 #else
-  union {
-    char buffer[LINE_BUFFER_SIZE];
-    ARCH_WORD dummy;
-  } aligned;
-  char *last = aligned.buffer;
   int loopback = (options.flags & FLG_PRINCE_LOOPBACK) ? 1 : 0;
   int mask_mult = MAX(1, mask_num_qw);
   int our_fmt_len = (db->format->params.plaintext_length + ((mask_mult - 1) * mask_add_len)) / mask_mult - mask_add_len;
@@ -1361,7 +1331,7 @@ void do_prince_crack(struct db_main *db, const char *wordlist, int rules)
     do {
       char *rule;
 
-      if ((rule = rules_reject(prerule, -1, last, db)))
+      if ((rule = rules_reject(prerule, -1, db)))
       {
         list_add(rule_list, rule);
         active_rules++;
@@ -1504,9 +1474,6 @@ void do_prince_crack(struct db_main *db, const char *wordlist, int rules)
   FILE *read_fp;
   uint64_t file_len;
   int warn = cfg_get_bool(SECTION_OPTIONS, NULL, "WarnEncoding", 0);
-#ifdef HAVE_MMAP
-  int mmap_max = cfg_get_int(SECTION_OPTIONS, NULL, "WordlistMemoryMapMaxSize");
-#endif
 
   if (!john_main_process)
     warn = 0;
@@ -1528,39 +1495,6 @@ void do_prince_crack(struct db_main *db, const char *wordlist, int rules)
     error();
   }
 
-#ifdef HAVE_MMAP
-  if (mmap_max == -1)
-  {
-    mmap_max = 1 << 10;
-  }
-  if (options.flags & FLG_PRINCE_MMAP &&
-      mmap_max && mmap_max >= (file_len >> 20))
-  {
-    log_event("- Memory mapping wordlist ("LLd" bytes)",
-              (long long)file_len);
-#if (SIZEOF_SIZE_T < 8)
-    /* Now even though we are 64 bit file size, we must still
-     * deal with some 32 bit functions ;) */
-    mem_map = MAP_FAILED;
-    if (file_len < ((1ULL)<<32))
-#endif
-      mem_map = mmap(NULL, file_len,
-                     PROT_READ, MAP_SHARED,
-                     fileno(read_fp), 0);
-    if (mem_map == MAP_FAILED) {
-      mem_map = NULL;
-#ifdef DEBUG
-      fprintf(stderr, "wordlist: memory mapping failed (%s) (non-fatal)\n",
-              strerror(errno));
-#endif
-      log_event("! Memory mapping failed (%s) - but we'll do "
-                "fine without it.", strerror(errno));
-    } else {
-      map_pos = mem_map;
-      map_end = mem_map + file_len;
-    }
-  }
-#endif
   log_event("Loading elements from %s", loopback ? ".pot file" : "wordlist");
 
   if (case_permute)
@@ -1615,15 +1549,7 @@ void do_prince_crack(struct db_main *db, const char *wordlist, int rules)
     char *input_buf;
     int input_len = 0;
 
-    if (mem_map)
-    {
-      input_buf = mgets(&input_len);
-      if (input_buf == NULL) break;
-    }
-    else
-    {
-      input_buf = fgets (buf, sizeof (buf), read_fp);
-    }
+    input_buf = fgets (buf, sizeof (buf), read_fp);
 #endif
 
     if (input_buf == NULL) continue;
@@ -1634,8 +1560,6 @@ void do_prince_crack(struct db_main *db, const char *wordlist, int rules)
     if (loopback && (p = strchr(input_buf, options.loader.field_sep_char)))
     {
       p++;
-      if (mem_map)
-        input_len -= (p - input_buf);
       input_buf = p;
     }
     else
@@ -1644,8 +1568,7 @@ void do_prince_crack(struct db_main *db, const char *wordlist, int rules)
 
     char *line = check_bom(input_buf);
 
-    if (!mem_map)
-      input_len = in_superchop (input_buf);
+    input_len = in_superchop (input_buf);
 
     if (warn) {
       if (options.input_enc == UTF_8) {
@@ -1658,9 +1581,6 @@ void do_prince_crack(struct db_main *db, const char *wordlist, int rules)
         fprintf(stderr, "Warning: UTF-8 seen reading %s\n", wordlist);
       }
     }
-
-    if (mem_map)
-      input_len -= (line - input_buf);
 
     input_buf = line;
 
@@ -2324,8 +2244,7 @@ void do_prince_crack(struct db_main *db, const char *wordlist, int rules)
               do {
                 char *word;
 
-                if ((word = rules_apply(pw_buf, rule->data, -1, last))) {
-                  last = word;
+                if ((word = rules_apply(pw_buf, rule->data, -1))) {
 #if HAVE_REXGEN
                   if (regex) {
                     if ((jtr_done = do_regex_hybrid_crack(db, regex, word,
@@ -2472,10 +2391,6 @@ void do_prince_crack(struct db_main *db, const char *wordlist, int rules)
 #ifndef JTR_MODE
   return 0;
 #else
-#if defined(HAVE_MMAP)
-  if (mem_map)
-    munmap(mem_map, file_len);
-#endif
 
   crk_done();
   rec_done(event_abort || (status.pass && db->salts));

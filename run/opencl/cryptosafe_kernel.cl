@@ -15,7 +15,7 @@ typedef struct {
 	unsigned char ciphertext[16];
 } salt_t;
 
-inline void prepare(__global const uchar *pwbuf, __global const uint *index, uchar *password)
+INLINE void prepare(__global const uchar *pwbuf, __global const uint *index, uchar *password)
 {
 	uint i;
 	uint gid = get_global_id(0);
@@ -83,12 +83,18 @@ void cryptoSafe(__global const uchar *pwbuf,
 #define GPU_LOC_3 LOC_3
 #endif
 
+	__local aes_local_t lt;
+
 	/* Prepare password, pad to length 32 with ASCII '0's */
 	prepare(pwbuf, index, password);
 
 	/* Apply GPU-side mask */
 	for (i = 0; i < NUM_INT_KEYS; i++) {
-		uint gidx = gid * NUM_INT_KEYS + i;
+#if gpu_nvidia(DEVICE_INFO)
+		/* Driver bug workaround. Seen with 535.183.01 */
+		volatile
+#endif
+			uint gidx = gid * NUM_INT_KEYS + i;
 
 #if NUM_INT_KEYS > 1
 		password[GPU_LOC_0] = int_keys[i] & 0xff;
@@ -109,17 +115,13 @@ void cryptoSafe(__global const uchar *pwbuf,
 #endif
 #endif
 
-		AES_KEY aes_decrypt_key;
+		AES_KEY aes_decrypt_key; aes_decrypt_key.lt = &lt;
 		unsigned char plain[16], iv[16] = { 0 };
-
-		result[gidx] = 0;
 
 		AES_set_decrypt_key(password, 256, &aes_decrypt_key);
 		AES_cbc_decrypt(salt->ciphertext, plain, 16, &aes_decrypt_key, iv);
 
-		if (!memcmp_pc(plain, "[{\"coinName\":\"", 14)) {
+		if ((result[gidx] = !memcmp_pc(plain, "[{\"coinName\":\"", 14)))
 			atomic_max(crack_count_ret, gidx + 1);
-			result[gidx] = 1;
-		}
 	}
 }

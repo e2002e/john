@@ -2,8 +2,8 @@
  * Developed by Claudio André <claudioandre.br at gmail.com> in 2012
  * Based on source code provided by Samuele Giovanni Tonon
  *
- * More information at http://openwall.info/wiki/john/OpenCL-RAWSHA-256
- * More information at http://openwall.info/wiki/john/OpenCL-CISCO4
+ * More information at https://openwall.info/wiki/john/OpenCL-RAWSHA-256
+ * More information at https://openwall.info/wiki/john/OpenCL-CISCO4
  *
  * Copyright (c) 2011 Samuele Giovanni Tonon <samu at linuxasylum dot net>
  * Copyright (c) 2012-2016 Claudio André <claudioandre.br at gmail.com>

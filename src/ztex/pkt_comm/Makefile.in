@@ -5,7 +5,7 @@
 # modification, are permitted.
 
 CC = gcc
-CFLAGS = -c -Wall -O2 -g
+CFLAGS = -c -DAC_BUILT @CC_CPU@ @CC_MAIN_CPU@ @CFLAGS@ @JOHN_NO_SIMD@ @CFLAGS_EXTRA@ @OPENSSL_CFLAGS@ @OPENMP_CFLAGS@ @HAVE_MPI@ @PTHREAD_CFLAGS@ @CPPFLAGS@
 
 OBJS = pkt_comm.o word_gen.o word_list.o cmp_config.o inpkt.o init_data.o
 

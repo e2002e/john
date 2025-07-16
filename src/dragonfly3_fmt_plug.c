@@ -7,7 +7,7 @@
  * and binary forms, with or without modification, are permitted.
  *
  * The DragonFly BSD 2.10.1-REL crypt-sha2 hashes are seriously broken. See
- * http://www.openwall.com/lists/john-dev/2012/01/16/1
+ * https://www.openwall.com/lists/john-dev/2012/01/16/1
  *
  */
 

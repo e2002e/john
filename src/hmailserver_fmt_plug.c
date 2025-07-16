@@ -57,10 +57,10 @@ john_register_one(&fmt_hmailserver);
 
 #define BINARY_SIZE         32
 #define DYNA_BINARY_SIZE	16
-#define BINARY_ALIGN        4
+#define BINARY_ALIGN        MEM_ALIGN_WORD
 #define SALT_SIZE           6
 #define DYNA_SALT_SIZE		(sizeof(char*))
-#define SALT_ALIGN          4
+#define SALT_ALIGN          MEM_ALIGN_WORD
 
 #define MIN_KEYS_PER_CRYPT  1
 #define MAX_KEYS_PER_CRYPT  1

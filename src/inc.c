@@ -327,7 +327,7 @@ static void inc_new_count(unsigned int length, int count, const char *charset,
 	log_event("- Expanding tables for length %d to character count %d",
 	    length + 1, count + 1);
 
-	size = count + 2;
+	size = count + 2; /* +2 since count is zero-based and we have one more element for NUL */
 
 	error = expand(char1, allchars, size);
 	if (length)

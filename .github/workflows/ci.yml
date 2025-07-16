@@ -96,10 +96,10 @@ jobs:
     - name: build check
       run: .ci/run-build-and-tests.sh --enable-asan --enable-simd=avx
 
-  gcc13-x86-without-openssl:
-    runs-on: ubuntu-latest
+  gcc14-x86-without-openssl:
+    runs-on: ubuntu-24.04
     env:
-      CC: gcc-13
+      CC: gcc-14
       TARGET: x86
     steps:
     - uses: actions/checkout@v4
@@ -108,10 +108,10 @@ jobs:
     - name: build check
       run: .ci/run-build-and-tests.sh --without-openssl
 
-  gcc13-x86-disable-all:
-    runs-on: ubuntu-latest
+  gcc14-x86-disable-all:
+    runs-on: ubuntu-24.04
     env:
-      CC: gcc-13
+      CC: gcc-14
       TARGET: x86
     steps:
     - uses: actions/checkout@v4
@@ -119,6 +119,18 @@ jobs:
       run: .ci/install-dependencies.sh
     - name: build check
       run: .ci/run-build-and-tests.sh --disable-openmp --disable-simd --without-openssl
+
+  gcc14-x86_64:
+    runs-on: ubuntu-24.04
+    env:
+      CC: gcc-14
+      TARGET: x86_64
+    steps:
+    - uses: actions/checkout@v4
+    - name: install dependencies
+      run: .ci/install-dependencies.sh
+    - name: build check
+      run: .ci/run-build-and-tests.sh
 
   gcc13-x86_64:
     runs-on: ubuntu-latest
@@ -145,7 +157,7 @@ jobs:
       run: .ci/run-build-and-tests.sh
 
   gcc11-x86_64:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     env:
       CC: gcc-11
       TARGET: x86_64
@@ -157,7 +169,7 @@ jobs:
       run: .ci/run-build-and-tests.sh
 
   gcc10-x86_64:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     env:
       CC: gcc-10
       TARGET: x86_64
@@ -169,9 +181,9 @@ jobs:
       run: .ci/run-build-and-tests.sh
 
   gcc9-x86_64:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     env:
-      CC: gcc
+      CC: gcc-9
       TARGET: x86_64
     steps:
     - uses: actions/checkout@v4
@@ -180,10 +192,34 @@ jobs:
     - name: build check
       run: .ci/run-build-and-tests.sh
 
-  gcc8-x86_64:
-    runs-on: ubuntu-20.04
+  clang18-x86_64:
+    runs-on: ubuntu-24.04
     env:
-      CC: gcc-8
+      CC: clang-18
+      TARGET: x86_64
+    steps:
+    - uses: actions/checkout@v4
+    - name: install dependencies
+      run: .ci/install-dependencies.sh
+    - name: build check
+      run: .ci/run-build-and-tests.sh
+
+  clang17-x86_64:
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-17
+      TARGET: x86_64
+    steps:
+    - uses: actions/checkout@v4
+    - name: install dependencies
+      run: .ci/install-dependencies.sh
+    - name: build check
+      run: .ci/run-build-and-tests.sh
+
+  clang16-x86_64:
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-16
       TARGET: x86_64
     steps:
     - uses: actions/checkout@v4
@@ -217,7 +253,7 @@ jobs:
       run: .ci/run-build-and-tests.sh
 
   clang13-x86_64:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     env:
       CC: clang-13
       TARGET: x86_64
@@ -229,7 +265,7 @@ jobs:
       run: .ci/run-build-and-tests.sh
 
   clang12-x86_64:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     env:
       CC: clang-12
       TARGET: x86_64
@@ -241,7 +277,7 @@ jobs:
       run: .ci/run-build-and-tests.sh
 
   clang11-x86_64:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     env:
       CC: clang-11
       TARGET: x86_64
@@ -253,33 +289,9 @@ jobs:
       run: .ci/run-build-and-tests.sh
 
   clang10-x86_64:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     env:
       CC: clang
-      TARGET: x86_64
-    steps:
-    - uses: actions/checkout@v4
-    - name: install dependencies
-      run: .ci/install-dependencies.sh
-    - name: build check
-      run: .ci/run-build-and-tests.sh
-
-  clang9-x86_64:
-    runs-on: ubuntu-20.04
-    env:
-      CC: clang-9
-      TARGET: x86_64
-    steps:
-    - uses: actions/checkout@v4
-    - name: install dependencies
-      run: .ci/install-dependencies.sh
-    - name: build check
-      run: .ci/run-build-and-tests.sh
-
-  clang8-x86_64:
-    runs-on: ubuntu-20.04
-    env:
-      CC: clang-8
       TARGET: x86_64
     steps:
     - uses: actions/checkout@v4

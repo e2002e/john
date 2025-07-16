@@ -92,7 +92,7 @@ void nfold(unsigned int inbits, const unsigned char *in,
 }
 
 void AES_cts_encrypt(const unsigned char *in, unsigned char *out, size_t len,
-		const AES_KEY *key, unsigned char *ivec, const int encryptp)
+		AES_KEY *key, unsigned char *ivec, const int encryptp)
 {
 	unsigned char tmp[AES_BLOCK_SIZE];
 	unsigned int i;

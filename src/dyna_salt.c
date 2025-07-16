@@ -14,15 +14,15 @@
 /*
  * This is a dynamic salt structure.  In a hash that has salts which
  * vary in size. To make a local salt structure usable by dyna_salt
- * code in John, simply place an instance of a dyna_salt structure as
+ * code in John, simply place an instance of a dyna_salt_t structure as
  * the FIRST member of your salt structure, and then properly fill in
  * the members of that structure.  This will make your structure 'look'
- * just like a dyna_salt_john_core structure. That is the structure
+ * just like a dyna_salt_john_core_t structure. That is the structure
  * that john core code uses, so john core can access your structure,
  * without having to know its full internal structure. Then define the
  * rest of the salt structure to be the 'real' salt structure you need
  * for the runtime of your hash.  In your format structure, set the salt_size
- * to be sizeof(dyna_salt*)  and set the FMT_DYNA_SALT format flag. See
+ * to be sizeof(dyna_salt_t*)  and set the FMT_DYNA_SALT format flag. See
  * zip format for an example of how to properly use dyna_salt's.
  */
 
@@ -52,7 +52,7 @@ void dyna_salt_remove_fp(void *p)
 {
 	if (p && (!format || /* get_salt() for dynamic format called from within valid() */
 	          (format->params.flags & FMT_DYNA_SALT) == FMT_DYNA_SALT)) {
-		dyna_salt_john_core *p1 = *((dyna_salt_john_core**)p);
+		dyna_salt_john_core_t *p1 = *((dyna_salt_john_core_t**)p);
 		if (p1 && p1->dyna_salt.salt_alloc_needs_free == 1) {
 #ifdef DYNA_SALT_DEBUG
 			printf("-- Freeing a salt    #%d  from: %s line %d\n", --salt_count, fname, line);
@@ -72,8 +72,8 @@ void dyna_salt_created_fp(void *p, char *fname, int line) {
 
 int dyna_salt_cmp(void *_p1, void *_p2, int comp_size) {
 	if ((format->params.flags & FMT_DYNA_SALT) == FMT_DYNA_SALT) {
-		dyna_salt_john_core *p1 = *((dyna_salt_john_core**)_p1);
-		dyna_salt_john_core *p2 = *((dyna_salt_john_core**)_p2);
+		dyna_salt_john_core_t *p1 = *((dyna_salt_john_core_t**)_p1);
+		dyna_salt_john_core_t *p2 = *((dyna_salt_john_core_t**)_p2);
 #ifdef DYNA_SALT_DEBUG
 		dump_stuff_msg("dyna_salt_cmp\np1", &((unsigned char*)p1)[p1->dyna_salt.salt_cmp_offset], p1->dyna_salt.salt_cmp_size>48?48:p1->dyna_salt.salt_cmp_size);
 		dump_stuff_msg("p2", &((unsigned char*)p2)[p2->dyna_salt.salt_cmp_offset], p2->dyna_salt.salt_cmp_size>48?48:p2->dyna_salt.salt_cmp_size);
@@ -99,7 +99,7 @@ void dyna_salt_md5(struct db_salt *p, int comp_size) {
 
 	MD5_Init(&ctx);
 	if ((format->params.flags & FMT_DYNA_SALT) == FMT_DYNA_SALT) {
-		dyna_salt_john_core *ds = *((dyna_salt_john_core**)p->salt);
+		dyna_salt_john_core_t *ds = *((dyna_salt_john_core_t**)p->salt);
 		MD5_Update(&ctx, &((unsigned char*)ds)[ds->dyna_salt.salt_cmp_offset],
 		           ds->dyna_salt.salt_cmp_size);
 	} else
@@ -108,10 +108,10 @@ void dyna_salt_md5(struct db_salt *p, int comp_size) {
 }
 
 void dyna_salt_smash(void *p, char c) {
-	dyna_salt_john_core *p1 = *((dyna_salt_john_core**)p);
+	dyna_salt_john_core_t *p1 = *((dyna_salt_john_core_t**)p);
 	memset(&((unsigned char*)p1)[p1->dyna_salt.salt_cmp_offset], 0xAF, p1->dyna_salt.salt_cmp_size);
 }
 int dyna_salt_smash_check(void *p, unsigned char c) {
-	dyna_salt_john_core *p1 = *((dyna_salt_john_core**)p);
+	dyna_salt_john_core_t *p1 = *((dyna_salt_john_core_t**)p);
 	return (((unsigned char*)p1)[p1->dyna_salt.salt_cmp_offset+p1->dyna_salt.salt_cmp_size-1] == c);
 }

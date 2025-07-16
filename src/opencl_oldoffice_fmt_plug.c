@@ -39,7 +39,7 @@ john_register_one(&FORMAT_STRUCT);
 #define PLAINTEXT_LENGTH	24 //* 19 is leanest, 24, 28, 31, max. 51 */
 #define BINARY_SIZE		0
 #define BINARY_ALIGN		MEM_ALIGN_NONE
-#define SALT_SIZE		sizeof(dyna_salt*)
+#define SALT_SIZE		sizeof(dyna_salt_t*)
 #define SALT_ALIGN		MEM_ALIGN_WORD
 
 #define MIN_KEYS_PER_CRYPT	1
@@ -80,7 +80,7 @@ static struct fmt_tests oo_tests[] = {
 };
 
 typedef struct {
-	dyna_salt dsalt;
+	dyna_salt_t dsalt;
 	int type;
 	unsigned char salt[16];
 	unsigned char verifier[16]; /* or encryptedVerifier */
@@ -129,7 +129,10 @@ static const char *warn[] = {
 /* ------- Helper functions ------- */
 static size_t get_task_max_work_group_size()
 {
-	return MIN(autotune_get_task_max_work_group_size(FALSE, 0, crypt_kernel), 32);
+	size_t ls = gpu_amd(device_info[gpu_id]) ? 64 :
+		gpu(device_info[gpu_id]) ? 32 : 1024;
+
+	return MIN(ls, autotune_get_task_max_work_group_size(FALSE, 0, crypt_kernel));
 }
 
 static void release_clobj(void);
@@ -514,16 +517,11 @@ static int salt_compare(const void *x, const void *y)
 static int crypt_all(int *pcount, struct db_salt *salt)
 {
 	int count = *pcount;
-	size_t lws, gws;
 
 	*pcount *= mask_int_cand.num_int_cand;
 
-	/* kernel is made for lws 32, using local memory */
-	lws = local_work_size ? local_work_size : 32;
-
-	/* Don't do more than requested */
-	global_work_size = //count;
-	gws = (count + lws - 1) / lws * lws;
+	size_t lws = local_work_size ? local_work_size : 32;
+	size_t gws = GET_NEXT_MULTIPLE(count, local_work_size);
 
 	//printf("%s(%d) lws "Zu" gws "Zu" kidx %u k %d mult %u\n", __FUNCTION__, count, lws, gws, key_idx, new_keys, mask_int_cand.num_int_cand);
 
@@ -531,6 +529,10 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		/* Self-test kludge */
 		if (idx_offset > 4 * (gws + 1))
 			idx_offset = 0;
+
+		/* Safety for when count < GWS */
+		for (int i = count; i <= gws; i++)
+			saved_idx[i] = key_idx;
 
 		BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], cl_saved_key, CL_FALSE, key_offset, key_idx - key_offset, saved_key + key_offset, 0, NULL, multi_profilingEvent[0]), "Failed transferring keys");
 		BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], cl_saved_idx, CL_FALSE, idx_offset, 4 * (gws + 1) - idx_offset, saved_idx + (idx_offset / 4), 0, NULL, multi_profilingEvent[1]), "Failed transferring index");
@@ -548,7 +550,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 
 	BENCH_CLERROR(clEnqueueReadBuffer(queue[gpu_id], cl_salt, CL_TRUE, 0, sizeof(cs), cur_salt, 0, NULL, multi_profilingEvent[3]), "Failed transferring salt");
 
-	WAIT_INIT(global_work_size)
+	WAIT_INIT(gws)
 	BENCH_CLERROR(clFlush(queue[gpu_id]), "clFlush");
 	WAIT_SLEEP
 	BENCH_CLERROR(clFinish(queue[gpu_id]), "clFinish");

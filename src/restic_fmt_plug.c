@@ -34,6 +34,8 @@ john_register_one(&fmt_restic);
 /* SCRYPT_ALGORITHM_NAME is based on scrypt_fmt.c */
 #if !defined(JOHN_NO_SIMD) && defined(__XOP__)
 #define SCRYPT_ALGORITHM_NAME "Salsa20/8 128/128 XOP"
+#elif !defined(JOHN_NO_SIMD) && defined(__AVX512VL__)
+#define SCRYPT_ALGORITHM_NAME "Salsa20/8 128/128 AVX512VL"
 #elif !defined(JOHN_NO_SIMD) && defined(__AVX__)
 #define SCRYPT_ALGORITHM_NAME "Salsa20/8 128/128 AVX"
 #elif !defined(JOHN_NO_SIMD) && defined(__SSE2__)

@@ -11,6 +11,7 @@
 
 #include "opencl_misc.h"
 #include "opencl_ripemd.h"
+#define AES_BITSLICE // Somehow this kernel bugs out with the table based kernel
 #define AES_SRC_TYPE __constant
 #define AES_DST_TYPE __global
 #include "opencl_aes.h"
@@ -31,7 +32,7 @@ typedef struct {
 	uint bin[(512 - 64) / 4];
 } tc_salt;
 
-inline void preproc(__global const uchar *key, uint keylen, uint *state,
+INLINE void preproc(__global const uchar *key, uint keylen, uint *state,
                     uint padding)
 {
 	uint i;
@@ -52,7 +53,7 @@ inline void preproc(__global const uchar *key, uint keylen, uint *state,
 	ripemd160(W, state);
 }
 
-inline void hmac_ripemd160(uint *output, uint *ipad_state, uint *opad_state,
+INLINE void hmac_ripemd160(uint *output, uint *ipad_state, uint *opad_state,
                            __constant uint *salt, uchar add)
 {
 	uint i;
@@ -84,7 +85,7 @@ inline void hmac_ripemd160(uint *output, uint *ipad_state, uint *opad_state,
 	ripemd160_160Z(W, output);
 }
 
-inline void big_hmac_ripemd160(uint *input, uint inputlen, uint *ipad_state,
+INLINE void big_hmac_ripemd160(uint *input, uint inputlen, uint *ipad_state,
                                uint *opad_state, uint *tmp_out)
 {
 	uint i;
@@ -118,7 +119,7 @@ inline void big_hmac_ripemd160(uint *input, uint inputlen, uint *ipad_state,
 	}
 }
 
-inline void pbkdf2(__global const uchar *pass, uint passlen,
+INLINE void pbkdf2(__global const uchar *pass, uint passlen,
                    __constant uint *salt, uint *out)
 {
 	uint ipad_state[5];
@@ -147,10 +148,14 @@ __kernel void tc_ripemd_aesxts(__global const pbkdf2_password *inbuffer,
                                __global tc_hash *outbuffer,
                                __constant tc_salt *salt)
 {
+	__local aes_local_t lt;
 	uint idx = get_global_id(0);
-	uint key[64 / 4];
+	union {
+		uint u32[64 / 4];
+		uchar uc[64];
+	} key;
 
-	pbkdf2(inbuffer[idx].v, inbuffer[idx].length, salt->salt, key);
+	pbkdf2(inbuffer[idx].v, inbuffer[idx].length, salt->salt, key.u32);
 
-	AES_256_XTS_first_sector(salt->bin, outbuffer[idx].v, (uchar*)key);
+	AES_256_XTS_first_sector(salt->bin, outbuffer[idx].v, key.uc, &lt);
 }

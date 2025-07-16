@@ -147,6 +147,7 @@ void blake256_init(state * S)
 	S->s[0] = S->s[1] = S->s[2] = S->s[3] = 0;
 }
 
+#if 0
 void blake224_init(state * S)
 {
 	S->h[0] = 0xC1059ED8;
@@ -160,6 +161,7 @@ void blake224_init(state * S)
 	S->t[0] = S->t[1] = S->buflen = S->nullt = 0;
 	S->s[0] = S->s[1] = S->s[2] = S->s[3] = 0;
 }
+#endif
 
 // datalen = number of bits
 void blake256_update(state * S, const uint8_t * data, uint64_t datalen)
@@ -195,11 +197,13 @@ void blake256_update(state * S, const uint8_t * data, uint64_t datalen)
 	}
 }
 
+#if 0
 // datalen = number of bits
 void blake224_update(state * S, const uint8_t * data, uint64_t datalen)
 {
 	blake256_update(S, data, datalen);
 }
+#endif
 
 void blake256_final_h(state * S, uint8_t * digest, uint8_t pa, uint8_t pb)
 {
@@ -247,10 +251,12 @@ void blake256_final(state * S, uint8_t * digest)
 	blake256_final_h(S, digest, 0x81, 0x01);
 }
 
+#if 0
 void blake224_final(state * S, uint8_t * digest)
 {
 	blake256_final_h(S, digest, 0x80, 0x00);
 }
+#endif
 
 // inlen = number of bytes
 void blake256_hash(uint8_t * out, const uint8_t * in, uint64_t inlen)
@@ -261,6 +267,7 @@ void blake256_hash(uint8_t * out, const uint8_t * in, uint64_t inlen)
 	blake256_final(&S, out);
 }
 
+#if 0
 // inlen = number of bytes
 void blake224_hash(uint8_t * out, const uint8_t * in, uint64_t inlen)
 {
@@ -393,3 +400,4 @@ void hmac_blake224_hash(uint8_t * out, const uint8_t * key, uint64_t keylen,
 	hmac_blake224_update(&S, in, inlen * 8);
 	hmac_blake224_final(&S, out);
 }
+#endif

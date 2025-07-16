@@ -6,9 +6,6 @@
  */
 
 #include "pbkdf2_hmac_sha1_kernel.cl"
-#if __OS_X__
-#define AES_NO_BITSLICE
-#endif
 #define AES_CTS_SRC_TYPE MAYBE_CONSTANT
 #define AES_CTS_DST_TYPE __global
 #include "opencl_aes.h"
@@ -44,12 +41,12 @@ typedef struct {
  * For some reason, ptext_size is ignored and we only use 16. That's just
  * how the CPU code works, I have no idea why.
  */
-inline void dk(uchar *key_out, uchar *key_in, uint key_size,
-               __constant uchar *ptext, uint ptext_size)
+INLINE void dk(uchar *key_out, uchar *key_in, uint key_size,
+               __constant uchar *ptext, uint ptext_size, __local aes_local_t *lt)
 {
 	uchar iv[16] = { 0 };
 	uchar plaintext[32] = { 0 };
-	AES_KEY ekey;
+	AES_KEY ekey; ekey.lt = lt;
 
 	memcpy_macro(plaintext, ptext, 16);
 
@@ -57,12 +54,12 @@ inline void dk(uchar *key_out, uchar *key_in, uint key_size,
 	AES_cbc_encrypt(plaintext, key_out, key_size, &ekey, iv);
 }
 
-inline void krb_decrypt(MAYBE_CONSTANT uchar *ciphertext, uint ctext_size,
+INLINE void krb_decrypt(MAYBE_CONSTANT uchar *ciphertext, uint ctext_size,
                         __global uchar *plaintext, const uchar *key,
-                        uint key_size)
+                        uint key_size, __local aes_local_t *lt)
 {
 	uchar iv[32] = { 0 };
-	AES_KEY ekey;
+	AES_KEY ekey; ekey.lt = lt;
 
 	AES_set_decrypt_key(key, key_size * 8, &ekey);
 	AES_cts_decrypt(ciphertext, plaintext, ctext_size, &ekey, iv);
@@ -94,16 +91,17 @@ __kernel void asrep_final(MAYBE_CONSTANT asrep_salt *salt,
 	uchar Ke[32];
 	uchar Ki[32];
 	uchar checksum[20];
+	__local aes_local_t lt;
 
 	plaintext += (salt->edata2len + 31) / 32 * 32 * gid;
 
 	memcpy_macro(base_key, ((__global uchar*)pbkdf2[gid].dk), key_size);
-	dk((uchar*)base_key, (uchar*)base_key, key_size, co_input, 16);
+	dk((uchar*)base_key, (uchar*)base_key, key_size, co_input, 16, &lt);
 
-	dk(Ke, (uchar*)base_key, key_size, ke3input, 16);
-	krb_decrypt(edata2, salt->edata2len, plaintext, Ke, key_size);
+	dk(Ke, (uchar*)base_key, key_size, ke3input, 16, &lt);
+	krb_decrypt(edata2, salt->edata2len, plaintext, Ke, key_size, &lt);
 
-	dk(Ki, (uchar*)base_key, key_size, ki3input, 16);
+	dk(Ki, (uchar*)base_key, key_size, ki3input, 16, &lt);
 	hmac_sha1(Ki, key_size, plaintext, salt->edata2len, checksum, 20);
 
 	out[gid].cracked = !memcmp_pmc(checksum, salt->edata1, 12);
@@ -132,16 +130,17 @@ __kernel void pa_sha1_final(MAYBE_CONSTANT pa_sha1_salt *salt,
 	uchar Ke[32];
 	uchar Ki[32];
 	uchar checksum[20];
+	__local aes_local_t lt;
 
 	plaintext += (TIMESTAMP_SIZE + 63) / 64 * 64 * gid;
 
 	memcpy_macro(base_key, ((__global uchar*)pbkdf2[gid].dk), key_size);
-	dk((uchar*)base_key, (uchar*)base_key, key_size, co_input, 16);
+	dk((uchar*)base_key, (uchar*)base_key, key_size, co_input, 16, &lt);
 
-	dk(Ke, (uchar*)base_key, key_size, ke1input, 16);
-	krb_decrypt(salt->ct, TIMESTAMP_SIZE, plaintext, Ke, key_size);
+	dk(Ke, (uchar*)base_key, key_size, ke1input, 16, &lt);
+	krb_decrypt(salt->ct, TIMESTAMP_SIZE, plaintext, Ke, key_size, &lt);
 
-	dk(Ki, (uchar*)base_key, key_size, ki1input, 16);
+	dk(Ki, (uchar*)base_key, key_size, ki1input, 16, &lt);
 	hmac_sha1(Ki, key_size, plaintext, TIMESTAMP_SIZE, checksum, 20);
 
 	memcpy_pg(out[gid].hash, checksum, BINARY_SIZE);
@@ -161,6 +160,7 @@ __kernel void tgsrep_final(MAYBE_CONSTANT tgsrep_salt *salt,
                            __global uchar *plaintext,
                            __global tgsrep_out *out)
 {
+	__local aes_local_t lt;
 	uint gid = get_global_id(0);
 	const int key_size = (salt->etype == 17) ? 16 : 32;
 #if HAVE_LUT3
@@ -178,12 +178,12 @@ __kernel void tgsrep_final(MAYBE_CONSTANT tgsrep_salt *salt,
 	plaintext += (salt->edata2len + 31) / 32 * 32 * gid;
 
 	memcpy_macro(base_key, ((__global uchar*)pbkdf2[gid].dk), key_size);
-	dk((uchar*)base_key, (uchar*)base_key, key_size, co_input, 16);
+	dk((uchar*)base_key, (uchar*)base_key, key_size, co_input, 16, &lt);
 
-	dk(Ke, (uchar*)base_key, key_size, ke2input, 16);
-	krb_decrypt(edata2, salt->edata2len, plaintext, Ke, key_size);
+	dk(Ke, (uchar*)base_key, key_size, ke2input, 16, &lt);
+	krb_decrypt(edata2, salt->edata2len, plaintext, Ke, key_size, &lt);
 
-	dk(Ki, (uchar*)base_key, key_size, ki2input, 16);
+	dk(Ki, (uchar*)base_key, key_size, ki2input, 16, &lt);
 	hmac_sha1(Ki, key_size, plaintext, salt->edata2len, checksum, 20);
 
 	out[gid].cracked = !memcmp_pmc(checksum, salt->edata1, 12);

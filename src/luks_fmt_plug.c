@@ -121,7 +121,7 @@ struct luks_phdr {
 };
 
 static struct custom_salt_LUKS {
-	dyna_salt dsalt;
+	dyna_salt_t dsalt;
 	char path[8192];
 	int loaded;
 	struct luks_phdr myphdr;
@@ -463,14 +463,11 @@ static void *get_salt(char *ciphertext)
 	int cnt;
 	unsigned char *out;
 	unsigned char *buf;
-	struct custom_salt_LUKS cs, *psalt;
-	static unsigned char *ptr;
+	struct custom_salt_LUKS cs;
 	size_t size = 0;
 
 	ctcopy += FORMAT_TAG_LEN;
 
-
-	if (!ptr) ptr = mem_alloc_tiny(sizeof(struct custom_salt*),sizeof(struct custom_salt*));
 	memset(&cs, 0, sizeof(cs));
 	cs.bestiter = INT_MAX;
 	out = (unsigned char*)&cs.myphdr;
@@ -514,7 +511,9 @@ static void *get_salt(char *ciphertext)
 			john_ntohl(cs.myphdr.keyblock[cs.bestslot].stripes));
 	MEM_FREE(keeptr);
 
-	psalt = (struct custom_salt_LUKS*)mem_alloc_tiny(sizeof(struct custom_salt_LUKS)+size, 4);
+	/* Now build dynamic salt and return a pointer to a pointer to it */
+	static struct custom_salt_LUKS *psalt;
+	psalt = mem_alloc_tiny(sizeof(struct custom_salt_LUKS)+size, 4);
 	memcpy(psalt, &cs, sizeof(cs));
 	memcpy(psalt->cipherbuf, buf, size);
 	MEM_FREE(buf);
@@ -524,8 +523,7 @@ static void *get_salt(char *ciphertext)
 	psalt->dsalt.salt_cmp_offset = SALT_CMP_OFF(struct custom_salt_LUKS, myphdr);
 	psalt->dsalt.salt_cmp_size = SALT_CMP_SIZE(struct custom_salt_LUKS, myphdr, cipherbuf, size);
 
-	memcpy(ptr, &psalt, sizeof(struct custom_salt*));
-	return (void*)ptr;
+	return &psalt;
 }
 
 static void *get_binary(char *ciphertext)

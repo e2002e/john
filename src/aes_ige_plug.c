@@ -76,7 +76,7 @@ typedef struct {
 /* N.B. The IV for this mode is _twice_ the block size */
 
 void JtR_AES_ige_encrypt(const unsigned char *in, unsigned char *out,
-                     size_t length, const AES_KEY *key,
+                     size_t length, AES_KEY *key,
                      unsigned char *ivec, const int enc)
 {
     size_t n;

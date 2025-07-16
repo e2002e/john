@@ -33,6 +33,7 @@ import binascii
 from struct import unpack
 import sys
 
+DES = -1
 DES3 = 0
 AES = 1
 AES_256 = 2
@@ -43,6 +44,7 @@ CIPHER_TABLE = {
     'AES-256-CBC': {'cipher': AES_256, 'keysize': 32, 'blocksize': 16, 'mode': "AES.MODE_CBC"},
     'AES-192-CBC': {'cipher': AES, 'keysize': 24, 'blocksize': 16, 'mode': "AES.MODE_CBC"},
     'AES-256-CTR': {'cipher': AES_256, 'keysize': 32, 'blocksize': 16, 'mode': "AES.MODE_CTR"},
+    'DES-CBC': {'cipher': DES, 'keysize': 8, 'blocksize': 8, 'mode': "DES.MODE_CBC"},
 }
 
 def get_all_tags_ktypes(lines):
@@ -186,11 +188,14 @@ def read_private_key(filename):
         if keysize == 24 and encryption_type == "AES-192-CBC" and (ktype == 0 or ktype == 1):  # RSA, DSA keys using AES-192
             hashline = "%s%s:$sshng$%s$%s$%s$%s$%s" % (f.name, filename_idx, 4, len(saltstr) // 2,
                 saltstr, len(data) // 2, data)
-        elif keysize == 32 and encryption_type == "AES-256-CBC" and (ktype == 0 or ktype == 1):  # RSA, DSA keys using AES-256
+        elif keysize == 32 and encryption_type == "AES-256-CBC" and (ktype == 0 or ktype == 1 or ktype == 3):  # RSA, DSA, EC keys using AES-256
             hashline = "%s%s:$sshng$%s$%s$%s$%s$%s" % (f.name, filename_idx, 5, len(saltstr) // 2,
                 saltstr, len(data) // 2, data)
         elif keysize == 24:
             hashline = "%s%s:$sshng$%s$%s$%s$%s$%s" % (f.name, filename_idx, 0,  # 0 -> 3DES
+                len(salt), saltstr, len(data) // 2, data)
+        elif keysize == 8 and len(salt) == 8:
+            hashline = "%s%s:$sshng$%s$%s$%s$%s$%s" % (f.name, filename_idx, 6,  # 6 with salt length 8 -> DES
                 len(salt), saltstr, len(data) // 2, data)
         elif keysize == 16 and (ktype == 0 or ktype == 1):  # RSA, DSA keys using AES-128
             hashline = "%s%s:$sshng$%s$%s$%s$%s$%s" % (f.name, filename_idx, 1, len(saltstr) // 2,

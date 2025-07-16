@@ -4,7 +4,7 @@
  * and it is hereby released to the general public under the following terms:
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted.
- * Based on S3nf implementation http://openwall.info/wiki/john/MSCash2
+ * Based on S3nf implementation https://openwall.info/wiki/john/MSCash2
  */
 
 #ifdef HAVE_OPENCL

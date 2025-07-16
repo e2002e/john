@@ -26,8 +26,8 @@
  *  JtR changes placed in public domain.
  */
 
-#ifndef MBEDTLS_PKCS12_H
-#define MBEDTLS_PKCS12_H
+#ifndef JOHN_PKCS12_H
+#define JOHN_PKCS12_H
 
 #define MBEDTLS_PKCS12_DERIVE_KEY       1   /**< encryption/decryption key */
 #define MBEDTLS_PKCS12_DERIVE_IV        2   /**< initialization vector     */

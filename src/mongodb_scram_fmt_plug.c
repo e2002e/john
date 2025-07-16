@@ -3,13 +3,12 @@
  * and it is hereby released to the general public under the following terms:
  * Redistribution and use in source and binary forms, with or without modification,
  * are permitted.
- *
  */
 
 #if FMT_EXTERNS_H
-extern struct fmt_main fmt_mongodb_scram;
+extern struct fmt_main fmt_scram_sha1_mongodb;
 #elif FMT_REGISTERS_H
-john_register_one(&fmt_mongodb_scram);
+john_register_one(&fmt_scram_sha1_mongodb);
 #else
 
 #include <string.h>
@@ -35,16 +34,16 @@ john_register_one(&fmt_mongodb_scram);
 #define SIMD_KEYS		(SIMD_COEF_32 * SIMD_PARA_SHA1)
 #endif
 
-#define FORMAT_LABEL            "scram"
+#define FORMAT_LABEL            "SCRAM-PBKDF2-SHA1-MongoDB"
 #define FORMAT_NAME             ""
-#define ALGORITHM_NAME          "SCRAM PBKDF2-SHA1 " SHA1_ALGORITHM_NAME
+#define ALGORITHM_NAME          "PBKDF2-SHA1/MD5/SCRAM " SHA1_ALGORITHM_NAME
 #define PLAINTEXT_LENGTH        125
 #define HASH_LENGTH             28
 #define SALT_SIZE               sizeof(struct custom_salt)
 #define SALT_ALIGN              sizeof(uint32_t)
 #define BINARY_SIZE             20
 #define BINARY_ALIGN            sizeof(uint32_t)
-#define BENCHMARK_COMMENT       ""
+#define BENCHMARK_COMMENT       " (old MongoDB)"
 #define BENCHMARK_LENGTH        0x107
 #define FORMAT_TAG              "$scram$"
 #define FORMAT_TAG_LENGTH       (sizeof(FORMAT_TAG) - 1)
@@ -71,7 +70,9 @@ static struct fmt_tests tests[] = {
 static struct custom_salt {
 	int saltlen;
 	int iterations;
+	int userlen;
 	char username[MAX_USERNAME_LENGTH + 1];
+#define MAX_SALT_LENGTH 24 /* base64 encoded */
 	unsigned char salt[18 + 1]; /* base64 decoding, 24 / 4 * 3 = 18 */
 } *cur_salt;
 
@@ -112,11 +113,11 @@ static int valid(char *ciphertext, struct fmt_main *self)
 		goto err;
 	if ((p = strtokm(NULL, "$")) == NULL)	/* salt */
 		goto err;
-	if (strlen(p)-2 != base64_valid_length(p, e_b64_mime, flg_Base64_MIME_TRAIL_EQ, 0) || strlen(p) > 24)
+	if (strlen(p)-2 != base64_valid_length(p, e_b64_mime, flg_Base64_MIME_TRAIL_EQ, 0) || strlen(p) > MAX_SALT_LENGTH)
 		goto err;
 	if ((p = strtokm(NULL, "")) == NULL)	/* hash */
 		goto err;
-	if (strlen(p)-1 != base64_valid_length(p, e_b64_mime, flg_Base64_MIME_TRAIL_EQ, 0) || strlen(p) > HASH_LENGTH)
+	if (strlen(p)-1 != base64_valid_length(p, e_b64_mime, flg_Base64_MIME_TRAIL_EQ, 0) || strlen(p) != HASH_LENGTH)
 		goto err;
 
 	MEM_FREE(keeptr);
@@ -137,11 +138,11 @@ static void *get_salt(char *ciphertext)
 	keeptr = ctcopy;;
 	ctcopy += FORMAT_TAG_LENGTH;
 	p = strtokm(ctcopy, "$");
-	strncpy(cs.username, p, 128);
+	cs.userlen = strnzcpyn(cs.username, p, sizeof(cs.username));
 	p = strtokm(NULL, "$");
 	cs.iterations = atoi(p);
 	p = strtokm(NULL, "$");
-	base64_convert(p, e_b64_mime, strlen(p), (char*)cs.salt, e_b64_raw, sizeof(cs.salt), flg_Base64_NO_FLAGS, 0);
+	cs.saltlen = base64_convert(p, e_b64_mime, strlen(p), (char *)cs.salt, e_b64_raw, sizeof(cs.salt), flg_Base64_NO_FLAGS, 0);
 	MEM_FREE(keeptr);
 
 	return (void *)&cs;
@@ -197,13 +198,13 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		unsigned char out[BINARY_SIZE];
 
 		MD5_Init(&mctx);
-		MD5_Update(&mctx, cur_salt->username, strlen((char*)cur_salt->username));
+		MD5_Update(&mctx, cur_salt->username, cur_salt->userlen);
 		MD5_Update(&mctx, ":mongo:", 7);
 		MD5_Update(&mctx, saved_key[index], strlen(saved_key[index]));
 		MD5_Final(hash, &mctx);
 		hex_encode(hash, 16, hexhash);
 
-		pbkdf2_sha1(hexhash, 32, cur_salt->salt, 16,
+		pbkdf2_sha1(hexhash, 32, cur_salt->salt, cur_salt->saltlen,
 				cur_salt->iterations, out, BINARY_SIZE, 0);
 
 		hmac_sha1(out, BINARY_SIZE, (unsigned char*)"Client Key", 10, out, BINARY_SIZE);
@@ -221,7 +222,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 
 		for (i = 0; i < SIMD_KEYS; ++i) {
 			MD5_Init(&mctx);
-			MD5_Update(&mctx, cur_salt->username, strlen((char*)cur_salt->username));
+			MD5_Update(&mctx, cur_salt->username, cur_salt->userlen);
 			MD5_Update(&mctx, ":mongo:", 7);
 			MD5_Update(&mctx, saved_key[index+i], strlen(saved_key[index+i]));
 			MD5_Final(hash, &mctx);
@@ -231,7 +232,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 			out[i] = out_[i];
 		}
 
-		pbkdf2_sha1_sse((const unsigned char **)hexhash, lens, cur_salt->salt, 16,
+		pbkdf2_sha1_sse((const unsigned char **)hexhash, lens, cur_salt->salt, cur_salt->saltlen,
 				cur_salt->iterations, out, BINARY_SIZE, 0);
 
 		for (i = 0; i < SIMD_KEYS; ++i) {
@@ -275,7 +276,13 @@ static char *get_key(int index)
 	return saved_key[index];
 }
 
-struct fmt_main fmt_mongodb_scram = {
+static unsigned int tunable_cost_iterations(void *_salt)
+{
+	struct custom_salt *salt = (struct custom_salt *)_salt;
+	return salt->iterations;
+}
+
+struct fmt_main fmt_scram_sha1_mongodb = {
 	{
 		FORMAT_LABEL,
 		FORMAT_NAME,
@@ -291,7 +298,7 @@ struct fmt_main fmt_mongodb_scram = {
 		MIN_KEYS_PER_CRYPT,
 		MAX_KEYS_PER_CRYPT,
 		FMT_CASE | FMT_8_BIT | FMT_OMP,
-		{ NULL },
+		{"iterations"},
 		{ FORMAT_TAG },
 		tests
 	}, {
@@ -303,7 +310,7 @@ struct fmt_main fmt_mongodb_scram = {
 		fmt_default_split,
 		get_binary,
 		get_salt,
-		{ NULL },
+		{tunable_cost_iterations},
 		fmt_default_source,
 		{
 			fmt_default_binary_hash_0,

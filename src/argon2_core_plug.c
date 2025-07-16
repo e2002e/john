@@ -1,19 +1,22 @@
 /*
- * Argon2 source code package
+ * Argon2 reference source code package - reference C implementations
  *
- * Written by Daniel Dinu and Dmitry Khovratovich, 2015
+ * Copyright 2015
+ * Daniel Dinu, Dmitry Khovratovich, Jean-Philippe Aumasson, and Samuel Neves
  *
- * This work is licensed under a Creative Commons CC0 1.0 License/Waiver.
+ * You may use this work under the terms of a Creative Commons CC0 1.0
+ * License/Waiver or the Apache Public License 2.0, at your option. The terms of
+ * these licenses can be found at:
  *
- * You should have received a copy of the CC0 Public Domain Dedication along
- * with
- * this software. If not, see
- * <http://creativecommons.org/publicdomain/zero/1.0/>.
- * modified by Agnieszka Bielec <bielecagnieszka8 at gmail.com>
+ * - CC0 1.0 Universal : https://creativecommons.org/publicdomain/zero/1.0
+ * - Apache 2.0        : https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * You should have received a copy of both of these licenses along with this
+ * software. If not, they may be obtained at the above URLs.
  */
 
 /*For memory wiping*/
-#ifdef _MSC_VER
+#ifdef _WIN32
 #include <windows.h>
 #include <winbase.h> /* For SecureZeroMemory */
 #endif
@@ -22,16 +25,26 @@
 #endif
 #define VC_GE_2005(version) (version >= 1400)
 
-#include <stdint.h>
+/* for explicit_bzero() on glibc */
+#define _DEFAULT_SOURCE
+
+/* We run threaded at a higher level */
+#define ARGON2_NO_THREADS	1
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "argon2_core.h"
+#if !defined(ARGON2_NO_THREADS)
 //#include "argon2_thread.h"
+#endif
 #include "blake2.h"
 #include "blake2-impl.h"
 
+#ifdef GENKAT
+//#include "argon2_genkat.h"
+#endif
 
 #if defined(__clang__)
 #if __has_attribute(optnone)
@@ -48,11 +61,8 @@
 #define NOT_OPTIMIZED
 #endif
 
-
 /***************Instance and Position constructors**********/
-void argon2_init_block_value(block *b, uint8_t in) {
-	memset(b->v, in, sizeof(b->v));
-}
+void argon2_init_block_value(block *b, uint8_t in) { memset(b->v, in, sizeof(b->v)); }
 
 void argon2_copy_block(block *dst, const block *src) {
     memcpy(dst->v, src->v, sizeof(uint64_t) * ARGON2_QWORDS_IN_BLOCK);
@@ -79,6 +89,76 @@ static void store_block(void *output, const block *src) {
     }
 }
 
+/***************Memory functions*****************/
+
+int argon2_allocate_memory(const argon2_context *context, uint8_t **memory,
+                    size_t num, size_t size) {
+    size_t memory_size = num*size;
+    if (memory == NULL) {
+        return ARGON2_MEMORY_ALLOCATION_ERROR;
+    }
+
+    /* 1. Check for multiplication overflow */
+    if (size != 0 && memory_size / size != num) {
+        return ARGON2_MEMORY_ALLOCATION_ERROR;
+    }
+
+    /* 2. Try to allocate with appropriate allocator */
+    if (context->allocate_cbk) {
+        (context->allocate_cbk)(memory, memory_size);
+    } else {
+        *memory = malloc(memory_size);
+    }
+
+    if (*memory == NULL) {
+        return ARGON2_MEMORY_ALLOCATION_ERROR;
+    }
+
+    return ARGON2_OK;
+}
+
+void argon2_free_memory(const argon2_context *context, uint8_t *memory,
+                 size_t num, size_t size) {
+    size_t memory_size = num*size;
+    argon2_clear_internal_memory(memory, memory_size);
+    if (context->free_cbk) {
+        (context->free_cbk)(memory, memory_size);
+    } else {
+        free(memory);
+    }
+}
+
+#if defined(__OpenBSD__)
+#define HAVE_EXPLICIT_BZERO 1
+#elif defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#if __GLIBC_PREREQ(2,25)
+#define HAVE_EXPLICIT_BZERO 1
+#endif
+#endif
+
+#ifndef argon2_secure_wipe_memory
+void NOT_OPTIMIZED argon2_secure_wipe_memory(void *v, size_t n) {
+#if defined(_MSC_VER) && VC_GE_2005(_MSC_VER) || defined(__MINGW32__)
+    SecureZeroMemory(v, n);
+#elif defined memset_s
+    memset_s(v, n, 0, n);
+#elif defined(HAVE_EXPLICIT_BZERO)
+    explicit_bzero(v, n);
+#else
+    static void *(*const volatile memset_sec)(void *, int, size_t) = &memset;
+    memset_sec(v, 0, n);
+#endif
+}
+
+/* Memory clear flag defaults to true. */
+int FLAG_clear_internal_memory = 0;
+void argon2_clear_internal_memory(void *v, size_t n) {
+  if (FLAG_clear_internal_memory && v) {
+    argon2_secure_wipe_memory(v, n);
+  }
+}
+#endif
+
 void argon2_finalize(const argon2_context *context, argon2_instance_t *instance) {
     if (context != NULL && instance != NULL) {
         block blockhash;
@@ -99,8 +179,17 @@ void argon2_finalize(const argon2_context *context, argon2_instance_t *instance)
             store_block(blockhash_bytes, &blockhash);
             blake2b_long(context->out, context->outlen, blockhash_bytes,
                          ARGON2_BLOCK_SIZE);
+            /* clear blockhash and blockhash_bytes */
+            argon2_clear_internal_memory(blockhash.v, ARGON2_BLOCK_SIZE);
+            argon2_clear_internal_memory(blockhash_bytes, ARGON2_BLOCK_SIZE);
         }
 
+#ifdef GENKAT
+        print_tag(context->out, context->outlen);
+#endif
+
+        argon2_free_memory(context, (uint8_t *)instance->memory,
+                    instance->memory_blocks, sizeof(block));
     }
 }
 
@@ -169,10 +258,32 @@ uint32_t argon2_index_alpha(const argon2_instance_t *instance,
     }
 
     /* 1.2.6. Computing absolute position */
-    absolute_position = (start_position + relative_position) %
-                        instance->lane_length; /* absolute position */
+    absolute_position = start_position + relative_position; /* absolute position */
+	if (absolute_position >= instance->lane_length) {
+		absolute_position -= instance->lane_length;
+	}
     return absolute_position;
 }
+
+/* Single-threaded version for p=1 case */
+static int fill_memory_blocks_st(argon2_instance_t *instance) {
+    uint32_t r, s, l;
+
+    for (r = 0; r < instance->passes; ++r) {
+        for (s = 0; s < ARGON2_SYNC_POINTS; ++s) {
+            for (l = 0; l < instance->lanes; ++l) {
+                argon2_position_t position = {r, l, (uint8_t)s, 0};
+                argon2_fill_segment(instance, position);
+            }
+        }
+#ifdef GENKAT
+        internal_kat(instance, r); /* Print all memory blocks */
+#endif
+    }
+    return ARGON2_OK;
+}
+
+#if !defined(ARGON2_NO_THREADS)
 
 #ifdef _WIN32
 static unsigned __stdcall fill_segment_thr(void *thread_data)
@@ -180,37 +291,35 @@ static unsigned __stdcall fill_segment_thr(void *thread_data)
 static void *fill_segment_thr(void *thread_data)
 #endif
 {
-    argon2_thread_data *my_data = (argon2_thread_data *)thread_data;
+    argon2_thread_data *my_data = thread_data;
     argon2_fill_segment(my_data->instance_ptr, my_data->pos);
-    //argon2_thread_exit();
+    argon2_thread_exit();
     return 0;
 }
 
-int argon2_fill_memory_blocks(argon2_instance_t *instance) {
+/* Multi-threaded version for p > 1 case */
+static int fill_memory_blocks_mt(argon2_instance_t *instance) {
     uint32_t r, s;
-    //argon2_thread_handle_t *thread = NULL;
+    argon2_thread_handle_t *thread = NULL;
     argon2_thread_data *thr_data = NULL;
-
-    if (instance == NULL || instance->lanes == 0) {
-        return ARGON2_THREAD_FAIL;
-    }
+    int rc = ARGON2_OK;
 
     /* 1. Allocating space for threads */
-    /*thread = calloc(instance->lanes, sizeof(argon2_thread_handle_t));
+    thread = calloc(instance->lanes, sizeof(argon2_thread_handle_t));
     if (thread == NULL) {
-        return ARGON2_MEMORY_ALLOCATION_ERROR;
-    }*/
+        rc = ARGON2_MEMORY_ALLOCATION_ERROR;
+        goto fail;
+    }
 
     thr_data = calloc(instance->lanes, sizeof(argon2_thread_data));
     if (thr_data == NULL) {
-        //free(thread);
-        return ARGON2_MEMORY_ALLOCATION_ERROR;
+        rc = ARGON2_MEMORY_ALLOCATION_ERROR;
+        goto fail;
     }
 
     for (r = 0; r < instance->passes; ++r) {
         for (s = 0; s < ARGON2_SYNC_POINTS; ++s) {
-            //int rc;
-            uint32_t l;
+            uint32_t l, ll;
 
             /* 2. Calling threads */
             for (l = 0; l < instance->lanes; ++l) {
@@ -218,12 +327,10 @@ int argon2_fill_memory_blocks(argon2_instance_t *instance) {
 
                 /* 2.1 Join a thread if limit is exceeded */
                 if (l >= instance->threads) {
-                    //rc = argon2_thread_join(thread[l - instance->threads]);
-                    /*if (rc) {
-                        free(thr_data);
-                        //free(thread);
-                        return ARGON2_THREAD_FAIL;
-                    }*/
+                    if (argon2_thread_join(thread[l - instance->threads])) {
+                        rc = ARGON2_THREAD_FAIL;
+                        goto fail;
+                    }
                 }
 
                 /* 2.2 Create thread */
@@ -235,16 +342,14 @@ int argon2_fill_memory_blocks(argon2_instance_t *instance) {
                     instance; /* preparing the thread input */
                 memcpy(&(thr_data[l].pos), &position,
                        sizeof(argon2_position_t));
-                /*rc = argon2_thread_create(&thread[l], &fill_segment_thr,
-                                          (void *)&thr_data[l]);*/
-
-                fill_segment_thr((void *)&thr_data[l]);
-
-                /*if (rc) {
-                    free(thr_data);
-                    //free(thread);
-                    return ARGON2_THREAD_FAIL;
-                }*/
+                if (argon2_thread_create(&thread[l], &fill_segment_thr,
+                                         (void *)&thr_data[l])) {
+                    /* Wait for already running threads */
+                    for (ll = 0; ll < l; ++ll)
+                        argon2_thread_join(thread[ll]);
+                    rc = ARGON2_THREAD_FAIL;
+                    goto fail;
+                }
 
                 /* argon2_fill_segment(instance, position); */
                 /*Non-thread equivalent of the lines above */
@@ -253,23 +358,40 @@ int argon2_fill_memory_blocks(argon2_instance_t *instance) {
             /* 3. Joining remaining threads */
             for (l = instance->lanes - instance->threads; l < instance->lanes;
                  ++l) {
-                /*rc = argon2_thread_join(thread[l]);
-                if (rc) {
-                    return ARGON2_THREAD_FAIL;
-                }*/
+                if (argon2_thread_join(thread[l])) {
+                    rc = ARGON2_THREAD_FAIL;
+                    goto fail;
+                }
             }
         }
+
+#ifdef GENKAT
+        internal_kat(instance, r); /* Print all memory blocks */
+#endif
     }
 
-    /*
+fail:
     if (thread != NULL) {
         free(thread);
     }
-    */
     if (thr_data != NULL) {
         free(thr_data);
     }
-    return ARGON2_OK;
+    return rc;
+}
+
+#endif /* ARGON2_NO_THREADS */
+
+int argon2_fill_memory_blocks(argon2_instance_t *instance) {
+	if (instance == NULL || instance->lanes == 0) {
+	    return ARGON2_INCORRECT_PARAMETER;
+    }
+#if defined(ARGON2_NO_THREADS)
+    return fill_memory_blocks_st(instance);
+#else
+    return instance->threads == 1 ?
+			fill_memory_blocks_st(instance) : fill_memory_blocks_mt(instance);
+#endif
 }
 
 int argon2_validate_inputs(const argon2_context *context) {
@@ -290,34 +412,61 @@ int argon2_validate_inputs(const argon2_context *context) {
         return ARGON2_OUTPUT_TOO_LONG;
     }
 
-    /* Validate password length */
+    /* Validate password (required param) */
     if (NULL == context->pwd) {
         if (0 != context->pwdlen) {
             return ARGON2_PWD_PTR_MISMATCH;
         }
-    } else {
-#if 0 // -Wtype-limits
-        if (ARGON2_MIN_PWD_LENGTH > context->pwdlen) {
-            return ARGON2_PWD_TOO_SHORT;
-        }
-#endif
-        if (ARGON2_MAX_PWD_LENGTH < context->pwdlen) {
-            return ARGON2_PWD_TOO_LONG;
-        }
     }
 
-    /* Validate salt length */
+    if (ARGON2_MIN_PWD_LENGTH > context->pwdlen) {
+      return ARGON2_PWD_TOO_SHORT;
+    }
+
+    if (ARGON2_MAX_PWD_LENGTH < context->pwdlen) {
+        return ARGON2_PWD_TOO_LONG;
+    }
+
+    /* Validate salt (required param) */
     if (NULL == context->salt) {
         if (0 != context->saltlen) {
             return ARGON2_SALT_PTR_MISMATCH;
         }
-    } else {
-        if (ARGON2_MIN_SALT_LENGTH > context->saltlen) {
-            return ARGON2_SALT_TOO_SHORT;
-        }
+    }
 
-        if (ARGON2_MAX_SALT_LENGTH < context->saltlen) {
-            return ARGON2_SALT_TOO_LONG;
+    if (ARGON2_MIN_SALT_LENGTH > context->saltlen) {
+        return ARGON2_SALT_TOO_SHORT;
+    }
+
+    if (ARGON2_MAX_SALT_LENGTH < context->saltlen) {
+        return ARGON2_SALT_TOO_LONG;
+    }
+
+    /* Validate secret (optional param) */
+    if (NULL == context->secret) {
+        if (0 != context->secretlen) {
+            return ARGON2_SECRET_PTR_MISMATCH;
+        }
+    } else {
+        if (ARGON2_MIN_SECRET > context->secretlen) {
+            return ARGON2_SECRET_TOO_SHORT;
+        }
+        if (ARGON2_MAX_SECRET < context->secretlen) {
+            return ARGON2_SECRET_TOO_LONG;
+        }
+    }
+
+    /* Validate associated data (optional param) */
+    if (NULL == context->ad) {
+        if (0 != context->adlen) {
+            return ARGON2_AD_PTR_MISMATCH;
+        }
+    } else {
+        if (ARGON2_MIN_AD_LENGTH > context->adlen) {
+            return ARGON2_AD_TOO_SHORT;
+        }
+        if (ARGON2_MAX_AD_LENGTH < context->adlen) {
+            return ARGON2_AD_TOO_LONG;
         }
     }
 
@@ -325,11 +474,11 @@ int argon2_validate_inputs(const argon2_context *context) {
     if (ARGON2_MIN_MEMORY > context->m_cost) {
         return ARGON2_MEMORY_TOO_LITTLE;
     }
-#if 0 // -Wtype-limits
+
     if (ARGON2_MAX_MEMORY < context->m_cost) {
         return ARGON2_MEMORY_TOO_MUCH;
     }
-#endif
+
     if (context->m_cost < 8 * context->lanes) {
         return ARGON2_MEMORY_TOO_LITTLE;
     }
@@ -361,19 +510,21 @@ int argon2_validate_inputs(const argon2_context *context) {
         return ARGON2_THREADS_TOO_MANY;
     }
 
+    if (NULL != context->allocate_cbk && NULL == context->free_cbk) {
+        return ARGON2_FREE_MEMORY_CBK_NULL;
+    }
+
+    if (NULL == context->allocate_cbk && NULL != context->free_cbk) {
+        return ARGON2_ALLOCATE_MEMORY_CBK_NULL;
+    }
+
     return ARGON2_OK;
 }
 
-/*
- * Function creates first 2 blocks per lane
- * @param instance Pointer to the current instance
- * @param blockhash Pointer to the pre-hashing digest
- * @pre blockhash must point to @a PREHASH_SEED_LENGTH allocated values
- */
-static void fill_first_blocks(uint8_t *blockhash, const argon2_instance_t *instance) {
+void argon2_fill_first_blocks(uint8_t *blockhash, const argon2_instance_t *instance) {
     uint32_t l;
-    /* Make the first and second block in each lane as G(H0||i||0) or
-       G(H0||i||1) */
+    /* Make the first and second block in each lane as G(H0||0||i) or
+       G(H0||1||i) */
     uint8_t blockhash_bytes[ARGON2_BLOCK_SIZE];
     for (l = 0; l < instance->lanes; ++l) {
 
@@ -390,19 +541,10 @@ static void fill_first_blocks(uint8_t *blockhash, const argon2_instance_t *insta
         load_block(&instance->memory[l * instance->lane_length + 1],
                    blockhash_bytes);
     }
+    argon2_clear_internal_memory(blockhash_bytes, ARGON2_BLOCK_SIZE);
 }
 
-/*
- * Hashes all the inputs into @a blockhash[PREHASH_DIGEST_LENGTH], clears
- * password and secret if needed
- * @param  context  Pointer to the Argon2 internal structure containing memory
- * pointer, and parameters for time and space requirements.
- * @param  blockhash Buffer for pre-hashing digest
- * @param  type Argon2 type
- * @pre    @a blockhash must have at least @a PREHASH_DIGEST_LENGTH bytes
- * allocated
- */
-static void argon2_initial_hash(uint8_t *blockhash, argon2_context *context,
+void argon2_initial_hash(uint8_t *blockhash, argon2_context *context,
                   argon2_type type) {
     blake2b_state BlakeHash;
     uint8_t value[sizeof(uint32_t)];
@@ -437,6 +579,11 @@ static void argon2_initial_hash(uint8_t *blockhash, argon2_context *context,
     if (context->pwd != NULL) {
         blake2b_update(&BlakeHash, (const uint8_t *)context->pwd,
                        context->pwdlen);
+
+        if (context->flags & ARGON2_FLAG_CLEAR_PASSWORD) {
+            argon2_secure_wipe_memory(context->pwd, context->pwdlen);
+            context->pwdlen = 0;
+        }
     }
 
     store32(&value, context->saltlen);
@@ -453,6 +600,11 @@ static void argon2_initial_hash(uint8_t *blockhash, argon2_context *context,
     if (context->secret != NULL) {
         blake2b_update(&BlakeHash, (const uint8_t *)context->secret,
                        context->secretlen);
+
+        if (context->flags & ARGON2_FLAG_CLEAR_SECRET) {
+            argon2_secure_wipe_memory(context->secret, context->secretlen);
+            context->secretlen = 0;
+        }
     }
 
     store32(&value, context->adlen);
@@ -468,109 +620,38 @@ static void argon2_initial_hash(uint8_t *blockhash, argon2_context *context,
 
 int argon2_initialize(argon2_instance_t *instance, argon2_context *context) {
     uint8_t blockhash[ARGON2_PREHASH_SEED_LENGTH];
+    int result = ARGON2_OK;
 
     if (instance == NULL || context == NULL)
         return ARGON2_INCORRECT_PARAMETER;
+    instance->context_ptr = context;
 
+    /* 1. Memory allocation */
+    result = argon2_allocate_memory(context, (uint8_t **)&(instance->memory),
+                             instance->memory_blocks, sizeof(block));
+    if (result != ARGON2_OK) {
+        return result;
+    }
 
     /* 2. Initial hashing */
     /* H_0 + 8 extra bytes to produce the first blocks */
     /* uint8_t blockhash[ARGON2_PREHASH_SEED_LENGTH]; */
     /* Hashing all inputs */
     argon2_initial_hash(blockhash, context, instance->type);
+    /* Zeroing 8 extra bytes */
+    argon2_clear_internal_memory(blockhash + ARGON2_PREHASH_DIGEST_LENGTH,
+                          ARGON2_PREHASH_SEED_LENGTH -
+                              ARGON2_PREHASH_DIGEST_LENGTH);
+
+#ifdef GENKAT
+    initial_kat(blockhash, context, instance->type);
+#endif
 
     /* 3. Creating first blocks, we always have at least two blocks in a slice
      */
-    fill_first_blocks(blockhash, instance);
+    argon2_fill_first_blocks(blockhash, instance);
+    /* Clearing the hash */
+    argon2_clear_internal_memory(blockhash, ARGON2_PREHASH_SEED_LENGTH);
 
     return ARGON2_OK;
-}
-int opencl_argon2_initialize(argon2_context *context, argon2_type type) {
-
-    if (context == NULL)
-        return ARGON2_INCORRECT_PARAMETER;
-
-    /* 2. Initial hashing */
-    /* H_0 + 8 extra bytes to produce the first blocks */
-    /* Hashing all inputs */
-    //uint8_t blockhash[ARGON2_PREHASH_SEED_LENGTH];
-    argon2_initial_hash(context->memory, context, type);
-
-    /* 3. Creating first blocks, we always have at least two blocks in a slice */
-    //fill_first_blocks(blockhash, instance);
-    //uint32_t l;
-    /* Make the first and second block in each lane as G(H0||i||0) or G(H0||i||1) */
-    // uint8_t blockhash_bytes[ARGON2_BLOCK_SIZE];
-    // for (l = 0; l < context->lanes; ++l) {
-
-    //     store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH, 0);
-    //     store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH + 4, l);
-    //     blake2b_long(blockhash_bytes, ARGON2_BLOCK_SIZE, blockhash, ARGON2_PREHASH_SEED_LENGTH);
-    //     load_block(((block*)context->memory) + l, blockhash_bytes);// Different than 'fill_first_blocks(blockhash, instance)'
-
-    //     store32(blockhash + ARGON2_PREHASH_DIGEST_LENGTH, 1);
-    //     blake2b_long(blockhash_bytes, ARGON2_BLOCK_SIZE, blockhash, ARGON2_PREHASH_SEED_LENGTH);
-    //     load_block(((block*)context->memory) + l + context->lanes, blockhash_bytes);// Different than 'fill_first_blocks(blockhash, instance)'
-    // }
-
-    return ARGON2_OK;
-}
-
-
-int blake2b_long(void *pout, size_t outlen, const void *in, size_t inlen) {
-    uint8_t *out = (uint8_t *)pout;
-    blake2b_state blake_state;
-    uint8_t outlen_bytes[sizeof(uint32_t)] = {0};
-    int ret = -1;
-
-    if (outlen > UINT32_MAX) {
-        goto fail;
-    }
-
-    /* Ensure little-endian byte order! */
-    store32(outlen_bytes, (uint32_t)outlen);
-
-#define TRY(statement)                                                         \
-    do {                                                                       \
-        ret = statement;                                                       \
-        if (ret < 0) {                                                         \
-            goto fail;                                                         \
-        }                                                                      \
-    } while ((void)0, 0)
-
-    if (outlen <= BLAKE2B_OUTBYTES) {
-        TRY(blake2b_init(&blake_state, outlen));
-        TRY(blake2b_update(&blake_state, outlen_bytes, sizeof(outlen_bytes)));
-        TRY(blake2b_update(&blake_state, in, inlen));
-        TRY(blake2b_final(&blake_state, out, outlen));
-    } else {
-        uint32_t toproduce;
-        uint8_t out_buffer[BLAKE2B_OUTBYTES];
-        uint8_t in_buffer[BLAKE2B_OUTBYTES];
-        TRY(blake2b_init(&blake_state, BLAKE2B_OUTBYTES));
-        TRY(blake2b_update(&blake_state, outlen_bytes, sizeof(outlen_bytes)));
-        TRY(blake2b_update(&blake_state, in, inlen));
-        TRY(blake2b_final(&blake_state, out_buffer, BLAKE2B_OUTBYTES));
-        memcpy(out, out_buffer, BLAKE2B_OUTBYTES / 2);
-        out += BLAKE2B_OUTBYTES / 2;
-        toproduce = (uint32_t)outlen - BLAKE2B_OUTBYTES / 2;
-
-        while (toproduce > BLAKE2B_OUTBYTES) {
-            memcpy(in_buffer, out_buffer, BLAKE2B_OUTBYTES);
-            TRY(blake2b(out_buffer, in_buffer, NULL,
-                BLAKE2B_OUTBYTES , BLAKE2B_OUTBYTES, 0));
-            memcpy(out, out_buffer, BLAKE2B_OUTBYTES / 2);
-            out += BLAKE2B_OUTBYTES / 2;
-            toproduce -= BLAKE2B_OUTBYTES / 2;
-        }
-
-        memcpy(in_buffer, out_buffer, BLAKE2B_OUTBYTES);
-        TRY(blake2b(out_buffer, in_buffer, NULL, toproduce,
-            BLAKE2B_OUTBYTES, 0));
-        memcpy(out, out_buffer, toproduce);
-    }
-fail:
-    //burn(&blake_state, sizeof(blake_state));
-    return ret;
-#undef TRY
 }

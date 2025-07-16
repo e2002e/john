@@ -19,7 +19,7 @@
 #define SALT_ALIGN              sizeof(struct custom_salt*)
 
 struct custom_salt {
-	dyna_salt dsalt;
+	dyna_salt_t dsalt;
 	unsigned char edata1[16];
 	char salt[256];
 	unsigned char etype;

@@ -31,7 +31,7 @@ typedef struct {
 			buf[i] ^= buf[i - 1]; \
 	} while(0)
 
-inline void encfs_common_setIVec(MAYBE_CONSTANT encfs_salt *salt,
+INLINE void encfs_common_setIVec(MAYBE_CONSTANT encfs_salt *salt,
                                  uchar *ivec, uint64_t seed, uchar *key)
 {
 	uchar iv_and_seed[MAX_IVLENGTH+8];
@@ -48,7 +48,7 @@ inline void encfs_common_setIVec(MAYBE_CONSTANT encfs_salt *salt,
 	          ivec, salt->ivLength);
 }
 
-inline void flipBytes(uchar *buf, uint size)
+INLINE void flipBytes(uchar *buf, uint size)
 {
 	uchar revBuf[64];
 	uint bytesLeft = size;
@@ -65,7 +65,7 @@ inline void flipBytes(uchar *buf, uint size)
 	}
 }
 
-inline uint64_t _checksum_64(MAYBE_CONSTANT encfs_salt *salt, uchar *key,
+INLINE uint64_t _checksum_64(MAYBE_CONSTANT encfs_salt *salt, uchar *key,
                              const uchar *data, uint dataLen,
                              uint64_t *chainedIV)
 {
@@ -106,7 +106,7 @@ inline uint64_t _checksum_64(MAYBE_CONSTANT encfs_salt *salt, uchar *key,
 	return value;
 }
 
-inline uint64_t MAC_64(MAYBE_CONSTANT encfs_salt *salt,
+INLINE uint64_t MAC_64(MAYBE_CONSTANT encfs_salt *salt,
                        const uchar *data,
                        uint len, uchar *key, uint64_t *chainedIV )
 {
@@ -118,7 +118,7 @@ inline uint64_t MAC_64(MAYBE_CONSTANT encfs_salt *salt,
 	return tmp;
 }
 
-inline uint encfs_common_MAC_32(MAYBE_CONSTANT encfs_salt *salt, uchar *src,
+INLINE uint encfs_common_MAC_32(MAYBE_CONSTANT encfs_salt *salt, uchar *src,
                                 uint len, uchar *key)
 {
 	uint64_t *chainedIV = NULL;
@@ -128,12 +128,12 @@ inline uint encfs_common_MAC_32(MAYBE_CONSTANT encfs_salt *salt, uchar *src,
 	return mac32;
 }
 
-inline void encfs_common_streamDecode(MAYBE_CONSTANT encfs_salt *salt,
+INLINE void encfs_common_streamDecode(MAYBE_CONSTANT encfs_salt *salt,
                                       uchar *buf, uint size, uint64_t iv64,
-                                      uchar *key)
+                                      uchar *key, __local aes_local_t *lt)
 {
 	uchar ivec[MAX_IVLENGTH];
-	AES_KEY akey;
+	AES_KEY akey; akey.lt = lt;
 
 	encfs_common_setIVec(salt, ivec, iv64 + 1, key);
 	AES_set_encrypt_key(key, salt->keySize * 8, &akey);
@@ -151,6 +151,7 @@ void encfs_final(MAYBE_CONSTANT encfs_salt *salt,
                  __global pbkdf2_out *pbkdf2,
                  __global encfs_out *out)
 {
+	__local aes_local_t lt;
 	uint gid = get_global_id(0);
 	uint i;
 	uchar master[MAX_KEYLENGTH + MAX_IVLENGTH];
@@ -165,7 +166,7 @@ void encfs_final(MAYBE_CONSTANT encfs_salt *salt,
 		checksum = (checksum << 8) | salt->data[i];
 
 	memcpy_mcp(tmpBuf, salt->data + KEY_CHECKSUM_BYTES, salt->keySize + salt->ivLength);
-	encfs_common_streamDecode(salt, tmpBuf, salt->keySize + salt->ivLength ,checksum, master);
+	encfs_common_streamDecode(salt, tmpBuf, salt->keySize + salt->ivLength ,checksum, master, &lt);
 	checksum2 = encfs_common_MAC_32(salt, tmpBuf, salt->keySize + salt->ivLength, master);
 
 	out[gid].cracked = (checksum2 == checksum);

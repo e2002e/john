@@ -14,15 +14,15 @@
 /*
  * This is a dynamic salt structure.  In a hash that has salts which
  * vary in size. To make a local salt structure usable by dyna_salt
- * code in John, simply place an instance of a dyna_salt structure as
+ * code in John, simply place an instance of a dyna_salt_t structure as
  * the FIRST member of your salt structure, and then properly fill in
  * the members of that structure.  This will make your structure 'look'
- * just like a dyna_salt_john_core structure. That is the structure
+ * just like a dyna_salt_john_core_t structure. That is the structure
  * that john core code uses, so john core can access your structure,
  * without having to know its full internal structure. Then define the
  * rest of the salt structure to be the 'real' salt structure you need
  * for the runtime of your hash.  In your format structure, set the salt_size
- * to be sizeof(dyna_salt*)  and set the FMT_DYNA_SALT format flag. See
+ * to be sizeof(dyna_salt_t*)  and set the FMT_DYNA_SALT format flag. See
  * zip format for an example of how to properly use dyna_salt's.
  */
 
@@ -37,20 +37,20 @@
 /************************************************************************
  * NOTE if changing this struct, also copy the changes to opencl_misc.h *
  ************************************************************************/
-typedef struct dyna_salt_t {
+typedef struct dyna_salt_s {
 	size_t salt_cmp_size;
 	struct { /* bit field stealing one bit of the size_t */
 		size_t salt_alloc_needs_free : 1; /* 1 if if malloc/calloc used */
 		size_t salt_cmp_offset : (sizeof(size_t) * 8 - 1);
 	};
-} dyna_salt;
+} dyna_salt_t;
 
 /* this IS the signature that is required for ALL formats
- *  which use dyna_salt to have
+ *  which use dyna_salt_t to have
  */
-typedef struct dyna_salt_john_core_t {
-	dyna_salt dyna_salt;
-} dyna_salt_john_core;
+typedef struct dyna_salt_john_core_s {
+	dyna_salt_t dyna_salt;
+} dyna_salt_john_core_t;
 
 // call with SALT_CMP_SIZE(struct, first comp. member, blob member, extra_bytes)
 #define SALT_CMP_SIZE(a,b,c,d) (offsetof(a,c)-offsetof(a,b)+d)

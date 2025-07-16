@@ -7,11 +7,13 @@
 #include "formats.h"
 #include "dyna_salt.h"
 
+#define BENCHMARK_COMMENT   ""
+#define BENCHMARK_LENGTH    0x507
 #define FORMAT_TAG          "$axcrypt$*"
 #define FORMAT_TAG_LEN      (sizeof(FORMAT_TAG)-1)
 
 struct custom_salt {
-	dyna_salt dsalt;
+	dyna_salt_t dsalt;
 	int version;
 	uint32_t key_wrapping_rounds;
 	uint32_t deriv_salt_length;
@@ -25,3 +27,4 @@ struct custom_salt {
 extern int axcrypt_common_valid(char *ciphertext, struct fmt_main *self, int is_cpu_format);
 extern void *axcrypt_get_salt(char *ciphertext);
 extern unsigned int axcrypt_iteration_count(void *salt);
+extern unsigned int axcrypt_version(void *salt);

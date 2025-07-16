@@ -13,6 +13,7 @@ extern struct fmt_main fmt_bitshares;
 #elif FMT_REGISTERS_H
 john_register_one(&fmt_bitshares);
 #else
+struct fmt_main fmt_bitshares;
 
 #include <string.h>
 
@@ -20,7 +21,7 @@ john_register_one(&fmt_bitshares);
 #include <omp.h>
 #endif
 
-#define OMP_SCALE               32  // MKPC and OMP_SCALE tuned on i5-6500 CPU
+#define OMP_SCALE               4
 
 #include "formats.h"
 #include "misc.h"
@@ -35,7 +36,7 @@ john_register_one(&fmt_bitshares);
 #define FORMAT_NAME             "BitShares Wallet"
 #define FORMAT_TAG              "$BitShares$"
 #define TAG_LENGTH              (sizeof(FORMAT_TAG) - 1)
-#define ALGORITHM_NAME          "SHA-512 64/" ARCH_BITS_STR
+#define ALGORITHM_NAME          "SHA512/AES/secp256k1/SHA256 " ARCH_BITS_STR "/" ARCH_BITS_STR
 #define BENCHMARK_COMMENT       ""
 #define BENCHMARK_LENGTH        7
 #define PLAINTEXT_LENGTH        125
@@ -44,7 +45,7 @@ john_register_one(&fmt_bitshares);
 #define SALT_SIZE               sizeof(struct custom_salt)
 #define SALT_ALIGN              sizeof(uint32_t)
 #define MIN_KEYS_PER_CRYPT      1
-#define MAX_KEYS_PER_CRYPT      16
+#define MAX_KEYS_PER_CRYPT      512
 
 #define MAX_CIPHERTEXT_LENGTH   1024
 
@@ -52,6 +53,7 @@ static struct fmt_tests tests[] = {
 	// BitShares.Setup.2.0.180115.exe
 	{"$BitShares$0*ec415018f26e7182a273655aef7cec47966306c48956604462f5b9e1613b3b70ebaaed4d7600b24a424ddb7d4cd56e55", "openwall"},
 	{"$BitShares$0*3bebbec17f0643ee9d3d5e48f04451bf7e38765f3bf2fa6ea12f680d60da121bb04ced9f76681744f3730322082c7ec7", "äbc12345"},
+	{"$BitShares$0*966306c48956604462f5b9e1613b3b70ebaaed4d7600b24a424ddb7d4cd56e55", "openwall"},
 	// Google Chrome -> https://wallet.bitshares.org in January, 2018
 	{"$BitShares$0*97452e44d43818099fbd2cc7539588c2c2dbc4e06e1b18831ded86b7e68e51d2da2c2b81054863032248a9da93ea1943", "openwall123"},
 	// Backup (.bin) files from February, 2018
@@ -62,10 +64,15 @@ static struct fmt_tests tests[] = {
 
 static char (*saved_key)[PLAINTEXT_LENGTH + 1];
 static int *saved_len;
-static int any_cracked, *cracked;
+static AES_KEY *saved_aes_key;
+static unsigned char (*saved_hash)[32];
+static int keys_changed, any_cracked, *cracked;
 static size_t cracked_size;
 
+static secp256k1_context *ctxs;
+
 static struct custom_salt {
+	secp256k1_pubkey pubkey;
 	uint32_t ctlen;
 	int type;
 	unsigned char ct[MAX_CIPHERTEXT_LENGTH];
@@ -76,16 +83,24 @@ static void init(struct fmt_main *self)
 	omp_autotune(self, OMP_SCALE);
 	saved_key = mem_calloc(sizeof(*saved_key), self->params.max_keys_per_crypt);
 	saved_len = mem_calloc(self->params.max_keys_per_crypt, sizeof(*saved_len));
+	saved_aes_key = mem_calloc(sizeof(*saved_aes_key), self->params.max_keys_per_crypt);
+	saved_hash = mem_calloc(sizeof(*saved_hash), self->params.max_keys_per_crypt);
 	cracked_size = sizeof(*cracked) * self->params.max_keys_per_crypt;
-	any_cracked = 0;
 	cracked = mem_calloc(cracked_size, 1);
+	keys_changed = any_cracked = 0;
+
+	ctxs = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
 }
 
 static void done(void)
 {
 	MEM_FREE(saved_key);
 	MEM_FREE(saved_len);
+	MEM_FREE(saved_aes_key);
+	MEM_FREE(saved_hash);
 	MEM_FREE(cracked);
+
+	secp256k1_context_destroy(ctxs);
 }
 
 static int valid(char *ciphertext, struct fmt_main *self)
@@ -111,12 +126,19 @@ static int valid(char *ciphertext, struct fmt_main *self)
 	if ((p = strtokm(NULL, "*")) == NULL)   // ciphertext
 		goto err;
 	value = hexlenl(p, &extra);
-	if (type == 0) {
-		if (value > MAX_CIPHERTEXT_LENGTH * 2 || value < 32 * 2 || extra)
+	if (value > MAX_CIPHERTEXT_LENGTH * 2 || extra)
+		goto err;
+	switch (type) {
+	case 0:
+		if (value < 32 * 2 || (value & 31))
 			goto err;
-	} else {
-		if (value > MAX_CIPHERTEXT_LENGTH * 2 || value < 256 * 2 || extra)  // rough check!
+		break;
+	case 1:
+		if (value < 256 * 2 || ((value - 66) & 31)) // rough check!
 			goto err;
+		break;
+	default:
+		goto err;
 	}
 
 	MEM_FREE(keeptr);
@@ -125,6 +147,19 @@ static int valid(char *ciphertext, struct fmt_main *self)
 err:
 	MEM_FREE(keeptr);
 	return 0;
+}
+
+static char *split(char *ciphertext, int index, struct fmt_main *self)
+{
+	static char out[TAG_LENGTH + 2 + 64 + 1];
+
+	if (ciphertext[TAG_LENGTH] == '0' && strlen(ciphertext) > sizeof(out)) {
+		memcpy(out, ciphertext, TAG_LENGTH + 2);
+		memcpy(out + TAG_LENGTH + 2, ciphertext + strlen(ciphertext) - 64, 65);
+		return out;
+	}
+
+	return ciphertext;
 }
 
 static void *get_salt(char *ciphertext)
@@ -146,6 +181,8 @@ static void *get_salt(char *ciphertext)
 
 	MEM_FREE(keeptr);
 
+	secp256k1_ec_pubkey_parse(ctxs, &cs.pubkey, cs.ct, 33);
+
 	return &cs;
 }
 
@@ -157,6 +194,7 @@ static void set_salt(void *salt)
 static void set_key(char *key, int index)
 {
 	saved_len[index] = strnzcpyn(saved_key[index], key, PLAINTEXT_LENGTH + 1);
+	keys_changed = 3;
 }
 
 static char *get_key(int index)
@@ -190,20 +228,21 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 #endif
 	for (index = 0; index < count; index++) {
 		SHA512_CTX ctx;
-		unsigned char km[64];
-		AES_KEY aes_decrypt_key;
-		unsigned char out[MAX_CIPHERTEXT_LENGTH];
-		unsigned char iv[16] = { 0 }; // does not matter
+		unsigned char km[64], iv[16], out[16];
 
 		if (cur_salt->type == 0) {
-			SHA512_Init(&ctx);
-			SHA512_Update(&ctx, saved_key[index], saved_len[index]);
-			SHA512_Final(km, &ctx);
+			if (keys_changed & 1) {
+				SHA512_Init(&ctx);
+				SHA512_Update(&ctx, saved_key[index], saved_len[index]);
+				SHA512_Final(km, &ctx);
 
-			AES_set_decrypt_key(km, 256, &aes_decrypt_key);
-			AES_cbc_encrypt(cur_salt->ct + cur_salt->ctlen - 32, out, 32, &aes_decrypt_key, iv, AES_DECRYPT);
+				AES_set_decrypt_key(km, 256, &saved_aes_key[index]);
+			}
 
-			if (memcmp(out + 16, "\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10", 16) == 0) {
+			memcpy(iv, cur_salt->ct, 16);
+			AES_cbc_encrypt(cur_salt->ct + 16, out, 16, &saved_aes_key[index], iv, AES_DECRYPT);
+
+			if (out[0] == 16 && memcmp(out, "\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10", 16) == 0) {
 				cracked[index] = 1;
 #ifdef _OPENMP
 #pragma omp atomic
@@ -211,23 +250,23 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 				any_cracked |= 1;
 			}
 		} else {
-			secp256k1_context *ctxs;
+			AES_KEY aes_decrypt_key;
 			secp256k1_pubkey pubkey;
 			SHA256_CTX sctx;
 			unsigned char output[128];
 			size_t outlen = 33;
 			int padbyte;
-			int dlen = cur_salt->ctlen - outlen;
 
-			SHA256_Init(&sctx);
-			SHA256_Update(&sctx, saved_key[index], saved_len[index]);
-			SHA256_Final(km, &sctx);
+			if (keys_changed & 2) {
+				SHA256_Init(&sctx);
+				SHA256_Update(&sctx, saved_key[index], saved_len[index]);
+				SHA256_Final(saved_hash[index], &sctx);
+			}
 
-			ctxs = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
-			secp256k1_ec_pubkey_parse(ctxs, &pubkey, cur_salt->ct, 33);
-			secp256k1_ec_pubkey_tweak_mul(ctxs, &pubkey, km);
+			pubkey = cur_salt->pubkey;
+			secp256k1_ec_pubkey_tweak_mul(ctxs, &pubkey, saved_hash[index]);
 			secp256k1_ec_pubkey_serialize(ctxs, output, &outlen, &pubkey, SECP256K1_EC_UNCOMPRESSED);
-			secp256k1_context_destroy(ctxs);
+
 			SHA512_Init(&ctx);
 			SHA512_Update(&ctx, output + 1, 32);
 			SHA512_Final(km, &ctx);
@@ -236,29 +275,42 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 			SHA512_Init(&ctx);
 			SHA512_Update(&ctx, output, 128);
 			SHA512_Final(km, &ctx);
-			AES_set_decrypt_key(km, 256, &aes_decrypt_key);
-			AES_cbc_encrypt(cur_salt->ct + 33, out, dlen, &aes_decrypt_key, km + 32, AES_DECRYPT);
 
-			padbyte = out[dlen - 1];
+			AES_set_decrypt_key(km, 256, &aes_decrypt_key);
+			memcpy(iv, cur_salt->ct + cur_salt->ctlen - 32, 16);
+			AES_cbc_encrypt(cur_salt->ct + cur_salt->ctlen - 16, out, 16, &aes_decrypt_key, iv, AES_DECRYPT);
+
+			padbyte = out[15];
 			if (padbyte <= 16) {
 				// check padding!
-				if (check_pkcs_pad(out, dlen, 16) >= 0) {
+				if (check_pkcs_pad(out, 16, 16) >= 0) {
+					// decrypt the whole thing
+					unsigned char out_full[MAX_CIPHERTEXT_LENGTH];
+					int dlen = cur_salt->ctlen - 33;
+					AES_cbc_encrypt(cur_salt->ct + 33, out_full, dlen, &aes_decrypt_key, km + 32, AES_DECRYPT);
 					// check checksum
 					SHA256_Init(&sctx);
-					SHA256_Update(&sctx, out + 4, dlen - 4 - padbyte);
+					SHA256_Update(&sctx, out_full + 4, dlen - 4 - padbyte);
 					SHA256_Final(km, &sctx);
-					if (memcmp(km, out, 4) == 0) {
+					if (padbyte >= 6 || memcmp(km, out_full, 4) == 0) {
 						cracked[index] = 1;
 #ifdef _OPENMP
 #pragma omp atomic
 #endif
 						any_cracked |= 1;
 
+						if (memcmp(km, out_full, 4) != 0) {
+							fprintf(stderr, "Warning: " FORMAT_LABEL ": Good padding, but bad checksum"
+							    " (corrupted data or false positive?) - will keep guessing\n");
+							fmt_bitshares.params.flags |= FMT_NOT_EXACT;
+						}
 					}
 				}
 			}
 		}
 	}
+
+	keys_changed &= ~(1 << cur_salt->type);
 
 	return count;
 }
@@ -278,6 +330,12 @@ static int cmp_exact(char *source, int index)
 	return 1;
 }
 
+static unsigned int tunable_cost_type(void *_salt)
+{
+	struct custom_salt *salt = (struct custom_salt *)_salt;
+	return salt->type;
+}
+
 struct fmt_main fmt_bitshares = {
 	{
 		FORMAT_LABEL,
@@ -294,7 +352,7 @@ struct fmt_main fmt_bitshares = {
 		MIN_KEYS_PER_CRYPT,
 		MAX_KEYS_PER_CRYPT,
 		FMT_CASE | FMT_8_BIT | FMT_OMP | FMT_HUGE_INPUT,
-		{ NULL },
+		{"type [0:wallet 1:backup]"},
 		{ FORMAT_TAG },
 		tests
 	}, {
@@ -303,10 +361,10 @@ struct fmt_main fmt_bitshares = {
 		fmt_default_reset,
 		fmt_default_prepare,
 		valid,
-		fmt_default_split,
+		split,
 		fmt_default_binary,
 		get_salt,
-		{ NULL },
+		{tunable_cost_type},
 		fmt_default_source,
 		{
 			fmt_default_binary_hash

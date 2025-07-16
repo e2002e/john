@@ -24,7 +24,7 @@ typedef struct {
 	uchar ciphertext[CTLEN];
 } pem_salt;
 
-inline int pem_decrypt(__global uchar *key, MAYBE_CONSTANT pem_salt *salt)
+INLINE int pem_decrypt(__global uchar *key, MAYBE_CONSTANT pem_salt *salt, __local aes_local_t *lt)
 {
 	uchar out[CTLEN];
 	struct asn1_hdr hdr;
@@ -49,7 +49,7 @@ inline int pem_decrypt(__global uchar *key, MAYBE_CONSTANT pem_salt *salt)
 	} else {
 		const uint aes_sz = salt->cid * 64;
 		uchar aiv[16];
-		AES_KEY akey;
+		AES_KEY akey; akey.lt = lt;
 
 		block_size = 16;
 		memcpy_macro(aiv, salt->iv, 16);
@@ -61,7 +61,7 @@ inline int pem_decrypt(__global uchar *key, MAYBE_CONSTANT pem_salt *salt)
 		return 0;
 
 	// SEQUENCE
-	if (asn1_get_next(out, length, &hdr) < 0 ||
+	if (asn1_get_next(out, length, length, &hdr) < 0 ||
 			hdr.class != ASN1_CLASS_UNIVERSAL ||
 			hdr.tag != ASN1_TAG_SEQUENCE) {
 		return 0;
@@ -70,7 +70,7 @@ inline int pem_decrypt(__global uchar *key, MAYBE_CONSTANT pem_salt *salt)
 	end = pos + hdr.length;
 
 	// version Version (Version ::= INTEGER)
-	if (asn1_get_next(pos, end - pos, &hdr) < 0 ||
+	if (asn1_get_next(pos, end - pos, end - pos, &hdr) < 0 ||
 			hdr.class != ASN1_CLASS_UNIVERSAL ||
 			hdr.tag != ASN1_TAG_INTEGER) {
 		return 0;
@@ -84,7 +84,7 @@ inline int pem_decrypt(__global uchar *key, MAYBE_CONSTANT pem_salt *salt)
 		return 0;
 
 	// SEQUENCE
-	if (asn1_get_next(pos, length, &hdr) < 0 ||
+	if (asn1_get_next(pos, length, length, &hdr) < 0 ||
 			hdr.class != ASN1_CLASS_UNIVERSAL ||
 			hdr.tag != ASN1_TAG_SEQUENCE) {
 		return 0;
@@ -92,7 +92,7 @@ inline int pem_decrypt(__global uchar *key, MAYBE_CONSTANT pem_salt *salt)
 	pos = hdr.payload; /* go inside this sequence */
 
 	// OBJECT IDENTIFIER (with value 1.2.840.113549.1.1.1, 1.2.840.10040.4.1 for DSA)
-	if (asn1_get_next(pos, length, &hdr) < 0 ||
+	if (asn1_get_next(pos, length, length, &hdr) < 0 ||
 			hdr.class != ASN1_CLASS_UNIVERSAL ||
 			hdr.tag != ASN1_TAG_OID) {
 		return 0;
@@ -109,7 +109,8 @@ void pem_final(MAYBE_CONSTANT pem_salt *salt,
                __global pbkdf2_out *pbkdf2,
                __global pem_out *out)
 {
+	__local aes_local_t lt;
 	uint gid = get_global_id(0);
 
-	out[gid].cracked = pem_decrypt((__global uchar*)pbkdf2[gid].dk, salt);
+	out[gid].cracked = pem_decrypt((__global uchar*)pbkdf2[gid].dk, salt, &lt);
 }

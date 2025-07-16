@@ -48,6 +48,8 @@ john_register_one(&fmt_bestcrypt_ve);
 
 #if !defined(JOHN_NO_SIMD) && defined(__XOP__)
 #define SCRYPT_ALGORITHM_NAME "Salsa20/8 128/128 XOP"
+#elif !defined(JOHN_NO_SIMD) && defined(__AVX512VL__)
+#define SCRYPT_ALGORITHM_NAME "Salsa20/8 128/128 AVX512VL"
 #elif !defined(JOHN_NO_SIMD) && defined(__AVX__)
 #define SCRYPT_ALGORITHM_NAME "Salsa20/8 128/128 AVX"
 #elif !defined(JOHN_NO_SIMD) && defined(__SSE2__)
@@ -386,11 +388,14 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		SHA256_Init(&ctx);
 		SHA256_Update(&ctx, out, 0x40);
 		SHA256_Final(sha256_hash, &ctx);
-		cracked[index] = (0 == memcmp(sha256_hash, out + 0x40, 0x20));
+
+		if (!memcmp(sha256_hash, out + 0x40, 0x20)) {
+			cracked[index] = 1;
 #ifdef _OPENMP
 #pragma omp atomic
 #endif
-		any_cracked |= 1;
+			any_cracked |= 1;
+		}
 	}
 
 	if (failed) {

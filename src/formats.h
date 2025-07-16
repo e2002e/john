@@ -91,7 +91,7 @@ struct db_salt;
 #define FMT_NOT_EXACT			0x00000100
 /*
  * This format uses a dynamic sized salt, and its salt structure
- * 'derives' from the dyna_salt type defined in dyna_salt.h
+ * 'derives' from the dyna_salt_t type defined in dyna_salt.h
  */
 #define FMT_DYNA_SALT			0x00000200
 /*
@@ -514,7 +514,7 @@ extern int fmt_default_salt_hash(void *salt);
 extern void fmt_default_set_salt(void *salt);
 extern void fmt_default_clear_keys(void);
 extern int fmt_default_get_hash(int index);
-/* this is a salt_hash default specifically for dyna_salt type formats */
+/* this is a salt_hash default specifically for dyna_salt_t type formats */
 extern int fmt_default_dyna_salt_hash(void *salt);
 
 /*

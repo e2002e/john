@@ -100,7 +100,7 @@ static preload *cursimd;	// set_salt points this to the current salt.
 #endif
 
 typedef struct keystore_salt_t {
-	dyna_salt dsalt;
+	dyna_salt_t dsalt;
 	int target;
 	int data_length;
 	int count;
@@ -299,7 +299,7 @@ static void *get_salt(char *ciphertext)
 			+ atoi16[ARCH_INDEX(p[i * 2 + 1])];
 	MEM_FREE(keeptr);
 
-	// setup the dyna_salt stuff.
+	// setup the dyna_salt_t stuff.
 	cs.dsalt.salt_cmp_offset = SALT_CMP_OFF(keystore_salt, data_length);
 	cs.dsalt.salt_cmp_size = SALT_CMP_SIZE(keystore_salt, data_length, data, 0);
 	cs.dsalt.salt_alloc_needs_free = 0;

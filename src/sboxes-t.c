@@ -1,21 +1,22 @@
 /*
- * Bitslice DES S-boxes with LOP3.LUT instructions
- * For NVIDIA Maxwell architecture and CUDA 7.5 RC
- * by DeepLearningJohnDoe, version 0.1.6, 2015/07/19
+ * Bitslice DES S-boxes with NVIDIA LOP3.LUT and x86-64 AVX-512 VPTERNLOG
+ * by Sovyn Y., 28.02.2024
  *
- * Gate counts: 25 24 25 18 25 24 24 23
+ * Gate counts: 23 22 24 17 23 22 23 23 (Total: 177)
+ * Average: 22.125
+ *
+ * Alternative versions by DeepLearningJohnDoe, version 0.1.6, 2015/07/19
+ *
+ * Gate counts: 25 24 25 18 25 24 24 23 (Total: 188)
  * Average: 23.5
  * Depth: 8 7 7 6 8 10 10 8
  * Average: 8
  *
- * These Boolean expressions corresponding to DES S-boxes were
- * discovered by <deeplearningjohndoe at gmail.com>
+ * Also included is alternative S4 with 17 gates discovered by Roman Rusakov
  *
- * S4 has been replaced with Roman Rusakov's version, which has 17 gates.
- * This change is not reflected in the numbers given above.
- *
+ * This C source code representation is
  * Copyright (c) 2015 <deeplearningjohndoe at gmail.com>
- * Copyright (c) 2019 Solar Designer <solar at openwall.com>
+ * Copyright (c) 2019,2024 Solar Designer <solar at openwall.com>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted.
@@ -27,6 +28,31 @@ MAYBE_INLINE static void
 s1(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
     vtype * out1, vtype * out2, vtype * out3, vtype * out4)
 {
+#if 1 /* 23 gates by Sovyn Y. */
+	vtype t0  = vlut3( a3,  a2,  a1, 0x29);
+	vtype t1  = vlut3( a6,  a5,  t0, 0x96);
+	vtype t2  = vlut3( a6,  a5,  a1, 0x35);
+	vtype t3  = vlut3( a4,  a3,  t2, 0x2e);
+	vtype t4  = vlut3( a5,  a2,  t1, 0x9c);
+	vtype t5  = vlut3( a4,  t0,  t4, 0x61);
+	vtype x1  = vlut3( t1,  t3,  t5, 0xd1);
+	vtype t6  = vlut3( a5,  a1,  t0, 0x94);
+	vtype t7  = vlut3( a4,  t0,  t1, 0x6b);
+	vtype t8  = vlut3( a1,  t5,  t7, 0xd8);
+	vtype t9  = vlut3( a6,  a4,  a3, 0x89);
+	vtype t10 = vlut3( t0,  t1,  t9, 0xe9);
+	vtype x2  = vlut3( t6,  t8, t10, 0xc6);
+	vtype t11 = vlut3( a6,  a2,  t7, 0x88);
+	vtype t12 = vlut3( a6,  a4,  x1, 0x01);
+	vtype t13 = vlut3( a3,  a1, t12, 0xb6);
+	vtype t14 = vlut3( a3,  t0,  t1, 0x7c);
+	vtype t15 = vlut3( a5,  t5, t14, 0x79);
+	vtype x4  = vlut3(t11, t13, t15, 0xc6);
+	vtype t16 = vlut3( a4,  a1,  t2, 0xcd);
+	vtype t17 = vlut3( t8, t12, t16, 0xda);
+	vtype t18 = vlut3( a6,  t4, t15, 0x81);
+	vtype x3  = vlut3(t14, t17, t18, 0xe3);
+#else /* 25 gates by DeepLearningJohnDoe */
 	vtype xAA55AA5500550055 = vlut3(a1, a4, a6, 0xC1);
 	vtype xA55AA55AF0F5F0F5 = vlut3(a3, a6, xAA55AA5500550055, 0x9E);
 	vtype x5F5F5F5FA5A5A5A5 = vlut3(a1, a3, a6, 0xD6);
@@ -52,6 +78,7 @@ s1(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
 	vtype x5555555540044004 = vlut3(a1, a6, x084C084CB77BB77B, 0x70);
 	vtype xAFB4AFB4BF5BBF5B = vlut3(x5F5F5F5FA5A5A5A5, xA51EA51E50E050E0, x5555555540044004, 0x97);
 	vtype x1 = vlut3(a5, x94D894D86B686B68, xAFB4AFB4BF5BBF5B, 0x6C);
+#endif
 #define XOROUT \
 	vxor(*out1, *out1, x1); \
 	vxor(*out2, *out2, x2); \
@@ -64,6 +91,30 @@ MAYBE_INLINE static void
 s2(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
     vtype * out1, vtype * out2, vtype * out3, vtype * out4)
 {
+#if 1 /* 22 gates by Sovyn Y. */
+	vtype t0  = vlut3( a5,  a4,  a1, 0x69);
+	vtype t1  = vlut3( a6,  a3,  a2, 0xc1);
+	vtype t2  = vlut3( a6,  a5,  a1, 0xc7);
+	vtype t3  = vlut3( a4,  a3,  t2, 0x28);
+	vtype t4  = vlut3( a6,  a2,  t3, 0x94);
+	vtype x2  = vlut3( t0,  t1,  t4, 0xd2);
+	vtype t5  = vlut3( a5,  a1,  t1, 0x19);
+	vtype t6  = vlut3( a5,  a2,  t0, 0x98);
+	vtype t7  = vlut3( a4,  a2,  t3, 0x21);
+	vtype t8  = vlut3( a6,  a3,  t7, 0x09);
+	vtype x1  = vlut3( t5,  t6,  t8, 0xc9);
+	vtype t9  = vlut3( a6,  a1,  x1, 0x74);
+	vtype t10 = vlut3( a4,  t4,  t9, 0x68);
+	vtype t11 = vlut3( a6,  a5,  x1, 0x4d);
+	vtype t12 = vlut3( a2,  x2, t11, 0x69);
+	vtype x4  = vlut3( t9, t10, t12, 0xc5);
+	vtype t13 = vlut3( a5,  x1, t10, 0x09);
+	vtype t14 = vlut3(t12,  x4, t13, 0x69);
+	vtype t15 = vlut3( t1,  t2,  x2, 0xb7);
+	vtype t16 = vlut3( a2,  t3,  t9, 0xe2);
+	vtype t17 = vlut3( t4, t10, t15, 0x92);
+	vtype x3  = vlut3(t14, t16, t17, 0xf2);
+#else /* 24 gates by DeepLearningJohnDoe */
 	vtype xEEEEEEEE99999999 = vlut3(a1, a2, a6, 0x97);
 	vtype xFFFFEEEE66666666 = vlut3(a5, a6, xEEEEEEEE99999999, 0x67);
 	vtype x5555FFFFFFFF0000 = vlut3(a1, a5, a6, 0x76);
@@ -88,6 +139,7 @@ s2(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
 	vtype xB1B1A9A9DCDC8787 = vlut3(xE5E5BABACDCDB0B0, xB1B1BBBBCCCCA5A5, xFFFFECECEEEEDDDD, 0x8D);
 	vtype xFFFFCCCCEEEE4444 = vlut3(a2, a5, xFFFFEEEE66666666, 0x2B);
 	vtype x4 = vlut3(a4, xB1B1A9A9DCDC8787, xFFFFCCCCEEEE4444, 0x6C);
+#endif
 	XOROUT
 }
 
@@ -95,6 +147,32 @@ MAYBE_INLINE static void
 s3(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
     vtype * out1, vtype * out2, vtype * out3, vtype * out4)
 {
+#if 1 /* 24 gates by Sovyn Y. */
+	vtype t0  = vlut3( a5,  a3,  a1, 0x37);
+	vtype t1  = vlut3( a6,  a2,  t0, 0x96);
+	vtype t2  = vlut3( a6,  a5,  a4, 0x63);
+	vtype t3  = vlut3( a4,  a1,  t2, 0x68);
+	vtype t4  = vlut3( a2,  a1,  t2, 0x80);
+	vtype x4  = vlut3( t1,  t3,  t4, 0xc9);
+	vtype t5  = vlut3( a4,  t0,  t1, 0x62);
+	vtype t6  = vlut3( a4,  a3,  a2, 0x29);
+	vtype t7  = vlut3( a1,  t2,  t6, 0x69);
+	vtype t8  = vlut3( a3,  a1,  x4, 0xae);
+	vtype t9  = vlut3( a4,  a2,  t8, 0x19);
+	vtype x1  = vlut3( t5,  t7,  t9, 0xc9);
+	vtype t10 = vlut3( a6,  a5,  a2, 0x06);
+	vtype t11 = vlut3( a4,  t7, t10, 0x6c);
+	vtype t12 = vlut3( a4,  a3, t11, 0xa9);
+	vtype t13 = vlut3( t6,  x1, t11, 0x83);
+	vtype t14 = vlut3( a5,  x4, t13, 0x26);
+	vtype x2  = vlut3( a3, t12, t14, 0x39);
+	vtype t15 = vlut3( a3,  x1, t10, 0xa7);
+	vtype t16 = vlut3(t13, t14, t15, 0x56);
+	vtype t17 = vlut3( a1,  t9,  x2, 0x0d);
+	vtype t18 = vlut3( a5,  x4,  x2, 0x4e);
+	vtype t19 = vlut3( a2,  x1, t18, 0x96);
+	vtype x3  = vlut3(t16, t17, t19, 0xb8);
+#else /* 25 gates by DeepLearningJohnDoe */
 	vtype xA50FA50FA50FA50F = vlut3(a1, a3, a4, 0xC9);
 	vtype xF0F00F0FF0F0F0F0 = vlut3(a3, a5, a6, 0x4B);
 	vtype xAF0FA0AAAF0FAF0F = vlut3(a1, xA50FA50FA50FA50F, xF0F00F0FF0F0F0F0, 0x4D);
@@ -120,15 +198,33 @@ s3(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
 	vtype xF5555AF500A05FFF = vlut3(a5, xFAFAA50FFAFAA50F, xF0505A0505A5050F, 0xB9);
 	vtype x05A5AAF55AFA55A5 = vlut3(xF0505A05AA55AAFF, x0F0F0F0FA5A5A5A5, xF5555AF500A05FFF, 0x9B);
 	vtype x2 = vlut3(a2, x5FFFFF5FFFA0FFA0, x05A5AAF55AFA55A5, 0xA6);
+#endif
 	XOROUT
 }
 
-#if 1
-/* Roman Rusakov's S4 */
 MAYBE_INLINE static void
 s4(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
     vtype * out1, vtype * out2, vtype * out3, vtype * out4)
 {
+#if 0 /* 17 gates by Sovyn Y. */
+	vtype t0  = vlut3( a5,  a4,  a1, 0xc9);
+	vtype t1  = vlut3( a3,  a2,  t0, 0x64);
+	vtype t2  = vlut3( a5,  a4,  a3, 0xdb);
+	vtype t3  = vlut3( a1,  t1,  t2, 0x6d);
+	vtype t4  = vlut3( a5,  a4,  a1, 0x93);
+	vtype t5  = vlut3( a3,  a2,  t4, 0x46);
+	vtype t6  = vlut3( a1,  t2,  t5, 0x49);
+	vtype t7  = vlut3( a1,  t3,  t5, 0x2c);
+	vtype t8  = vlut3( a5,  t6,  t7, 0x16);
+	vtype t9  = vlut3( a3,  a2,  t8, 0x6a);
+	vtype t10 = vlut3( t2,  t3,  t6, 0xe4);
+	vtype t11 = vlut3( a4,  a2, t10, 0xd8);
+	vtype t12 = vlut3( t3,  t9, t11, 0x96);
+	vtype x1  = vlut3( a6,  t6, t12, 0xc6);
+	vtype x2  = vlut3( a6,  t6, t12, 0x9c);
+	vtype x3  = vlut3( a6,  t3,  t9, 0xc6);
+	vtype x4  = vlut3( a6,  t3,  t9, 0x63);
+#elif 1 /* 17 gates by Roman Rusakov */
 	vtype x55AAFF00 = vlut3(a1, a4, a5, 0x36);
 	vtype x00F00F00 = vlut3(a3, a4, a5, 0x24);
 	vtype x1926330C = vlut3(a2, a3, x55AAFF00, 0xA4);
@@ -146,14 +242,7 @@ s4(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
 	vtype x56E9861E; vxor(x56E9861E, x37217F22, x61C8F93C);
 	vtype x1 = vlut3(a6, x56E9861E, x6A7935C8, 0x5C);
 	vtype x2 = vlut3(a6, x56E9861E, x6A7935C8, 0x35);
-	XOROUT
-}
-#else
-/* DeepLearningJohnDoe's S4 */
-MAYBE_INLINE static void
-s4(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
-    vtype * out1, vtype * out2, vtype * out3, vtype * out4)
-{
+#else /* 18 gates by DeepLearningJohnDoe */
 	vtype x55F055F055F055F0 = vlut3(a1, a3, a4, 0x72);
 	vtype xA500F5F0A500F5F0 = vlut3(a3, a5, x55F055F055F055F0, 0xAD);
 	vtype xF50AF50AF50AF50A = vlut3(a1, a3, a4, 0x59);
@@ -172,14 +261,39 @@ s4(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
 	vtype x2 = vlut3(a6, x3C90B3D63C90B3D6, x9586CA379586CA37, 0x6A);
 	vtype x1 = vlut3(a6, x3C90B3D63C90B3D6, x9586CA379586CA37, 0xA9);
 	vtype x3 = vlut3(a6, x61C8F93C61C8F93C, xB35C94A6B35C94A6, 0x56);
+#endif
 	XOROUT
 }
-#endif
 
 MAYBE_INLINE static void
 s5(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
     vtype * out1, vtype * out2, vtype * out3, vtype * out4)
 {
+#if 1 /* 23 gates by Sovyn Y. */
+	vtype t0  = vlut3( a6,  a4,  a3, 0x46);
+	vtype t1  = vlut3( a5,  a1,  t0, 0xe9);
+	vtype t2  = vlut3( a6,  a2,  t1, 0x69);
+	vtype t3  = vlut3( a6,  a3,  a1, 0x97);
+	vtype t4  = vlut3( a5,  a2,  t3, 0x27);
+	vtype x2  = vlut3( a4,  t2,  t4, 0xc9);
+	vtype t5  = vlut3( a6,  a2,  t3, 0x8c);
+	vtype t6  = vlut3( a5,  a2,  t0, 0x53);
+	vtype t7  = vlut3( a4,  a1,  t6, 0x94);
+	vtype t8  = vlut3( a3,  a1,  x2, 0x25);
+	vtype t9  = vlut3( a6,  t1,  t8, 0x6e);
+	vtype x3  = vlut3( t5,  t7,  t9, 0xc6);
+	vtype t10 = vlut3( a4,  t0,  t1, 0x29);
+	vtype t11 = vlut3( a4,  a2,  a1, 0x76);
+	vtype t12 = vlut3( a4,  t3, t11, 0xb6);
+	vtype t13 = vlut3( a5,  a2,  a1, 0x1f);
+	vtype t14 = vlut3( a6,  x2, t13, 0x6a);
+	vtype x1  = vlut3(t10, t12, t14, 0xc6);
+	vtype t15 = vlut3( a5,  a2,  x2, 0xb9);
+	vtype t16 = vlut3( a3,  x1, t15, 0xe6);
+	vtype t17 = vlut3( t0,  t1,  t2, 0x6b);
+	vtype t18 = vlut3( t8, t12, t17, 0x24);
+	vtype x4  = vlut3( x3, t16, t18, 0xb4);
+#else /* 25 gates by DeepLearningJohnDoe */
 	vtype xA0A0A0A0FFFFFFFF = vlut3(a1, a3, a6, 0xAB);
 	vtype xFFFF00005555FFFF = vlut3(a1, a5, a6, 0xB9);
 	vtype xB3B320207777FFFF = vlut3(a2, xA0A0A0A0FFFFFFFF, xFFFF00005555FFFF, 0xE8);
@@ -205,6 +319,7 @@ s5(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
 	vtype xA3A3505010101A1A = vlut3(a2, xA2A2FFFF2222FFFF, x36369C9CC1C1D6D6, 0x94);
 	vtype x7676C7C74F4FC7C7 = vlut3(a1, x2E2E6969A4A46363, xA3A3505010101A1A, 0xD9);
 	vtype x4 = vlut3(a4, x6C6CF2F229295D5D, x7676C7C74F4FC7C7, 0xC6);
+#endif
 	XOROUT
 }
 
@@ -212,6 +327,30 @@ MAYBE_INLINE static void
 s6(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
     vtype * out1, vtype * out2, vtype * out3, vtype * out4)
 {
+#if 1 /* 22 gates by Sovyn Y. */
+	vtype t0  = vlut3( a6,  a5,  a1, 0x36);
+	vtype t1  = vlut3( a4,  a3,  t0, 0x6c);
+	vtype t2  = vlut3( a2,  a1,  t0, 0x1e);
+	vtype t3  = vlut3( a6,  a4,  t2, 0x69);
+	vtype t4  = vlut3( a6,  a1,  t3, 0x3a);
+	vtype t5  = vlut3( t0,  t2,  t4, 0xd2);
+	vtype x4  = vlut3( t1,  t3,  t5, 0xc6);
+	vtype t6  = vlut3( a5,  t1,  t4, 0x96);
+	vtype t7  = vlut3( a4,  t3,  t5, 0xba);
+	vtype t8  = vlut3( a6,  a4,  t6, 0x09);
+	vtype t9  = vlut3( t0,  x4,  t8, 0x9a);
+	vtype x3  = vlut3( t6,  t7,  t9, 0xb4);
+	vtype t10 = vlut3( a6,  a5,  t3, 0x4a);
+	vtype t11 = vlut3( a2,  t1, t10, 0x9a);
+	vtype t12 = vlut3( a2,  t3,  t4, 0x24);
+	vtype t13 = vlut3( a5,  t1, t12, 0xa9);
+	vtype x1  = vlut3( t7, t11, t13, 0xe1);
+	vtype t14 = vlut3( a6,  a5,  x4, 0x51);
+	vtype t15 = vlut3( a2,  x3, t14, 0x69);
+	vtype t16 = vlut3( t3,  t4,  x3, 0x6b);
+	vtype t17 = vlut3( t2, t10, t16, 0x96);
+	vtype x2  = vlut3( x1, t15, t17, 0x3a);
+#else /* 24 gates by DeepLearningJohnDoe */
 	vtype x5050F5F55050F5F5 = vlut3(a1, a3, a5, 0xB2);
 	vtype x6363C6C66363C6C6 = vlut3(a1, a2, x5050F5F55050F5F5, 0x66);
 	vtype xAAAA5555AAAA5555 = vlut3(a1, a1, a5, 0xA9);
@@ -236,6 +375,7 @@ s6(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
 	vtype xD6DE73F9D6DE73F9 = vlut3(a3, x6363C6C66363C6C6, x455D45DF455D45DF, 0x6B);
 	vtype x925E63E1965A63E1 = vlut3(x3A3A65653A3A6565, x6CA89C7869A49C79, xD6DE73F9D6DE73F9, 0xA2);
 	vtype x2 = vlut3(a6, x6CA89C7869A49C79, x925E63E1965A63E1, 0xCA);
+#endif
 	XOROUT
 }
 
@@ -243,6 +383,31 @@ MAYBE_INLINE static void
 s7(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
     vtype * out1, vtype * out2, vtype * out3, vtype * out4)
 {
+#if 1 /* 23 gates by Sovyn Y. */
+	vtype t0  = vlut3( a5,  a4,  a2, 0x59);
+	vtype t1  = vlut3( a6,  a5,  a4, 0x49);
+	vtype t2  = vlut3( a3,  a1,  t1, 0x96);
+	vtype t3  = vlut3( a2,  a1,  t2, 0xb8);
+	vtype t4  = vlut3( a6,  a3,  t3, 0x9c);
+	vtype x4  = vlut3( t0,  t2,  t4, 0x36);
+	vtype t5  = vlut3( a1,  t0,  t4, 0x65);
+	vtype t6  = vlut3( a5,  a2,  a1, 0x74);
+	vtype t7  = vlut3( a6,  t0,  t1, 0x49);
+	vtype t8  = vlut3( a6,  t2,  t5, 0xc2);
+	vtype t9  = vlut3( a6,  t7,  t8, 0x61);
+	vtype x1  = vlut3( t5,  t6,  t9, 0x47);
+	vtype t10 = vlut3( a5,  t0,  t2, 0x69);
+	vtype t11 = vlut3( a4,  a1,  t7, 0xab);
+	vtype t12 = vlut3( a4,  t1,  t3, 0x65);
+	vtype t13 = vlut3( a5,  a1,  t5, 0x25);
+	vtype t14 = vlut3( a6, t12, t13, 0xc6);
+	vtype x3  = vlut3(t10, t11, t14, 0x74);
+	vtype t15 = vlut3( x4,  t5, t11, 0x96);
+	vtype t16 = vlut3( a4,  a2, t12, 0xb9);
+	vtype t17 = vlut3( a6,  a4, t16, 0x8a);
+	vtype t18 = vlut3( a1,  t1,  t4, 0x0e);
+	vtype x2  = vlut3(t15, t17, t18, 0x4b);
+#else /* 24 gates by DeepLearningJohnDoe */
 	vtype x88AA88AA88AA88AA = vlut3(a1, a2, a4, 0x0B);
 	vtype xAAAAFF00AAAAFF00 = vlut3(a1, a4, a5, 0x27);
 	vtype xADAFF8A5ADAFF8A5 = vlut3(a3, x88AA88AA88AA88AA, xAAAAFF00AAAAFF00, 0x9E);
@@ -267,6 +432,7 @@ s7(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
 	vtype xE3CF1FD5E3CF1FD5 = vlut3(x88AA88AA88AA88AA, x6A65956A6A65956A, xE96016B7E96016B7, 0x3E);
 	vtype x6776675B6776675B = vlut3(xADAFF8A5ADAFF8A5, x94E97A9494E97A94, xE3CF1FD5E3CF1FD5, 0x6B);
 	vtype x2 = vlut3(a6, xE96016B7E96016B7, x6776675B6776675B, 0xC6);
+#endif
 	XOROUT
 }
 
@@ -274,6 +440,31 @@ MAYBE_INLINE static void
 s8(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
     vtype * out1, vtype * out2, vtype * out3, vtype * out4)
 {
+#if 1 /* 23 gates by Sovyn Y. */
+	vtype t0  = vlut3( a5,  a4,  a3, 0x56);
+	vtype t1  = vlut3( a5,  a2,  t0, 0x1b);
+	vtype t2  = vlut3( a6,  a4,  t1, 0x96);
+	vtype t3  = vlut3( a6,  t0,  t2, 0x06);
+	vtype t4  = vlut3( a2,  t0,  t3, 0xa4);
+	vtype t5  = vlut3( a5,  a4,  t4, 0xa6);
+	vtype x2  = vlut3( a1,  t2,  t5, 0x6c);
+	vtype t6  = vlut3( a4,  t5,  x2, 0xc5);
+	vtype t7  = vlut3( a1,  t0,  t6, 0x69);
+	vtype t8  = vlut3( a2,  a1,  t3, 0x17);
+	vtype t9  = vlut3( a5,  t6,  t8, 0xc9);
+	vtype t10 = vlut3( a4,  a2,  t9, 0xa6);
+	vtype x4  = vlut3( a6,  t7, t10, 0x36);
+	vtype t11 = vlut3( t4,  t5,  x2, 0x76);
+	vtype t12 = vlut3( a3,  a2,  t7, 0x9a);
+	vtype t13 = vlut3( a3,  t3,  t8, 0x24);
+	vtype t14 = vlut3( t6, t10, t13, 0x6e);
+	vtype x1  = vlut3(t11, t12, t14, 0xd1);
+	vtype t15 = vlut3( a4,  t1,  x1, 0x91);
+	vtype t16 = vlut3( a3,  t7, t15, 0x69);
+	vtype t17 = vlut3( t3, t11, t13, 0xba);
+	vtype t18 = vlut3(t10,  x1, t17, 0x5b);
+	vtype x3  = vlut3(t11, t16, t18, 0x47);
+#else /* 23 gates by DeepLearningJohnDoe */
 	vtype xEEEE3333EEEE3333 = vlut3(a1, a2, a5, 0x9D);
 	vtype xBBBBBBBBBBBBBBBB = vlut3(a1, a1, a2, 0x83);
 	vtype xDDDDAAAADDDDAAAA = vlut3(a1, a2, a5, 0x5B);
@@ -297,6 +488,7 @@ s8(vtype a1, vtype a2, vtype a3, vtype a4, vtype a5, vtype a6,
 	vtype x9955EE559955EE55 = vlut3(a1, a4, x99DDEEEE99DDEEEE, 0xE2);
 	vtype x9D48FA949D48FA94 = vlut3(x3BF77B7B3BF77B7B, xBFEAEBBEBFEAEBBE, x9955EE559955EE55, 0x9C);
 	vtype x1 = vlut3(a6, xC729695AC729695A, x9D48FA949D48FA94, 0x39);
+#endif
 	XOROUT
 #undef XOROUT
 }

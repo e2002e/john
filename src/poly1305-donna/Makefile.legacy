@@ -4,7 +4,6 @@ CXX = @CXX@
 AS = gcc
 LD = gcc
 CPP = gcc
-YASM =
 AR = ar
 FIND = find
 

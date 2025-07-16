@@ -3,7 +3,8 @@
  * Solaris' MT-safe crypt(3C) with OpenMP parallelization.
  *
  * This file is part of John the Ripper password cracker,
- * Copyright (c) 2009-2015 by Solar Designer
+ * Copyright (c) 2009-2024 by Solar Designer and others:
+ * --subformat option added by magnum, JimF, Frank Dittrich
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted.
@@ -125,11 +126,11 @@ static void init(struct fmt_main *self)
 {
 	if (options.subformat) {
 		int i;
-		char *salt = tests[0].ciphertext;
+		char *salt = NULL;
 #if defined(_OPENMP) && defined(__GLIBC__)
 		struct crypt_data data;
 
-		data.initialized = 0;
+		memset(&data, 0, sizeof(data));
 #endif
 
 		/*
@@ -235,8 +236,10 @@ static void init(struct fmt_main *self)
 			self->params.benchmark_comment = " bsdicrypt x725";
 			salt = "_J9..CCCC";
 		} else if (!strcasecmp(options.subformat, "descrypt") ||
-		           !strcasecmp(options.subformat, "des")) {
-			salt = "CC";
+		           !strcasecmp(options.subformat, "des") ||
+			   strlen(options.subformat) == 2) {
+			/* Don't replace the tests */
+			return;
 		} else {
 			char *p = mem_alloc_tiny(strlen(options.subformat) + 2,
 			                         MEM_ALIGN_NONE);
@@ -270,9 +273,7 @@ static void init(struct fmt_main *self)
 				break;
 		}
 
-		if (strlen(tests[0].ciphertext) == 13 &&
-		    strcasecmp(options.subformat, "descrypt") &&
-		    strcasecmp(options.subformat, "des")) {
+		if (strlen(tests[0].ciphertext) == 13) {
 			fprintf(stderr, "%s not supported on this system\n",
 			       options.subformat);
 			error();
@@ -626,6 +627,9 @@ static int crypt_all(int *pcount, struct db_salt *salt)
  * SunMD5 hashes, which are not yet supported by non-jumbo John natively.
  */
 #pragma omp parallel for /* default(none) private(index) shared(warned, count, crypt_out, saved_key, saved_salt, stderr) or __iob */
+#else
+#undef FMT_OMP
+#define FMT_OMP 0
 #endif
 	for (index = 0; index < count; index++) {
 		char *hash = crypt(saved_key[index], saved_salt);

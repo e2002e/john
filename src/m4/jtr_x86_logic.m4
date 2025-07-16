@@ -79,6 +79,11 @@ dnl ======================================================================
   )
 CFLAGS="$CFLAGS $SIMD_FLAGS -O0"
 
+ALREADY_TESTED=0
+case "$simd" in
+  mmx|sse*|ssse3|avx*|xop*) ALREADY_TESTED=1 ;;
+esac
+
 if test "x$simd" != xno; then
  if test "x$enable_native_tests" != xno && test "x$simd" = xyes; then
   AC_MSG_NOTICE([Testing build host's native CPU features])
@@ -268,21 +273,29 @@ if test "x$simd" != xno; then
 
   AS_IF([test "x$CPU_NOTFOUND" = x0],
   [
-  CFLAGS="$CFLAGS_BACKUP -mavx512bw -P $EXTRA_AS_FLAGS $CPPFLAGS $CFLAGS_EXTRA $CPUID_ASM"
+  CFLAGS="$CFLAGS_BACKUP -mavx512bw -mavx512vl -mavx512dq -P $EXTRA_AS_FLAGS $CPPFLAGS $CFLAGS_EXTRA $CPUID_ASM"
 
-  AC_MSG_CHECKING([for AVX512BW])
+  AC_MSG_CHECKING([for AVX512BW + AVX512VL + AVX512DQ])
   AC_RUN_IFELSE([AC_LANG_SOURCE(
     [[extern int CPU_detect(void); extern char CPU_req_name[];
       unsigned int nt_buffer8x[4], output8x[4];
       int main(int argc, char **argv) { return !CPU_detect(); }
     ]])],
-     [CPU_BEST_FLAGS="-mavx512bw"]
-     [SIMD_NAME="AVX512BW"]
+     [CPU_BEST_FLAGS="-mavx512bw -mavx512vl -mavx512dq"]
+     [SIMD_NAME="AVX-512"]
      [AC_MSG_RESULT([yes])]
     ,[AC_MSG_RESULT([no])]
     )
   ]
   )
+
+ elif test "x$ALREADY_TESTED" = x1; then
+
+dnl ======================================================================
+dnl               the CPU support was tested elsewhere
+dnl ======================================================================
+   # The $CFLAGS_EX already contains the required compiler flags
+   CPU_NOTFOUND=0 #nothing to do here
 
  else
 
@@ -464,17 +477,18 @@ dnl ======================================================================
 
   AS_IF([test "x$CPU_NOTFOUND" = x0],
   [
-  AC_MSG_CHECKING([for AVX512BW])
+  AC_MSG_CHECKING([for AVX512BW + AVX512VL + AVX512DQ])
   AC_LINK_IFELSE(
     [
     AC_LANG_SOURCE(
       [[#include <immintrin.h>
         #include <stdio.h>
         extern void exit(int);
-        int main(){__m512i t=_mm512_slli_epi16(_mm512_set1_epi16(1),1);exit(!(_mm_cvtsi128_si64x(_mm512_extracti32x4_epi32(t,0))==0x2000200020002ULL));}]]
+        int main(){__m512i t=_mm512_slli_epi16(_mm512_set1_epi16(1),1);__int64_t ret_value=(!(_mm_cvtsi128_si64x(_mm512_extracti32x4_epi32(t,0))==0x2000200020002ULL));
+                   __m128i u, t1;*((long long*)&u)=1;t1=u;u=_mm_rol_epi32(t1,1);if((*(long long*)&t)==88)printf(".");exit(ret_value);}]]
     )]
-    ,[CPU_BEST_FLAGS="-mavx512bw"]
-     [SIMD_NAME="AVX512BW"]
+    ,[CPU_BEST_FLAGS="-mavx512bw -mavx512vl -mavx512dq"]
+     [SIMD_NAME="AVX-512"]
      [AC_MSG_RESULT([yes])]
     ,[AC_MSG_RESULT([no])]
     )
@@ -489,6 +503,13 @@ if test $simd != yes; then
   else
     CPU_BEST_FLAGS=$SIMD_FLAGS
   fi
+fi
+
+if test "x$simd" != xno; then
+  CFLAGS_EX=""
+  dnl Add -maes -mpclmul if supported
+  JTR_FLAG_CHECK([-maes -mpclmul], 1)
+  CPU_BEST_FLAGS="$CPU_BEST_FLAGS $CFLAGS_EX"
 fi
 
 CC="$CC_BACKUP"

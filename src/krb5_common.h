@@ -10,7 +10,7 @@ void nfold(unsigned int inbits, const unsigned char *in,
 		unsigned int outbits, unsigned char *out);
 
 void AES_cts_encrypt(const unsigned char *in, unsigned char *out, size_t len,
-		const AES_KEY *key, unsigned char *ivec, const int encryptp);
+		AES_KEY *key, unsigned char *ivec, const int encryptp);
 
 void dk(unsigned char key_out[], unsigned char key_in[], size_t key_size,
 		unsigned char ptext[], size_t ptext_size);

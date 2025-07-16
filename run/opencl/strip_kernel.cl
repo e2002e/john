@@ -21,7 +21,7 @@ typedef struct {
 #define SQLITE_MAX_PAGE_SIZE 65536
 
 /* verify validity of page */
-inline int verify_page(uchar *page)
+INLINE int verify_page(uchar *page)
 {
 	uint32_t pageSize;
 	uint32_t usableSize;
@@ -58,7 +58,8 @@ __kernel void strip(__global const pbkdf2_password *inbuffer,
 	const int page_sz = 1008; /* 1024 - strlen(SQLITE_FILE_HEADER) */
 	const int reserve_sz = 16; /* for HMAC off case */
 	const int size = page_sz - reserve_sz;
-	AES_KEY akey;
+	__local aes_local_t lt;
+	AES_KEY akey; akey.lt = &lt;
 
 	pbkdf2(inbuffer[idx].v, inbuffer[idx].length,
 	       salt->pbkdf2.salt, salt->pbkdf2.length, salt->pbkdf2.iterations,

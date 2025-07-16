@@ -50,7 +50,7 @@ john_register_one(&fmt_bitlocker);
 #define FORMAT_LABEL            "BitLocker"
 #define ALGORITHM_NAME          "SHA-256 AES 32/" ARCH_BITS_STR
 #define BENCHMARK_COMMENT       ""
-#define BENCHMARK_LENGTH        0x107
+#define BENCHMARK_LENGTH        0x108
 #define BINARY_SIZE             0
 #define PLAINTEXT_LENGTH        125
 #define SALT_SIZE               sizeof(*cur_salt)
@@ -228,7 +228,7 @@ struct fmt_main fmt_bitlocker = {
 		ALGORITHM_NAME,
 		BENCHMARK_COMMENT,
 		BENCHMARK_LENGTH,
-		0,
+		8,
 		PLAINTEXT_LENGTH,
 		BINARY_SIZE,
 		BINARY_ALIGN,

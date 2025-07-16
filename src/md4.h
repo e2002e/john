@@ -1,11 +1,32 @@
 /*
- * This is an OpenSSL-compatible implementation of the RSA Data Security,
- * Inc. MD4 Message-Digest Algorithm (RFC 1320).
+ * This is an OpenSSL-compatible implementation of the RSA Data Security, Inc.
+ * MD4 Message-Digest Algorithm (RFC 1320).
  *
- * Written by Solar Designer <solar at openwall.com> in 2001, and placed
- * in the public domain.  There's absolutely no warranty.
+ * Homepage:
+ * https://openwall.info/wiki/people/solar/software/public-domain-source-code/md4
+ *
+ * Author:
+ * Alexander Peslyak, better known as Solar Designer <solar at openwall.com>
+ *
+ * This software was written by Alexander Peslyak in 2001.  No copyright is
+ * claimed, and the software is hereby placed in the public domain.
+ * In case this attempt to disclaim copyright and place the software in the
+ * public domain is deemed null and void, then the software is
+ * Copyright (c) 2001 Alexander Peslyak and it is hereby released to the
+ * general public under the following terms:
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted.
+ *
+ * There's ABSOLUTELY NO WARRANTY, express or implied.
  *
  * See md4.c for more information.
+ */
+
+/*
+ * The code below has been modified in many ways for use specifically in John
+ * the Ripper jumbo.  If you want to reuse it outside of that project, please
+ * obtain the original from the homepage URL above.
  */
 
 #if !defined(_MD4_H)
@@ -31,7 +52,7 @@ typedef struct {
 	MD4_u32plus A, B, C, D;
 	MD4_u32plus lo, hi;
 	unsigned char buffer[64];
-#if !ARCH_ALLOWS_UNALIGNED
+#if !(ARCH_LITTLE_ENDIAN && ARCH_ALLOWS_UNALIGNED)
 	MD4_u32plus block[16];
 #endif
 } MD4_CTX;

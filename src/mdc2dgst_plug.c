@@ -65,7 +65,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <openssl/crypto.h>
 #include <openssl/des.h>
 
 #include "mdc2-JtR.h"
@@ -100,7 +99,7 @@ int JtR_MDC2_Update(JtR_MDC2_CTX *c, const unsigned char *in, size_t len)
 	i=c->num;
 	if (i != 0)
 	{
-		if (i+len < JtR_MDC2_BLOCK)
+		if (len < JtR_MDC2_BLOCK - i)
 		{
 			/* partial block */
 			memcpy(&(c->data[i]),in,len);

@@ -36,24 +36,27 @@ SR_CRYPTOKDFT_PKCS5_PBKDF2 = 1
 SR_CRYPTOKDFT_KEYDISK = 2
 SR_CRYPTOKDFT_BCRYPT_PBKDF = 3
 
+def hexstr(bytestr):
+    return hexlify(bytestr).decode('ascii')
 
 def process_file(filename):
 
-    headers = open(filename).read()[:0xaa0 + 81920]
-    start = headers.find("marcCRAM")
+    headers = open(filename, mode='rb').read()[:0xaa0 + 81920]
+    start = headers.find(b"marcCRAM")
     if start != -1:
         headers = headers[start:]
 
-    if headers[:8] != "marcCRAM":
+    if headers[:8] != b"marcCRAM":
         sys.stderr.write(filename + " : Wrong magic\n")
         return
-    if headers[72:81] != "SR CRYPTO":
+    if headers[72:81] != b"SR CRYPTO":
         sys.stderr.write(filename + " : Wrong RAID type\n")
         return
-    if headers[260] != "\x01":
+    # The second comparisons are for Python 2 compatibility
+    if headers[260] != 1 and headers[260] != b"\x01":
         sys.stderr.write(filename + " : Wrong optional header type\n")
         return
-    if headers[284] != "\x02":
+    if headers[284] != 2 and headers[284] != b"\x02":
         sys.stderr.write(filename + " : Wrong encryption type\n")
         return
 
@@ -69,13 +72,13 @@ def process_file(filename):
     # num_iterations and salt come from the "scm_kdfhint" field
     num_iterations = struct.unpack("<I", headers[2420:2424])[0]
     sys.stdout.write(str(num_iterations) + "$")
-    sys.stdout.write(hexlify(headers[2424:2552]) + "$")  # salt
+    sys.stdout.write(hexstr(headers[2424:2552]) + "$")  # salt
 
     # masked keys, sr_meta_crypto structure
-    sys.stdout.write(hexlify(headers[364:2412]) + "$")
+    sys.stdout.write(hexstr(headers[364:2412]) + "$")
 
     # HMAC, chk_hmac_sha1 field
-    sys.stdout.write(hexlify(headers[2676:2696]))
+    sys.stdout.write(hexstr(headers[2676:2696]))
 
     sys.stdout.write("$%s\n" % sr_crypto_genkdf_type)
 

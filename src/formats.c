@@ -1,6 +1,8 @@
 /*
  * This file is part of John the Ripper password cracker,
  * Copyright (c) 1996-2001,2006,2008,2010-2013,2015 by Solar Designer
+ * Copyright (c) 2011-2025, magnum
+ * Copyright (c) 2009-2018, JimF
  */
 
 #if AC_BUILT
@@ -608,9 +610,17 @@ static char* is_key_right(struct fmt_main *format, int index,
 		return err_buf;
 	}
 
-	for (i = match - 1; i >= 0; i--) {
-		if (format->methods.cmp_one(binary, i))
-			break;
+	if (match == count && !(format->params.flags & FMT_MASK) && !strstr(format->params.label, "-opencl")) {
+/* Presumably no index mapping occurred, so require match at input index */
+		i = -1;
+		if (format->methods.cmp_one(binary, index))
+			i = index;
+	} else {
+/* Index mapping likely occurred, so find where the match is */
+		for (i = match - 1; i >= 0; i--) {
+			if (format->methods.cmp_one(binary, i))
+				break;
+		}
 	}
 
 	if (i == -1) {
@@ -897,6 +907,30 @@ static char *fmt_self_test_body(struct fmt_main *format,
 		}
 	}
 
+	if (format->params.flags & FMT_BLOB) {
+		/*
+		 * BLOB formats can't use the default binary_hash_[0-6] functions.
+		 */
+		if (format->methods.binary_hash[0] == fmt_default_binary_hash_0)
+			return "default binary_hash_[0-6] method not allowed for FMT_BLOB";
+	}
+
+	if (format->params.binary_size == 0) {
+		for (size = 0; size < PASSWORD_HASH_SIZES; size++) {
+			/*
+			 * Salt-only formats can't have binary hash functions.
+			 */
+			if (format->methods.binary_hash[size] &&
+			    format->methods.binary_hash[size] !=
+			    fmt_default_binary_hash)
+				return "binary_hash method not allowed for salt-only formats";
+			if (format->methods.get_hash[size] &&
+			    format->methods.get_hash[size] !=
+			    fmt_default_get_hash)
+				return "get_hash method not allowed for salt-only formats";
+		}
+	}
+
 	if ((!format->methods.binary_hash[0] || format->methods.binary_hash[0] ==
 	     fmt_default_binary_hash) && format->params.salt_size > 512 &&
 	    !(format->params.flags & FMT_HUGE_INPUT))
@@ -1136,18 +1170,18 @@ static char *fmt_self_test_body(struct fmt_main *format,
 		/* validate that salt() returns cleaned buffer */
 		if (extra_tests && !salt_cleaned_warned && format->params.salt_size) {
 			if ((format->params.flags & FMT_DYNA_SALT) == FMT_DYNA_SALT) {
-				dyna_salt *p1, *p2=0, *p3=0;
-				p1 = *((dyna_salt**)salt);
+				dyna_salt_t *p1, *p2=0, *p3=0;
+				p1 = *((dyna_salt_t**)salt);
 				dyna_salt_smash(salt, 0xAF);
 				salt = format->methods.salt(ciphertext);
 				dyna_salt_create(salt);
-				p2 = *((dyna_salt**)salt);
+				p2 = *((dyna_salt_t**)salt);
 				if (dyna_salt_smash_check(salt, 0xAF))
 				{
 					dyna_salt_smash(salt, 0xC3);
 					salt = format->methods.salt(ciphertext);
 					dyna_salt_create(salt);
-					p3 = *((dyna_salt**)salt);
+					p3 = *((dyna_salt_t**)salt);
 					if (dyna_salt_smash_check(salt, 0xC3)) {
 						/* possibly did not clean the salt. */
 						puts("Warning: salt() not pre-cleaning buffer");
@@ -2136,8 +2170,8 @@ int fmt_default_salt_hash(void *salt)
 
 int fmt_default_dyna_salt_hash(void *salt)
 {
-	/* if the hash is a dyna_salt type hash, it can simply use this function */
-	dyna_salt_john_core *mysalt = *(dyna_salt_john_core **)salt;
+	/* if the hash is a dyna_salt_t type hash, it can simply use this function */
+	dyna_salt_john_core_t *mysalt = *(dyna_salt_john_core_t **)salt;
 	unsigned v;
 	int i;
 	unsigned char *p;

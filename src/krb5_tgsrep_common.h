@@ -21,7 +21,7 @@
 #define SALT_ALIGN              sizeof(krb5tgsrep_salt*)
 
 typedef struct {
-	dyna_salt dsalt;
+	dyna_salt_t dsalt;
 	int etype;
 	char salt[256];            /* (...)$User$realm$(...) --> REALMUser */
 	unsigned char edata1[12];  /* hmac-sha1 stripped to 12 bytes */

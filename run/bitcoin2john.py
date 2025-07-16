@@ -4,6 +4,7 @@
 # Copyright (c) 2012-2018 Dhiru Kholia <dhiru at openwall.com>
 # Copyright (c) 2019 Solar Designer
 # Copyright (c) 2019 exploide
+# Copyright (c) 2025 Maxim Kuleshov <mmcx@mail.ru>
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted.  (This is a heavily cut-down "BSD license".)
 #
@@ -30,16 +31,24 @@ import binascii
 import logging
 import struct
 import sys
+import sqlite3
 
-try:
-    from bsddb.db import *
-except:
-    try:
-        from bsddb3.db import *
-    except:
-        sys.stderr.write("Error: This script needs bsddb3 to be installed!\n")
-        sys.exit(1)
 
+bsddb_db = None
+
+def do_import_bsddb():
+        global bsddb_db
+        if bsddb_db is not None:
+                return
+
+        try:
+            import bsddb.db as bsddb_db
+        except:
+            try:
+                import bsddb3.db as bsddb_db
+            except:
+                sys.stderr.write("Error: This script needs bsddb3 to be installed!\n")
+                sys.exit(1)
 
 json_db = {}
 
@@ -114,13 +123,35 @@ class BCDataStream(object):
                 self.read_cursor += struct.calcsize(format)
                 return i
 
+class Sqlite3DB:
+        def __init__(self, walletfile):
+                self.cx = sqlite3.connect(walletfile)
+
+        def is_sqlite3(self):
+                try:
+                        self.cx.execute("PRAGMA quick_check")
+                        return True
+                except sqlite3.DatabaseError:
+                        return False
+
+        def close(self):
+                self.cx.close()
+
+        def items(self):
+                return list(self.cx.execute('SELECT key,value FROM main'))
+
 def open_wallet(walletfile):
-        db = DB()
-        DB_TYPEOPEN = DB_RDONLY
-        flags = DB_THREAD | DB_TYPEOPEN
+        db = Sqlite3DB(walletfile)
+        if db.is_sqlite3():
+                return db
+
+        do_import_bsddb()
+        db = bsddb_db.DB()
+        DB_TYPEOPEN = bsddb_db.DB_RDONLY
+        flags = bsddb_db.DB_THREAD | DB_TYPEOPEN
         try:
-                r = db.open(walletfile, "main", DB_BTREE, flags)
-        except DBError as e:
+                r = db.open(walletfile, "main", bsddb_db.DB_BTREE, flags)
+        except bsddb_db.DBError as e:
                 logging.error(e)
                 r = True
 

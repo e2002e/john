@@ -1550,7 +1550,7 @@ magnum (2623):
 	Add a config note about --save-memory vs. ShowUIDinCracks.
 	Refactor a variable to match its john.conf name.
 	Minor optimization for loader.
-	  http://www.openwall.com/lists/john-dev/2015/09/16/32
+	  https://www.openwall.com/lists/john-dev/2015/09/16/32
 	Re-write code that used comma separator so it's easier to read.
 	Drop code that was obsoleted by fd3c440.
 	Fix a bug with hybrid mask used with wordlist + rules when an internal
@@ -1562,7 +1562,7 @@ magnum (2623):
 	Allow external filters even with Hybrid Mask. The logic was there
 	  already.
 	Disable CRK_PREFETCH for now, segfaults seen.
-	  http://www.openwall.com/lists/john-dev/2015/09/20/6
+	  https://www.openwall.com/lists/john-dev/2015/09/20/6
 	Linkedin format: Bugfixes for reading {SHA}-style pot entries.
 	Disable UTF-8 checks when -enc:raw.
 	Optimization for registering dynamics. Shaves the number of calls to
@@ -2018,7 +2018,7 @@ magnum (2623):
 	Workaround for Intel for our use of typeof() in OpenCL.
 	Try not to fail if we can't install fglrx-dev.
 	Bump OMP_SCALE for PHPASS. See
-	  http://www.openwall.com/lists/john-dev/2015/12/06/1
+	  https://www.openwall.com/lists/john-dev/2015/12/06/1
 	Slight change in -list=format-all-details output to avoid confusion.
 	Use a "fake db" for self-test and benchmark.
 	NT-opencl: Drop all special code for self-test, and use the new "fake
@@ -3427,7 +3427,7 @@ magnum (2623):
 	  RFC_READ_TABLE. To enable this, set john.conf "SAPhalfHashes = Y".
 	Fix a misplaced line (after using patch -F3) in fvde-opencl.
 	zip2john bug fix for certain files. See john-users ML:
-	  http://www.openwall.com/lists/john-users/2018/03/26/15
+	  https://www.openwall.com/lists/john-users/2018/03/26/15
 	JtR normally does not apply rules to an empty word. Hashcat does, so
 	  this commit makes us do so too if "hashcat logic" is turned on.
 	Mask mode: Start iterating from given mask's length if no --min-len
@@ -8118,7 +8118,7 @@ Solar (75):
 	md5crypt intrinsics: Optimization for mmxput3().
 	md5crypt intrinsics: Use switch in mmxput3 (unless XOP).
 	Some fixes for huge input lists.
-	  http://www.openwall.com/lists/john-dev/2015/09/15/5
+	  https://www.openwall.com/lists/john-dev/2015/09/15/5
 	Avoid ldr_remove_marked() when there's nothing marked for removal.
 	Implemented better prefetching, john-huge-prefetch.diff
 	john-huge-largehash.diff: Prepare us for larger bitmaps and possibly
@@ -8136,7 +8136,7 @@ Solar (75):
 	Bump unique's default buffer size.
 	Speed up --show.
 	john-huge-show2.diff + errata from
-	  http://www.openwall.com/lists/john-dev/2015/09/20/3
+	  https://www.openwall.com/lists/john-dev/2015/09/20/3
 	john-huge-prefetch3.diff: Fix problems with prefetch. Closes #1771.
 	Spelling fix in a comment: equivelent to equivalent
 	Assorted spelling fixes
@@ -8900,7 +8900,7 @@ magnum (1889):
 	Fix a bug in dmg formats, and add debug output.
 	WPAPSK (CPU and GPU): Exploit same-essid weakness. Huge speedup when
 	  applicable. See
-	  http://www.openwall.com/lists/john-dev/2013/01/29/13 and on for
+	  https://www.openwall.com/lists/john-dev/2013/01/29/13 and on for
 	  discussion.
 	DMG debug bugfix (duh!), and a new test that seems pretty generic.
 	dmg2john error message.
@@ -9509,7 +9509,7 @@ magnum (1889):
 	Move crypt(3) format to lowest precedence.
 	Document some requirements in doc/INSTALL.
 	Possible bug fix for
-	  http://www.openwall.com/lists/john-dev/2013/05/27/20, thanks to
+	  https://www.openwall.com/lists/john-dev/2013/05/27/20, thanks to
 	  Claudio.
 	MPI: More consistent exit handling.
 	Update MPI docs. Also, MPI was accidentally enabled by the last commit
@@ -10085,7 +10085,7 @@ magnum (1889):
 	  __MINGW64__ in case someone tries to do things with MSVC or
 	  anything else.
 	Unify MAYBE_INLINE definition with core john.
-	  http://www.openwall.com/lists/john-dev/2013/10/29/2
+	  https://www.openwall.com/lists/john-dev/2013/10/29/2
 	Drop the -mstackrealign from win64 build. It was not a correct fix.
 	  And change 'strip' to $(STRIP) for easier disabling (define it as
 	  'dir' or 'echo' or whatever when making a debug build)
@@ -10991,7 +10991,7 @@ magnum (1889):
 	  off by one error. Also fixes the OpenCL versions of the formats.
 	  Hopefully this settles it for #654 and #655.
 	Add the example from
-	  http://www.openwall.com/lists/john-users/2014/06/23/1 as a test
+	  https://www.openwall.com/lists/john-users/2014/06/23/1 as a test
 	  vector in the known_hosts format.
 	Make full Unicode (4-byte UTF-8) optional for fast MS formats,
 	  because it means a performance hit of 10% or so. Default to
@@ -13075,7 +13075,7 @@ Claudio André (192):
 	Space to tabs in john.c (only at lines I put there).
 	Create comments that document new shared functions.
 	Use sha.h and sha2.h as recommended at
-	  http://www.openwall.com/lists/john-dev/2013/01/21/20.
+	  https://www.openwall.com/lists/john-dev/2013/01/21/20.
 	Replace spaces to tabs (only).
 	Fix some misalignments.
 	Reintroduced some missed code during bleeding merge.
@@ -13119,7 +13119,7 @@ Claudio André (192):
 	Clean-up.
 	Hopefully the bug is gone.
 	Tested with TS and 'real' cases from
-	  http://openwall.info/wiki/john/development/GPU#Acceptance-Tests.
+	  https://openwall.info/wiki/john/development/GPU#Acceptance-Tests.
 	  Everything seems to be Ok and on VLIW5 (at least mine) it runs at 2x
 	  faster.
 	Better bounds detection Or I fixed a bug (i haven't found) or I
@@ -13654,7 +13654,7 @@ Solar (20):
 	Licensing files
 	john-rawSHA1_ng_fmt-omp-reduction.diff
 	Add 'dokuwiki' external mode from
-	  http://www.openwall.com/lists/john-users/2013/06/08/14
+	  https://www.openwall.com/lists/john-users/2013/06/08/14
 	Added scrypt format
 	Mask mode for GPU
 	john-descrypt-opencl-section0-fix.diff
@@ -13869,9 +13869,9 @@ magnum (731):
 	  using SSE2 but apparently it is not, on my gear.
 	Sunmd5: fix SSE2 for 64-bit
 	wordlist.c: fix segfault reported in
-	  http://www.openwall.com/lists/john-users/2012/08/01/5
+	  https://www.openwall.com/lists/john-users/2012/08/01/5
 	wordlist.c: fix segfault reported in
-	  http://www.openwall.com/lists/john-users/2012/08/01/5
+	  https://www.openwall.com/lists/john-users/2012/08/01/5
 	Define MMX_COEF in x86-64.h and drop the workarounds in SSE2 formats
 	  that were needed cause it was missing.
 	Use clear_keys() for SSE2 buffer cleaning in a couple of formats,
@@ -14379,7 +14379,7 @@ magnum (731):
 	common-opencl.c: Reflect that we are using a cached binary in case of
 	  errors.
 	No-op workaround for false positive in scan-build. See
-	  http://www.openwall.com/lists/john-dev/2012/12/23/12
+	  https://www.openwall.com/lists/john-dev/2012/12/23/12
 	formats.c: Add a self-test that puts maximum length candidates in all
 	  buffer positions and then read them back to verify. This finds
 	  incorrect claims of PLAINTEXT_SIZE as well as most kinds of key
@@ -14748,7 +14748,7 @@ magnum (731):
 	Fix a bug in dmg formats, and add debug output.
 	WPAPSK (CPU and GPU): Exploit same-essid weakness. Huge speedup when
 	  applicable. See
-	  http://www.openwall.com/lists/john-dev/2013/01/29/13 and on for
+	  https://www.openwall.com/lists/john-dev/2013/01/29/13 and on for
 	  discussion.
 	DMG debug bugfix (duh!), and a new test that seems pretty generic.
 	dmg2john error message.
@@ -15992,7 +15992,7 @@ Solar (11):
 	  reduces to 1.
 	Licensing files
 	Add 'dokuwiki' external mode from
-	  http://www.openwall.com/lists/john-users/2013/06/08/14
+	  https://www.openwall.com/lists/john-users/2013/06/08/14
 
 Narendra Kangralkar (10):
 	Make ciphertext parsing more robust in nk format
@@ -16148,7 +16148,7 @@ magnum (109):
 	Fixes after Jim's patch (new-style format interface mixed in)
 	Ditch the last pFmt stuff (except in dynamic)
 	Add "LC_ALL = C" to Makefile, for better compatibility with some non-GNU systems.
-	wordlist.c: fix segfault reported in http://www.openwall.com/lists/john-users/2012/08/01/5
+	wordlist.c: fix segfault reported in https://www.openwall.com/lists/john-users/2012/08/01/5
 	pkzip: Drop a now unused label, muting a compiler warning
 	Fix the self-test's clear_keys().
 	mscash formats: Warn when rejecting too long salts
@@ -16478,7 +16478,7 @@ magnum (334):
 	options.c: enable format name printing all the way to 80th column
 	options.c fixed erroneus output of \0
 	NT-OpenCL: Add FMT_UNICODE flag
-	loader.c: Do read gecos and homedir from pwdump-style input. http://www.openwall.com/lists/john-users/2012/02/22/1
+	loader.c: Do read gecos and homedir from pwdump-style input. https://www.openwall.com/lists/john-users/2012/02/22/1
 	Makefile typo (cosmetic)
 	Manual sync with Samuele's tree's b890a51
 	Support specifying OpenCL platform on command line
@@ -16604,7 +16604,7 @@ magnum (334):
 	A couple minor changes to CHANGES-jumbo.
 	Source $JOHN/john.local.conf by default. This file is never overwritten but will be created empty when building, if it does not exist. It must *not* be included in any release tarball.
 	Create a rule section "Extra" for the previously commented-out rules for Single mode. Also, add new rules "Single-Extra" (consisting of Single plus Extra) and "Jumbo" (consisting of all rules we have, including NT). I preserved the name "All" for local use, thus using "Jumbo" instead.
-	External:Keyboard: Fixes for 8-bit characters vs signed char constants. http://www.openwall.com/lists/john-users/2012/02/26/2
+	External:Keyboard: Fixes for 8-bit characters vs signed char constants. https://www.openwall.com/lists/john-users/2012/02/26/2
 	Makefile: Never overwrite john.local.conf when building
 	Add --list=[encodings|opencl-devices]. Deprecate --encodings=LIST (but it's still supported). We will later support --list=cuda-devices too. Drop --device=list and --platforms=list (not supported from now on). For the catch-all of --list=<subsection>, add a header "Subsections of...".
 	RAR: Support files larger than 2 GB.
@@ -16835,16 +16835,16 @@ Frank Dittrich (64):
 	bash-completion for JtR (to install: "sudo make bash-completion")
 	bash completion updates
 	Update and licensing statements for bash completion
-	bash completion updates http://www.openwall.com/lists/john-dev/2012/05/12/4
+	bash completion updates https://www.openwall.com/lists/john-dev/2012/05/12/4
 	bash completion updates
-	bash completion update http://www.openwall.com/lists/john-users/2012/05/21/1
-	bash completion update http://www.openwall.com/lists/john-dev/2012/05/23/1
-	bash completion update http://www.openwall.com/lists/john-dev/2012/05/24/1
-	bash completion http://www.openwall.com/lists/john-dev/2012/05/25/3
-	bash completion update http://www.openwall.com/lists/john-dev/2012/05/28/9
+	bash completion update https://www.openwall.com/lists/john-users/2012/05/21/1
+	bash completion update https://www.openwall.com/lists/john-dev/2012/05/23/1
+	bash completion update https://www.openwall.com/lists/john-dev/2012/05/24/1
+	bash completion https://www.openwall.com/lists/john-dev/2012/05/25/3
+	bash completion update https://www.openwall.com/lists/john-dev/2012/05/28/9
 	bash completion update
 	bash completion update and documentation.
-	bash completion update http://www.openwall.com/lists/john-dev/2012/06/06/32
+	bash completion update https://www.openwall.com/lists/john-dev/2012/06/06/32
 	c3_fmt.c: improve --subformat= handling
 	bash completion: a few more improvements
 	Fix bash completion for unique
@@ -16973,7 +16973,7 @@ Claudio André (28):
 	OpenCL cryptsha512
 	Improvement: get the LWS and KPC from john's config file. Improvement: check if group size is valid. Cosmetic: changes in benchmark comment. See commit: 9d3fe1414e. Performance: put all working variables in __local memory address space. Fixed: allow temp buffer to use all the available local memory. Fixed: use small KPC values when running on CPU. On real cracking tasks, big values behaves badly. Fixed: format and algorithm names. Fixed: copyright information.
 	More error treatment in find_best_kpc and find_best_workgroup. Only transfer keys to GPU is necessary (magnum idea).
-	openCL_crypt512.patch as of http://www.openwall.com/lists/john-dev/2012/04/18/6
+	openCL_crypt512.patch as of https://www.openwall.com/lists/john-dev/2012/04/18/6
 	Changes in common_opencl.c
 	Improvement: Set john.conf LWS and KPC properly. Improvement: Unroll only important loops. Performance: Use bitselect and bitalign when possible. Performance: Created a different kernel to run on CPU. Performance: Created a different kernel to run on NVIDIA. Fixed: Fix find_best_kpc() and find_best_workgroup misbehaviour.
 	Improvement: disable #pragma OPENCL EXTENSION cl_khr_byte_addressable_store. Improvement: use PUTCHAR macro (15% performance gain on CPU).
@@ -17004,7 +17004,7 @@ Solar (23):
 	Drupal 7: Minor optimisation
 	Keyboard external mode fix (from CVS)
 	XOP for MD5/MD4/SHA-1
-	sse-intrinsics.c: Take advantage of some SSE2 and SSSE3 intructions if available http://www.openwall.com/lists/john-dev/2012/03/21/4 (followup)
+	sse-intrinsics.c: Take advantage of some SSE2 and SSSE3 intructions if available https://www.openwall.com/lists/john-dev/2012/03/21/4 (followup)
 	OMP Support for wpapsk formats
 	taviso_fmt: Use XOP if available. Plus a fix to sse-intrinsics.c for 32-bit builds with SSSE3.
 	Format renames, unified algorithm names
@@ -17029,7 +17029,7 @@ Lukas Odzioba (22):
 	john-1.7.9-jumbo-5-cuda-2.diff
 	magnumripper-magnum-jumbo-3279fdc-fixed.diff
 	Rename all opencl kernels
-	mscash2-cuda http://www.openwall.com/lists/john-dev/2012/03/31/15
+	mscash2-cuda https://www.openwall.com/lists/john-dev/2012/03/31/15
 	Added WPAPSK format for CUDA and OpenCL
 	Fixed Makefile for CUDA builds for make -j
 	Added hccap2john and prepared wpapsk-cuda format for real use

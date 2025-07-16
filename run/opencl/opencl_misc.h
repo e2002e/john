@@ -18,7 +18,7 @@
 
 #include "opencl_device_info.h"
 
-/* Note: long is *always* 64-bit in OpenCL */
+/* long is always 64-bit in OpenCL while long long is reserved for 128 bits */
 typedef uchar uint8_t;
 typedef char int8_t;
 typedef ushort uint16_t;
@@ -52,21 +52,20 @@ typedef uint32_t host_size_t;
 #endif
 
 /*
- * Some runtimes/drivers breaks on using inline, others breaks on lack of it,
- * yet others require use of static as well.
- *
- * Only usable in device code
+ * Most runtimes will inline nearly everything without request.
  */
 #if _OPENCL_COMPILER
 
+#define NOINLINE  __attribute__((noinline))
+
+#ifndef INLINE
 #if __MESA__
-#define inline	// empty!
+#define INLINE
 #elif __POCL__
-// Do nothing (POCL complains if we redefine)
-#elif gpu_amd(DEVICE_INFO) // We really target ROCM here
-#define inline	static inline
+#define INLINE    inline
 #else
-// Do nothing
+#define INLINE    static inline
+#endif
 #endif
 
 #endif /* _OPENCL_COMPILER */
@@ -101,7 +100,7 @@ typedef struct dyna_salt_t {
 
 #if SCALAR && 0 /* Used for testing */
 #define HAVE_LUT3	1
-inline uint lut3(uint x, uint y, uint z, uchar m)
+INLINE uint lut3(uint x, uint y, uint z, uchar m)
 {
 	uint i;
 	uint r = 0;
@@ -132,7 +131,7 @@ inline uint lut3(uint x, uint y, uint z, uchar m)
 
 #if SCALAR && SM_MAJOR >= 5 && (DEV_VER_MAJOR > 352 || (DEV_VER_MAJOR == 352 && DEV_VER_MINOR >= 21))
 #define HAVE_LUT3	1
-inline uint lut3(uint a, uint b, uint c, uint imm)
+INLINE uint lut3(uint a, uint b, uint c, uint imm)
 {
 	uint r;
 	asm("lop3.b32 %0, %1, %2, %3, %4;"
@@ -143,7 +142,7 @@ inline uint lut3(uint a, uint b, uint c, uint imm)
 
 #if 0 /* This does no good */
 #define HAVE_LUT3_64	1
-inline ulong lut3_64(ulong a, ulong b, ulong c, uint imm)
+INLINE ulong lut3_64(ulong a, ulong b, ulong c, uint imm)
 {
 	ulong t, r;
 
@@ -163,7 +162,7 @@ inline ulong lut3_64(ulong a, ulong b, ulong c, uint imm)
 #pragma OPENCL EXTENSION cl_amd_media_ops : enable
 #define BITALIGN(hi, lo, s) amd_bitalign((hi), (lo), (s))
 #elif SCALAR && SM_MAJOR > 3 || (SM_MAJOR == 3 && SM_MINOR >= 2)
-inline uint funnel_shift_right(uint hi, uint lo, uint s)
+INLINE uint funnel_shift_right(uint hi, uint lo, uint s)
 {
 	uint r;
 	asm("shf.r.wrap.b32 %0, %1, %2, %3;"
@@ -172,7 +171,7 @@ inline uint funnel_shift_right(uint hi, uint lo, uint s)
 	return r;
 }
 
-inline uint funnel_shift_right_imm(uint hi, uint lo, uint s)
+INLINE uint funnel_shift_right_imm(uint hi, uint lo, uint s)
 {
 	uint r;
 	asm("shf.r.wrap.b32 %0, %1, %2, %3;"
@@ -202,13 +201,16 @@ inline uint funnel_shift_right_imm(uint hi, uint lo, uint s)
 #endif
 #endif
 
-inline ushort SWAP16(ushort x)
+#define block_swap32(W, len)	for (uint i = 0; i < len; i++) W[i] = SWAP32(W[i])
+#define block_swap64(W, len)	for (uint i = 0; i < len; i++) W[i] = SWAP64(W[i])
+
+INLINE ushort SWAP16(ushort x)
 {
 	return ((x << 8) + (x >> 8));
 }
 
 #if USE_BITSELECT
-inline uint SWAP32(uint x)
+INLINE uint SWAP32(uint x)
 {
 	return bitselect(rotate(x, 24U), rotate(x, 8U), 0x00FF00FFU);
 }
@@ -220,7 +222,7 @@ inline uint SWAP32(uint x)
 		          rotate(n, 40UL), 0x00FF000000FF0000UL), \
 		0xFFFF0000FFFF0000UL)
 #else
-inline uint SWAP32(uint x)
+INLINE uint SWAP32(uint x)
 {
 	x = rotate(x, 16U);
 	return ((x & 0x00FF00FF) << 8) + ((x >> 8) & 0x00FF00FF);
@@ -238,7 +240,7 @@ inline uint SWAP32(uint x)
 #define VSWAP32 SWAP32
 #else
 /* Vector-capable swap32() */
-inline MAYBE_VECTOR_UINT VSWAP32(MAYBE_VECTOR_UINT x)
+INLINE MAYBE_VECTOR_UINT VSWAP32(MAYBE_VECTOR_UINT x)
 {
 	x = rotate(x, 16U);
 	return ((x & 0x00FF00FF) << 8) + ((x >> 8) & 0x00FF00FF);
@@ -348,6 +350,8 @@ inline MAYBE_VECTOR_UINT VSWAP32(MAYBE_VECTOR_UINT x)
 #define GETCHAR_BE(buf, index) (((uchar*)(buf))[(index) ^ 3])
 #define GETCHAR_MC(buf, index) (((MAYBE_CONSTANT uchar*)(buf))[(index)])
 #define LASTCHAR_BE(buf, index, val) (buf)[(index)>>2] = ((buf)[(index)>>2] & (0xffffff00U << ((((index) & 3) ^ 3) << 3))) + ((val) << ((((index) & 3) ^ 3) << 3))
+#define LASTCHAR_BE64(buf, index, val) (buf)[(index)>>3] = ((buf)[(index)>>3] & (0xffffffffffffff00UL << ((((index) & 7) ^ 7) << 3))) + ((ulong)(val) << ((((index) & 7) ^ 7) << 3))
+#define LASTCHAR(buf, index, val) (buf)[(index)>>2] = ((buf)[(index)>>2] & (0xffffff00U << (((index) & 3) << 3))) + ((val) << (((index) & 3) << 3))
 
 #if no_byte_addressable(DEVICE_INFO) || !SCALAR || (gpu_amd(DEVICE_INFO) && defined(AMD_PUTCHAR_NOCAST))
 /* 32-bit stores */
@@ -374,7 +378,7 @@ inline MAYBE_VECTOR_UINT VSWAP32(MAYBE_VECTOR_UINT x)
 #define XORCHAR_BE(buf, index, val) ((uchar*)(buf))[(index) ^ 3] ^= (val)
 #endif
 
-inline int check_pkcs_pad(const uchar *data, int len, int blocksize)
+INLINE int check_pkcs_pad(const uchar *data, int len, int blocksize)
 {
 	int pad_len, padding, real_len;
 
@@ -419,7 +423,7 @@ inline int check_pkcs_pad(const uchar *data, int len, int blocksize)
  */
 
 /* src and dst are private mem */
-inline void memcpy_pp(void* restrict dst, const void* restrict src, uint count)
+INLINE void memcpy_pp(void* restrict dst, const void* restrict src, uint count)
 {
 	const char *s = src;
 	char *d = dst;
@@ -429,7 +433,7 @@ inline void memcpy_pp(void* restrict dst, const void* restrict src, uint count)
 }
 
 /* src is private mem, dst is global mem */
-inline void memcpy_pg(__global void* restrict dst, const void* restrict src, uint count)
+INLINE void memcpy_pg(__global void* restrict dst, const void* restrict src, uint count)
 {
 	const char *s = src;
 	__global char *d = dst;
@@ -439,7 +443,7 @@ inline void memcpy_pg(__global void* restrict dst, const void* restrict src, uin
 }
 
 /* src is global mem, dst is private mem */
-inline void memcpy_gp(void* restrict dst, __global const void* restrict src, uint count)
+INLINE void memcpy_gp(void* restrict dst, __global const void* restrict src, uint count)
 {
 	__global const char *s = src;
 	char *d = dst;
@@ -449,7 +453,7 @@ inline void memcpy_gp(void* restrict dst, __global const void* restrict src, uin
 }
 
 /* src is constant mem, dst is private mem */
-inline void memcpy_cp(void* restrict dst, __constant void* restrict src, uint count)
+INLINE void memcpy_cp(void* restrict dst, __constant void* restrict src, uint count)
 {
 	__constant char *s = src;
 	char *d = dst;
@@ -459,7 +463,7 @@ inline void memcpy_cp(void* restrict dst, __constant void* restrict src, uint co
 }
 
 /* src is MAYBE_CONSTANT mem, dst is private mem */
-inline void memcpy_mcp(void* restrict dst, MAYBE_CONSTANT void* restrict src, uint count)
+INLINE void memcpy_mcp(void* restrict dst, MAYBE_CONSTANT void* restrict src, uint count)
 {
 	MAYBE_CONSTANT char *s = src;
 	char *d = dst;
@@ -469,7 +473,7 @@ inline void memcpy_mcp(void* restrict dst, MAYBE_CONSTANT void* restrict src, ui
 }
 
 /* dst is private mem */
-inline void memset_p(void *p, uint val, uint count)
+INLINE void memset_p(void *p, uint val, uint count)
 {
 	char *d = p;
 
@@ -478,7 +482,7 @@ inline void memset_p(void *p, uint val, uint count)
 }
 
 /* dst is global mem */
-inline void memset_g(__global void *p, uint val, uint count)
+INLINE void memset_g(__global void *p, uint val, uint count)
 {
 	__global char *d = p;
 
@@ -487,7 +491,7 @@ inline void memset_g(__global void *p, uint val, uint count)
 }
 
 /* s1 and s2 are private mem */
-inline int memcmp_pp(const void *s1, const void *s2, uint size)
+INLINE int memcmp_pp(const void *s1, const void *s2, uint size)
 {
 	const uchar *a = s1;
 	const uchar *b = s2;
@@ -500,7 +504,7 @@ inline int memcmp_pp(const void *s1, const void *s2, uint size)
 }
 
 /* s1 is private mem, s2 is global mem */
-inline int memcmp_pg(const void *s1, __global const void *s2, uint size)
+INLINE int memcmp_pg(const void *s1, __global const void *s2, uint size)
 {
 	const uchar *a = s1;
 	__global const uchar *b = s2;
@@ -513,7 +517,7 @@ inline int memcmp_pg(const void *s1, __global const void *s2, uint size)
 }
 
 /* s1 is private mem, s2 is constant mem */
-inline int memcmp_pc(const void *s1, __constant const void *s2, uint size)
+INLINE int memcmp_pc(const void *s1, __constant const void *s2, uint size)
 {
 	const uchar *a = s1;
 	__constant const uchar *b = s2;
@@ -526,7 +530,7 @@ inline int memcmp_pc(const void *s1, __constant const void *s2, uint size)
 }
 
 /* s1 is global mem, s2 is constant mem */
-inline int memcmp_gc(__global const void *s1, __constant void *s2, uint size)
+INLINE int memcmp_gc(__global const void *s1, __constant void *s2, uint size)
 {
 	__global const uchar *a = s1;
 	__constant uchar *b = s2;
@@ -539,7 +543,7 @@ inline int memcmp_gc(__global const void *s1, __constant void *s2, uint size)
 }
 
 /* s1 is private mem, s2 is MAYBE_CONSTANT mem */
-inline int memcmp_pmc(const void *s1, MAYBE_CONSTANT void *s2, uint size)
+INLINE int memcmp_pmc(const void *s1, MAYBE_CONSTANT void *s2, uint size)
 {
 	const uchar *a = s1;
 	MAYBE_CONSTANT uchar *b = s2;
@@ -552,7 +556,7 @@ inline int memcmp_pmc(const void *s1, MAYBE_CONSTANT void *s2, uint size)
 }
 
 /* haystack is private mem, needle is constant mem */
-inline int memmem_pc(const void *haystack, size_t haystack_len,
+INLINE int memmem_pc(const void *haystack, size_t haystack_len,
                      __constant const void *needle, size_t needle_len)
 {
 	const char *haystack_ = haystack;
@@ -591,75 +595,42 @@ inline int memmem_pc(const void *haystack, size_t haystack_len,
 #define STRINGIZE(s) STRINGIZE2(s)
 
 /*
- * The reason the functions below are macros is it's the only way we can use
- * them regardless of memory type (eg. __local or __global). The downside is
- * we can't cast them so we need eg. dump8_le for a char array, or output will
- * not be correct.
+ * The below macros need to be called with pointer already cast to
+ * uchar pointer of its type - such as "(__constant uchar*)salt->u"
+ * because type is unknown to us so void* can't help us.
  */
 
-/* Dump an array (or variable) as hex */
-#define dump(x)   dump_stuff_msg(STRINGIZE(x), x, sizeof(x))
-#define dump_stuff(x, size) dump_stuff_msg(STRINGIZE(x), x, size)
+#define dump_le(x, size) dump_stuff_msg(STRINGIZE(x), x, size)
+#define dump_be(x, size) dump_stuff_be_msg(STRINGIZE(x), x, size)
+#define dump_be64(x, size) dump_stuff_be64_msg(STRINGIZE(x), x, size)
 
-/*
- * This clumsy beast finally hides the problem from user.
- */
 #define dump_stuff_msg(msg, x, size) do {	  \
-		switch (sizeof((x)[0])) { \
-		case 8: \
-			dump_stuff64_msg(msg, x, size); \
-			break; \
-		case 4: \
-			dump_stuff32_msg(msg, x, size); \
-			break; \
-		case 2: \
-			dump_stuff16_msg(msg, x, size); \
-			break; \
-		case 1: \
-			dump_stuff8_msg(msg, x, size); \
-			break; \
-		} \
-	} while (0)
-
-/* requires char/uchar */
-#define dump_stuff8_msg(msg, x, size) do {	  \
-		uint ii; \
 		printf("%s : ", msg); \
-		for (ii = 0; ii < (uint)size; ii++) { \
-			printf("%02x", (x)[ii]); \
-			if (ii % 4 == 3) \
+		for (uint xedni_ = 0; xedni_ < (uint)size; xedni_++) { \
+			printf("%02x", (x)[xedni_]); \
+			if (xedni_ % 4 == 3) \
 				printf(" "); \
 		} \
 		printf("\n"); \
 	} while (0)
 
-/* requires short/ushort */
-#define dump_stuff16_msg(msg, x, size) do {	  \
-		uint ii; \
+#define dump_stuff_be_msg(msg, x, size) do {	  \
 		printf("%s : ", msg); \
-		for (ii = 0; ii < (uint)(size)/2; ii++) { \
-			printf("%04x", SWAP16((x)[ii])); \
-			if (ii % 2 == 1) \
+		for (uint xedni_ = 0; xedni_ < (uint)size; xedni_++) { \
+			printf("%02x", (x)[xedni_ ^ 3]); \
+			if (xedni_ % 4 == 3) \
 				printf(" "); \
 		} \
 		printf("\n"); \
 	} while (0)
 
-/* requires int/uint */
-#define dump_stuff32_msg(msg, x, size) do {	  \
-		uint ii; \
+#define dump_stuff_be64_msg(msg, x, size) do {	  \
 		printf("%s : ", msg); \
-		for (ii = 0; ii < (uint)(size)/4; ii++) \
-			printf("%08x ", SWAP32((x)[ii])); \
-		printf("\n"); \
-	} while (0)
-
-/* requires long/ulong */
-#define dump_stuff64_msg(msg, x, size) do {	  \
-		uint ii; \
-		printf("%s : ", msg); \
-		for (ii = 0; ii < (uint)(size)/8; ii++) \
-			printf("%016lx ", SWAP64((x)[ii])); \
+		for (uint xedni_ = 0; xedni_ < (uint)size; xedni_++) { \
+			printf("%02x", (x)[xedni_ ^ 7]); \
+			if (xedni_ % 4 == 3) \
+				printf(" "); \
+		} \
 		printf("\n"); \
 	} while (0)
 

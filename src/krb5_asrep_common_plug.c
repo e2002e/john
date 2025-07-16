@@ -12,13 +12,11 @@
 #include "misc.h"
 #include "common.h"
 #include "krb5_asrep_common.h"
+#include "unicode.h"
 
 char *krb5_asrep_split(char *ciphertext, int index, struct fmt_main *self)
 {
 	static char *ptr, *keeptr;
-	unsigned char etype = 0;
-	char *p = ciphertext;
-	int i;
 
 	if (strnlen(ciphertext, LINE_BUFFER_SIZE) < LINE_BUFFER_SIZE &&
 	    strstr(ciphertext, "$SOURCE_HASH$"))
@@ -32,29 +30,29 @@ char *krb5_asrep_split(char *ciphertext, int index, struct fmt_main *self)
 		ptr += FORMAT_TAG_LEN;
 		memcpy(ptr, "23$", ETYPE_TAG_LEN); // old hashes
 		ptr += ETYPE_TAG_LEN;
-		for (i = 0; i < strlen(ciphertext) + 1; i++)
-			ptr[i] = tolower(ARCH_INDEX(ciphertext[i]));
 	} else { // new format hashes (with FORMAT_TAG)
-		p = ciphertext + FORMAT_TAG_LEN;
+		unsigned char etype = 0;
+		char *p = ciphertext + FORMAT_TAG_LEN;
+
 		if (!strncmp(p, "23$", ETYPE_TAG_LEN))
 			etype = 23;
 		else if (!strncmp(p, "17$", ETYPE_TAG_LEN))
 			etype = 17;
 		else if (!strncmp(p, "18$", ETYPE_TAG_LEN))
 			etype = 18;
+
 		if (etype != 23) {
 			// skip over salt
 			p = strchr(ciphertext + FORMAT_TAG_LEN + ETYPE_TAG_LEN + 1, '$') + 1;
-			for (i = 0; i < p - ciphertext; i++)
-				ptr[i] = ARCH_INDEX(ciphertext[i]);
-			for (; i < strlen(ciphertext) + 1; i++)
-				ptr[i] = tolower(ARCH_INDEX(ciphertext[i]));
-
-		} else {
-			for (i = 0; i < strlen(ciphertext) + 1; i++)
-				ptr[i] = tolower(ARCH_INDEX(ciphertext[i]));
+			size_t salt_len = p - ciphertext;
+			memcpy(ptr, ciphertext, salt_len);
+			ptr += salt_len;
+			ciphertext = p;
 		}
 	}
+
+	strcpy(ptr, ciphertext);
+	enc_strlwr(ptr);
 
 	return keeptr;
 }
@@ -198,7 +196,7 @@ void *krb5_asrep_get_salt(char *ciphertext)
 
 	MEM_FREE(keeptr);
 
-	/* following is used to fool dyna_salt stuff */
+	/* following is used to fool dyna_salt_t stuff */
 	cs.dsalt.salt_cmp_offset = SALT_CMP_OFF(struct custom_salt, edata1);
 	cs.dsalt.salt_cmp_size = SALT_CMP_SIZE(struct custom_salt, edata1, edata2len, 0);
 	cs.dsalt.salt_alloc_needs_free = 0;

@@ -51,6 +51,7 @@
 #include "config.h"
 #include "bench.h"
 #include "john.h"
+#include "logger.h"
 #include "status.h"
 #include "signals.h"
 #include "john_mpi.h"
@@ -192,12 +193,13 @@ void check_abort(int be_async_signal_safe)
 	if (be_async_signal_safe) {
 		if (john_main_process)
 			write_loop(2, abort_msg, strlen(abort_msg));
-		_exit(1);
+		_exit(2);
 	}
 
 	if (john_main_process)
 		fprintf(stderr, "%s", abort_msg);
-	error();
+	log_done();
+	exit(2);
 }
 
 static void sig_install_abort(void);

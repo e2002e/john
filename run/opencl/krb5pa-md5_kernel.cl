@@ -26,7 +26,7 @@
 
 #ifdef UTF_8
 
-inline
+INLINE
 void prepare(const __global uint *key, uint length,
              MAYBE_VOLATILE uint *nt_buffer)
 {
@@ -97,7 +97,7 @@ void prepare(const __global uint *key, uint length,
 
 #else
 
-inline
+INLINE
 void prepare(const __global uint *key, uint length, uint *nt_buffer)
 {
 	uint i, nt_index, keychars;
@@ -118,7 +118,7 @@ void prepare(const __global uint *key, uint length, uint *nt_buffer)
 
 #define asciidigit(n)	((n) >= '0' && (n) <= '9')
 
-inline
+INLINE
 void krb5pa_md5_final(const uint *K,
                       MAYBE_CONSTANT uint *salts,
 #ifdef RC4_USE_LOCAL
@@ -131,7 +131,7 @@ void krb5pa_md5_final(const uint *K,
 	uint block[16];
 	uint plain[36/4];
 	uchar *cleartext = (uchar*)plain;
-	uint K1[4], K3[4], ihash[4];
+	uint K1[4], K3[4], inner[4];
 
 	/*
 	 * K = MD4(UTF-16LE(password)), ordinary 16-byte NTLM hash
@@ -141,7 +141,11 @@ void krb5pa_md5_final(const uint *K,
 		block[i] = 0x36363636 ^ K[i];
 	for (i = 4; i < 16; i++)
 		block[i] = 0x36363636;
-	md5_single(uint, block, ihash); /* md5_update(ipad, 64) */
+	md5_single(uint, block, inner); /* md5_update(ipad, 64) */
+
+	for (i = 0; i < 16; i++)
+		block[i] ^= (0x36363636 ^ 0x5c5c5c5c);
+	md5_single(uint, block, K1); /* md5_update(opad, 64) */
 
 	block[0] = 0x01;    /* little endian "one", 4 bytes */
 	block[1] = 0x80;
@@ -149,22 +153,16 @@ void krb5pa_md5_final(const uint *K,
 		block[i] = 0;
 	block[14] = (64 + 4) << 3;
 	block[15] = 0;
-	md5_block(uint, block, ihash); /* md5_update(one, 4), md5_final() */
+	md5_block(uint, block, inner); /* md5_update(one, 4), md5_final(inner) */
 
 	for (i = 0; i < 4; i++)
-		block[i] = 0x5c5c5c5c ^ K[i];
-	for (i = 4; i < 16; i++)
-		block[i] = 0x5c5c5c5c;
-	md5_single(uint, block, K1); /* md5_update(opad, 64) */
-
-	for (i = 0; i < 4; i++)
-		block[i] = ihash[i];
+		block[i] = inner[i];
 	block[4] = 0x80;
 	for (i = 5; i < 14; i++)
 		block[i] = 0;
 	block[14] = (64 + 16) << 3;
 	block[15] = 0;
-	md5_block(uint, block, K1); /* md5_update(ihash, 16), md5_final() */
+	md5_block(uint, block, K1); /* md5_update(inner, 16), md5_final(outer) */
 
 	/*
 	 * 2nd HMAC K3 = HMAC-MD5(K1, CHECKSUM)
@@ -173,7 +171,11 @@ void krb5pa_md5_final(const uint *K,
 		block[i] = 0x36363636 ^ K1[i];
 	for (i = 4; i < 16; i++)
 		block[i] = 0x36363636;
-	md5_single(uint, block, ihash); /* md5_update(ipad, 64) */
+	md5_single(uint, block, inner); /* md5_update(ipad, 64) */
+
+	for (i = 0; i < 16; i++)
+		block[i] ^= (0x36363636 ^ 0x5c5c5c5c);
+	md5_single(uint, block, K3); /* md5_update(opad, 64) */
 
 	for (i = 0; i < 4; i++)
 		block[i] = *salts++; /* checksum, 16 bytes */
@@ -182,26 +184,20 @@ void krb5pa_md5_final(const uint *K,
 		block[i] = 0;
 	block[14] = (64 + 16) << 3;
 	block[15] = 0;
-	md5_block(uint, block, ihash); /* md5_update(cs, 16), md5_final() */
+	md5_block(uint, block, inner); /* md5_update(cs, 16), md5_final(inner) */
 
 	for (i = 0; i < 4; i++)
-		block[i] = 0x5c5c5c5c ^ K1[i];
-	for (i = 4; i < 16; i++)
-		block[i] = 0x5c5c5c5c;
-	md5_single(uint, block, K3); /* md5_update(opad, 64) */
-
-	for (i = 0; i < 4; i++)
-		block[i] = ihash[i];
+		block[i] = inner[i];
 	block[4] = 0x80;
 	for (i = 5; i < 14; i++)
 		block[i] = 0;
 	block[14] = (64 + 16) << 3;
 	block[15] = 0;
-	md5_block(uint, block, K3); /* md5_update(ihash, 16), md5_final() */
+	md5_block(uint, block, K3); /* md5_update(inner, 16), md5_final(outer) */
 
 	/* Salts now point to encrypted timestamp. */
 	/* K3 is our RC4 key. */
-	rc4_set_key(rc4_ctx, K3);
+	rc4_128_set_key(rc4_ctx, K3);
 
 	/* First decrypt just one block for early rejection. */
 	rc4(rc4_ctx, salts, plain, 16);
@@ -230,7 +226,11 @@ void krb5pa_md5_final(const uint *K,
 		block[i] = 0x36363636 ^ K1[i];
 	for (i = 4; i < 16; i++)
 		block[i] = 0x36363636;
-	md5_single(uint, block, ihash); /* md5_update(ipad, 64) */
+	md5_single(uint, block, inner); /* md5_update(ipad, 64) */
+
+	for (i = 0; i < 16; i++)
+		block[i] ^= (0x36363636 ^ 0x5c5c5c5c);
+	md5_single(uint, block, K2); /* md5_update(opad, 64) */
 
 	for (i = 0; i < 9; i++)
 		block[i] = plain[i]; /* timestamp, 36 bytes */
@@ -239,25 +239,19 @@ void krb5pa_md5_final(const uint *K,
 		block[i] = 0;
 	block[14] = (64 + 36) << 3;
 	block[15] = 0;
-	md5_block(uint, block, ihash); /* md5_update(cs, 16), md5_final() */
+	md5_block(uint, block, inner); /* md5_update(cs, 16), md5_final(inner) */
 
 	for (i = 0; i < 4; i++)
-		block[i] = 0x5c5c5c5c ^ K1[i];
-	for (i = 4; i < 16; i++)
-		block[i] = 0x5c5c5c5c;
-	md5_single(uint, block, K2); /* md5_update(opad, 64) */
-
-	for (i = 0; i < 4; i++)
-		block[i] = ihash[i];
+		block[i] = inner[i];
 	block[4] = 0x80;
 	for (i = 5; i < 14; i++)
 		block[i] = 0;
 	block[14] = (64 + 16) << 3;
 	block[15] = 0;
-	md5_block(uint, block, K2); /* md5_update(ihash, 16), md5_final() */
+	md5_block(uint, block, K2); /* md5_update(inner, 16), md5_final(outer) */
 }
 
-inline
+INLINE
 void cmp_final(uint gid,
                uint iter,
                uint *hash,
@@ -305,7 +299,7 @@ void cmp_final(uint gid,
 	}
 }
 
-inline
+INLINE
 void cmp(uint gid,
          uint iter,
          uint *hash,
@@ -329,10 +323,10 @@ void cmp(uint gid,
 		cmp_final(gid, iter, hash, offset_table, hash_table, salt, return_hashes, output, bitmap_dupe);
 }
 
-#ifdef RC4_USE_LOCAL
-__attribute__((work_group_size_hint(32,1,1)))
-#endif
 __kernel
+#ifdef RC4_USE_LOCAL
+__attribute__((work_group_size_hint(MAX_LOCAL_RC4, 1, 1)))
+#endif
 void krb5pa_md5(__global const uint *keys,
                 __global const uint *index,
                 MAYBE_CONSTANT uint *salts,
@@ -354,10 +348,9 @@ void krb5pa_md5(__global const uint *keys,
                 volatile __global uint *bitmap_dupe)
 {
 #ifdef RC4_USE_LOCAL
-	__local RC4_CTX rc4_ctx[32];
-#else
-	RC4_CTX rc4_ctx;
+	__local
 #endif
+		RC4_CTX rc4_ctx;
 	uint gid = get_global_id(0);
 	uint base = index[gid];
 	uint len = base & 127;
@@ -427,13 +420,7 @@ void krb5pa_md5(__global const uint *keys,
 		md4_single(uint, nt_buffer, nt_hash);
 
 		/* Final krb5pa-md5 hash */
-		krb5pa_md5_final(nt_hash, salts,
-#ifdef RC4_USE_LOCAL
-		                 &rc4_ctx[get_local_id(0)],
-#else
-		                 &rc4_ctx,
-#endif
-		                 final_hash);
+		krb5pa_md5_final(nt_hash, salts, &rc4_ctx, final_hash);
 
 		/* GPU-side compare */
 		cmp(gid, i, final_hash, bitmaps, bitmap_sz_bits, offset_table,

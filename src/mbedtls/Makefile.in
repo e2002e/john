@@ -1,0 +1,32 @@
+@SET_MAKE@
+CC = @CC@
+AS = @CC@
+LD = @CC@
+CPP = @CC@
+CFLAGS = -c -DAC_BUILT @CC_CPU@ @CC_MAIN_CPU@ @CFLAGS@ @JOHN_NO_SIMD@ @CFLAGS_EXTRA@ @OPENSSL_CFLAGS@ @OPENMP_CFLAGS@ @HAVE_MPI@ @PTHREAD_CFLAGS@ @CPPFLAGS@
+ASFLAGS = @ASFLAGS@ -c @EXTRA_AS_FLAGS@
+LDFLAGS = @LDFLAGS@
+AR = @AR@
+RM = /bin/rm -f
+AESIN = aesce.o aesni.o aes.o
+
+default: aes.a
+all: aes.a
+
+aes.o:	aes.c common.h build_info.h mbedtls_config.h alignment.h aes.h private_access.h platform_util.h platform.h error.h aesni.h aesce.h ctr.h
+	$(CC) $(CFLAGS) -c aes.c -o aes.o
+
+aesce.o:	aesce.c common.h build_info.h mbedtls_config.h alignment.h aesce.h aes.h private_access.h platform_util.h
+	$(CC) $(CFLAGS) -c aesce.c -o aesce.o
+
+aesni.o:	aesni.c common.h build_info.h mbedtls_config.h alignment.h aesni.h aes.h private_access.h platform_util.h
+	$(CC) $(CFLAGS) -c aesni.c -o aesni.o
+
+aes.a: $(AESIN)
+	$(AR) -rs aes.a $(AESIN)
+
+clean:
+	$(RM) *.a *.o
+
+distclean: clean
+	$(RM) Makefile

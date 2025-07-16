@@ -343,7 +343,7 @@ struct fmt_main fmt_opencl_rar5 = {
 	reset,
 	fmt_default_prepare,
 	valid,
-	fmt_default_split,
+	split,
 	get_binary,
 	get_salt,
 	{

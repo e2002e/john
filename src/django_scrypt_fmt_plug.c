@@ -37,6 +37,8 @@ john_register_one(&fmt_django_scrypt);
 #define TAG_LENGTH		(sizeof(FORMAT_TAG)-1)
 #if !defined(JOHN_NO_SIMD) && defined(__XOP__)
 #define ALGORITHM_NAME		"Salsa20/8 128/128 XOP"
+#elif !defined(JOHN_NO_SIMD) && defined(__AVX512VL__)
+#define ALGORITHM_NAME		"Salsa20/8 128/128 AVX512VL"
 #elif !defined(JOHN_NO_SIMD) && defined(__AVX__)
 #define ALGORITHM_NAME		"Salsa20/8 128/128 AVX"
 #elif !defined(JOHN_NO_SIMD) && defined(__SSE2__)

@@ -1,6 +1,15 @@
 This document is about cracking password protected FileVault 2 encrypted
 volumes with JtR.
 
+FileVault 2 hashes can be extracted from an encrypted volume using the tool run/fvde2john.py.
+Hash extraction example:
+
+$ python3 fvde2john.py FileVault2_image
+testuser:$fvde$1$16$270186d6758a4426d3f015a019eabc46$101082$63a758b61183c5d4d06dda5e8f14dd0b1555fe2a1f2d0304:Full Name:mypasswordhint
+
+The output of fvde2john.py is of the form username:password hash:full name:password hint
+
+Alternatively the "fvde2john" (https://github.com/kholia/fvde2john) tool can be used.
 First, build the "fvde2john" (https://github.com/kholia/fvde2john) project from
 source. See https://github.com/libyal/libfvde/wiki/Building for help.
 

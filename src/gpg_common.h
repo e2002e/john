@@ -82,7 +82,7 @@ enum {
 #endif
 
 struct gpg_common_custom_salt {
-	dyna_salt dsalt;
+	dyna_salt_t dsalt;
 	int datalen;
 	char spec;
 	char pk_algorithm;
@@ -95,20 +95,16 @@ struct gpg_common_custom_salt {
 	int ivlen;
 	int count;
 	void (*s2kfun)(char *, unsigned char*, int);
-	unsigned char p[0x2000]; // gpg --homedir . --s2k-cipher-algo 3des --simple-sk-checksum --gen-key
-	unsigned char q[0x2000]; // those can have larger p and q values.
+	unsigned char p[0x200];
+	unsigned char q[0x200];
 	unsigned char g[0x200];
 	unsigned char y[0x200];
-	unsigned char x[0x200];
 	unsigned char n[0x200];
-	unsigned char d[0x200];
 	int pl;
 	int ql;
 	int gl;
 	int yl;
-	int xl;
 	int nl;
-	int dl;
 	int symmetric_mode;
 	unsigned char data[1];
 };

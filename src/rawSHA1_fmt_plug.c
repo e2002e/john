@@ -1,6 +1,9 @@
 /*
- * This software is Copyright (c) 2004 bartavelle, <simon at banquise.net>, and it is hereby released to the general public under the following terms:
- * Redistribution and use in source and binary forms, with or without modification, are permitted.
+ * This software is Copyright (c) 2004 bartavelle, <simon at banquise.net>,
+ * and it is hereby released to the general public under the following terms:
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted.
  *
  * Optimised set_key() and reduced binary size by magnum, 2012
  *
@@ -40,14 +43,8 @@ john_register_one(&fmt_rawSHA1_axcrypt);
 #define REVERSE_STEPS
 
 #ifdef _OPENMP
-#ifdef SIMD_COEF_32
 #ifndef OMP_SCALE
-#define OMP_SCALE               1024
-#endif
-#else
-#ifndef OMP_SCALE
-#define OMP_SCALE				2048
-#endif
+#define OMP_SCALE       	        16
 #endif
 #include <omp.h>
 #endif
@@ -68,19 +65,19 @@ john_register_one(&fmt_rawSHA1_axcrypt);
 #define BENCHMARK_COMMENT		""
 #define BENCHMARK_LENGTH		0x107
 
-#define BINARY_SIZE				DIGEST_SIZE
+#define BINARY_SIZE			DIGEST_SIZE
 #define BINARY_ALIGN			4
 
 #ifdef SIMD_COEF_32
 #define PLAINTEXT_LENGTH		55
 #define MIN_KEYS_PER_CRYPT		NBKEYS
-#define MAX_KEYS_PER_CRYPT		NBKEYS
+#define MAX_KEYS_PER_CRYPT		(16 * NBKEYS)
 #define FMT_IS_BE
 #include "common-simd-getpos.h"
 #else
 #define PLAINTEXT_LENGTH		125
 #define MIN_KEYS_PER_CRYPT		1
-#define MAX_KEYS_PER_CRYPT		1
+#define MAX_KEYS_PER_CRYPT		256
 #endif
 
 #ifdef SIMD_COEF_32
@@ -248,15 +245,13 @@ static char *source(char *source, void *binary)
 static int crypt_all(int *pcount, struct db_salt *salt)
 {
 	const int count = *pcount;
-	int index = 0;
+	int index;
+	int loops = (count + MIN_KEYS_PER_CRYPT - 1) / MIN_KEYS_PER_CRYPT;
 
 #ifdef _OPENMP
-	int loops = (count + MAX_KEYS_PER_CRYPT - 1) / MAX_KEYS_PER_CRYPT;
-
 #pragma omp parallel for
-	for (index = 0; index < loops; ++index)
 #endif
-	{
+	for (index = 0; index < loops; index++) {
 #if SIMD_COEF_32
 		SIMDSHA1body(saved_key[index], crypt_key[index], NULL, SSEi_flags);
 #else
@@ -267,6 +262,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		SHA1_Final( (unsigned char*) crypt_key[index], &ctx);
 #endif
 	}
+
 	return count;
 }
 

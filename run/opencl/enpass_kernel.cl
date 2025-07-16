@@ -29,7 +29,7 @@ typedef struct {
 	unsigned char data[16];
 } enpass_salt;
 
-inline uint verify_page(uchar *data)
+INLINE uint verify_page(uchar *data)
 {
 	uint32_t pageSize;
 	uint32_t usableSize;
@@ -53,6 +53,8 @@ void enpass5_final(MAYBE_CONSTANT enpass_salt *salt,
                    __global enpass_out *out,
                    __global pbkdf2_state *state)
 {
+	__local aes_local_t lt;
+	AES_KEY akey; akey.lt = &lt;
 	uint gid = get_global_id(0);
 	uint i;
 	uint base = state[gid].pass++ * 5;
@@ -80,7 +82,6 @@ void enpass5_final(MAYBE_CONSTANT enpass_salt *salt,
 #endif
 	} else {
 		uchar data[16];
-		AES_KEY akey;
 		union {
 			uchar c[256/8];
 			uint  w[256/8/4];
@@ -103,7 +104,7 @@ void enpass5_final(MAYBE_CONSTANT enpass_salt *salt,
 	}
 }
 
-inline void _e6_preproc(__global const uint *key,
+INLINE void _e6_preproc(__global const uint *key,
                         ulong *state, ulong padding)
 {
 	uint i;
@@ -155,10 +156,11 @@ void enpass6_final(MAYBE_CONSTANT enpass_salt *salt,
                    __global enpass_out *out,
                    __global crack_t *out512)
 {
+	__local aes_local_t lt;
+	AES_KEY akey; akey.lt = &lt;
 	uint gid = get_global_id(0);
 	uint i;
 	uchar data[16];
-	AES_KEY akey;
 	union {
 		uchar c[256/8];
 		ulong  w[256/8/8];

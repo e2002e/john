@@ -1208,7 +1208,7 @@ Private_Packet(int len)
  */
 
 
-typedef void (*funcptr)();
+typedef void (*funcptr)(int);
 
 private int get_new_len(int);
 private int is_partial(int);
@@ -1294,8 +1294,8 @@ TAG[] = {
 };
 #define TAG_NUM (sizeof(TAG) * sizeof(string))
 
-private void
-(*tag_func[])() = {
+private funcptr
+tag_func[] = {
 	Reserved,
 	Public_Key_Encrypted_Session_Key_Packet,
 	Signature_Packet,
@@ -1305,7 +1305,7 @@ private void
 	Public_Key_Packet,
 	Secret_Subkey_Packet,
 	Compressed_Data_Packet,
-	Symmetrically_Encrypted_Data_Packet,
+	NULL,
 	Marker_Packet,
 	Literal_Data_Packet,
 	Trust_Packet,
@@ -1314,7 +1314,7 @@ private void
 	NULL,
 	NULL,
 	User_Attribute_Packet,
-	Symmetrically_Encrypted_and_MDC_Packet,
+	NULL,
 	Modification_Detection_Code_Packet,
 	NULL,
 	NULL,
@@ -1361,6 +1361,75 @@ private void
 	Private_Packet,
 	Private_Packet,
 	Private_Packet,
+};
+
+private void
+(*tag_func4[])(int, int, int, char *) = {
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	Symmetrically_Encrypted_Data_Packet,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	Symmetrically_Encrypted_and_MDC_Packet,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
 };
 
 char *pkt_type(int tag) {
@@ -1626,10 +1695,13 @@ parse_packet(char *hash)
 		}
 		// else printf("(%d bytes)\n", len);
 
-		if (tag < TAG_NUM && tag_func[tag] != NULL) {
+		if (tag < TAG_NUM && (tag_func[tag] != NULL || tag_func4[tag] != NULL)) {
 			if (gpg_dbg)
 				fprintf(stderr, "Packet type %d, len %d at offset %d  (Processing) (pkt-type %s) (Partial %s)\n", tag, len, offset, pkt_type(tag), partial?"yes":"no");
-			(*tag_func[tag])(len, 1, partial, hash);	// first packet (possibly only one if partial is false).
+			if (tag_func[tag] != NULL)
+				(*tag_func[tag])(len);
+			else
+				(*tag_func4[tag])(len, 1, partial, hash);	// first packet (possibly only one if partial is false).
 		} else {
 			if (gpg_dbg)
 				fprintf(stderr, "Packet type %d, len %d at offset %d  (Skipping) (Partial %s)\n", tag, len, offset, partial?"yes":"no");
@@ -1648,10 +1720,13 @@ parse_packet(char *hash)
 				if (gpg_dbg)
 					fprintf(stderr, "\t(%d bytes) partial end\n", len);
 			}
-			if (tag < TAG_NUM && tag_func[tag] != NULL) {
+			if (tag < TAG_NUM && (tag_func[tag] != NULL || tag_func4[tag] != NULL)) {
 				if (gpg_dbg)
 					fprintf(stderr, "Packet type %d, len %d at offset %d  (Processing) (pkt-type %s) (Partial %s)\n", tag, len, offset, pkt_type(tag), partial?"yes":"no");
-				(*tag_func[tag])(len, 0, partial, hash);	// subsquent packets.
+				if (tag_func[tag] != NULL)
+					(*tag_func[tag])(len);
+				else
+					(*tag_func4[tag])(len, 0, partial, hash);	// subsquent packets.
 			} else
 				skip(len);
 		}
@@ -2779,7 +2854,7 @@ base256[] = {
 private int
 line_not_blank(byte *s)
 {
-	while (isspace(*s)) {
+	while (isspace((int)*s)) {
 		if (*s == CR || *s == LF)
 			return NO;
 		s++;
