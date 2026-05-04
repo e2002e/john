@@ -24,6 +24,9 @@
 // Maximum number of placeholders in a mask.
 #define MAX_NUM_MASK_PLHDR 125
 
+// Maximum number of length increments (must be >= options.eff_maxlength-options.eff_minlength)
+#define MASK_MAX_INC_LEN   MAX_NUM_MASK_PLHDR
+
 //#define MASK_DEBUG
 
 typedef struct {
@@ -40,10 +43,8 @@ typedef struct {
 typedef struct {
 	/* Characters in the range */
 	unsigned char chars[0xFF];
-	/* next active range */
-	unsigned char next;
-	/* current postion in chars[] while iterating */
-	unsigned char iter[MAX_NUM_MASK_PLHDR];
+	/* current position in chars[] while iterating for each length increment */
+	unsigned char iter[MASK_MAX_INC_LEN];
 	/* Number of characters in the range */
 	unsigned char count;
 	/*
@@ -52,26 +53,25 @@ typedef struct {
 	 * value cannot be a null character which has a value zero.
 	 */
 	unsigned char start;
-	/* Base postion of the characters in key */
+	/* Base position of the characters in key */
 	int pos;
 	/* offset when a key is inserted from other mode */
 	int offset;
+	/* REMOVED: unsigned char next;   (linked list is gone) */
 } mask_range;
 
 /* Processed mask structure for password generation on CPU */
 typedef struct {
 	/* Set of mask placeholders for generating password */
 	mask_range ranges[MAX_NUM_MASK_PLHDR + 1];
-	/* Positions in mask for iteration on CPU */
+	/* Positions in mask active for iteration on CPU (1 = active) */
 	int active_positions[MAX_NUM_MASK_PLHDR + 1];
-	/* Postion of the first active range */
-	int ps1;
-	/* Total number of placeholders, cpu + gpu */
-	int count;
-	/* Number of placeholders active for iteration on CPU */
+	/* Compact list of active placeholder indices (in order) */
+	int active_idx[MAX_NUM_MASK_PLHDR + 1];
+	/* Number of active placeholders */
+	int active_count;
+	/* Number of placeholders active for iteration on CPU (same as active_count) */
 	int cpu_count;
-	/* offset at which mask starts in the key */
-	int offset;
 } mask_cpu_context;
 
 /*
