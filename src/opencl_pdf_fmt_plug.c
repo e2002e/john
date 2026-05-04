@@ -10,8 +10,9 @@
 
 #if FMT_REGISTERS_H
 john_register_one(&FORMAT_STRUCT);
-#else
+#elif FMT_EXTERNS_H
 extern struct fmt_main FORMAT_STRUCT;
+#else
 
 #include "pdf_common.h"
 #include "opencl_common.h"
@@ -41,6 +42,8 @@ static char *kernel_name[4] = { "pdf_r2", "pdf_r34", "pdf_r5", "pdf_r6" };
 
 #define STEP			0
 #define SEED			1024
+
+extern struct fmt_main FORMAT_STRUCT;
 
 // This file contains auto-tuning routine(s). Has to be included after formats definitions.
 #include "opencl_autotune.h"
@@ -345,7 +348,8 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		for (int i = count; i <= gws; i++)
 			saved_idx[i] = key_idx;
 
-		CLWRITE_CRYPT(cl_saved_key, CL_FALSE, key_offset, key_idx - key_offset, saved_key + key_offset, multi_profilingEvent[0]);
+		if (key_idx != key_offset)
+			CLWRITE_CRYPT(cl_saved_key, CL_FALSE, key_offset, key_idx - key_offset, saved_key + key_offset, multi_profilingEvent[0]);
 		CLWRITE_CRYPT(cl_saved_idx, CL_FALSE, idx_offset, 4 * (gws + 1) - idx_offset, saved_idx + (idx_offset / 4), multi_profilingEvent[1]);
 
 		if (!mask_gpu_is_static)

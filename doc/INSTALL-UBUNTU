@@ -27,7 +27,7 @@ build CPU fallback chains for any x86-64 CPU.
 
 ==== Recommended (extra formats and performance)
 
-    sudo apt-get -y install yasm pkg-config libgmp-dev libpcap-dev libbz2-dev
+    sudo apt-get -y install pkg-config libgmp-dev libpcap-dev libbz2-dev
 
 ==== If you have NVIDIA GPU(s) (OpenCL support)
 
@@ -132,3 +132,37 @@ build CPU fallback chains for any x86-64 CPU.
 === Benchmark your build (this also performs self-tests)
 
     ./john --test
+
+=== Install all Perl libs required for things like keepass2john.pl
+
+    A few are available as Ubuntu packages:
+
+    sudo apt-get install libcompress-raw-lzma-perl libdigest-md5-perl libimage-exiftool-perl libmime-base64-perl libnet-ldap-perl libnet-pcap-perl
+
+    To get everything needed, you have to install from CPAN:
+
+    sudo apt install cpanminus
+    cd ~/src/john/run
+    cpanm --installdeps .
+
+=== Install all Python modules required for things like pcap2john.py
+
+    Install most of them as Ubuntu packages (if you like):
+
+    sudo apt-get -y install python-is-python3 python3-pycryptodome python3-scapy python3-parsimonious python3-asn1crypto python3-dpkt python3-cbor2 python3-cryptography python3-simplejson python3-idna python3-lxml python3-ldap3 python3-olefile python3-bsddb3
+
+    Alternatively, use pip3 to install all of them into a virtual environment:
+
+    sudo apt-get install python3 python3-venv python3-pip
+    cd ~/src/john/run
+    python3 -m venv venv
+    . venv/bin/activate
+    pip3 install -r requirements.txt
+    deactivate
+
+    Later use:
+
+    cd ~/src/john/run
+    . venv/bin/activate
+     (run tools as needed)
+    deactivate

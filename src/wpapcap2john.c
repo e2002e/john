@@ -51,7 +51,7 @@ static uint8_t *packet;
 static uint8_t *packet_TA, *packet_RA, *packet_SA, *packet_DA, *bssid;
 static uint8_t *new_p;
 static size_t new_p_sz;
-static int swap_needed;
+static int swap_needed = !ARCH_LITTLE_ENDIAN;
 static essid_t *essid_db;   /* alloced/realloced to max_essid */
 static int n_essid;
 static WPA4way_t *apsta_db; /* alloced/realloced to max_state */
@@ -93,6 +93,15 @@ static const char* const ctl_subtype[16] = {
 	"Authentication", "Deauthentication", "Action", "Action no ack",
 	"Subtype 15"
 };
+
+#define fseek_chk(s, o, w)	  \
+	do { \
+		if (fseek(s, o, w) == -1) { \
+			fprintf(stderr, "%s: Seek failed: %s, %s:%u\n", \
+			        filename, strerror(errno), __FILE__, __LINE__); \
+			exit(1); \
+		} \
+	} while (0);
 
 #if HAVE___MINGW_ALIGNED_MALLOC
 char *strdup_MSVC(const char *str)
@@ -225,20 +234,21 @@ static int convert_ivs2(FILE *f_in)
 	unsigned char *p, *w;
 	int ess = -1;
 
-	fseek(f_in, 0, SEEK_END);
+	fseek_chk(f_in, 0, SEEK_END);
 	length = ftell(f_in);
-	fseek(f_in, 0, SEEK_SET);
+	fseek_chk(f_in, 0, SEEK_SET);
 
 	safe_malloc(ivs_buf, length);
 
 	if (fread(ivs_buf, 1, 4, f_in) != 4) {
-		fprintf(stderr, "%s: fread file header failed\n", filename);
+		fprintf(stderr, "%s: Read file header failed: %s\n",
+		        filename, feof(f_in) ? "EOF" : strerror(errno));
 		MEM_FREE(ivs_buf);
 		return 1;
 	}
 
 	if (memcmp(ivs_buf, IVSONLY_MAGIC, 4) == 0) {
-		fprintf(stderr, "%s: old version .ivs file, only WEP handshakes.\n",
+		fprintf(stderr, "%s: Old version .ivs file, only WEP handshakes.\n",
 		        filename);
 		MEM_FREE(ivs_buf);
 		return 1;
@@ -251,14 +261,15 @@ static int convert_ivs2(FILE *f_in)
 
 	if (fread(&fivs2, 1, sizeof(struct ivs2_filehdr), f_in) !=
 	    (size_t) sizeof(struct ivs2_filehdr)) {
-		fprintf(stderr, "%s: fread ivs2 file header failed", filename);
+		fprintf(stderr, "%s: Read ivs2 file header failed: %s\n",
+		        filename, feof(f_in) ? "EOF" : strerror(errno));
 		MEM_FREE(ivs_buf);
 		return 1;
 	}
 
 	if (fivs2.version > IVS2_VERSION) {
 		fprintf(stderr,
-		        "%s: wrong %s version: %d. Supported up to version %d.\n",
+		        "%s: Wrong %s version: %d. Supported up to version %d.\n",
 		        filename, IVS2_EXTENSION, fivs2.version, IVS2_VERSION);
 		MEM_FREE(ivs_buf);
 		return 1;
@@ -271,11 +282,10 @@ static int convert_ivs2(FILE *f_in)
 	pos = ftell(f_in);
 
 	while (pos < length) {
-		if (fread(&ivs2, 1, sizeof(struct ivs2_pkthdr), f_in) !=
-		    sizeof(struct ivs2_pkthdr)) {
+		if (fread(&ivs2, sizeof(struct ivs2_pkthdr), 1, f_in) != 1) {
 			fprintf(stderr,
-			        "%s: Error reading ivs2 header at pos "Zu" of "Zu"\n",
-			        filename, pos, length);
+			        "%s: Error reading ivs2 header at pos "Zu" of "Zu": %s\n",
+			        filename, pos, length, feof(f_in) ? "EOF" : strerror(errno));
 			MEM_FREE(ivs_buf);
 			return 1;
 		}
@@ -403,13 +413,13 @@ static int convert_ivs2(FILE *f_in)
 
 			if (hccap.eapol_size > sizeof(((hccap_t*)(NULL))->eapol)) {
 				fprintf(stderr,
-				        "%s: eapol size %u (too large), skipping packet\n",
+				        "%s: EAPOL size %u (too large), skipping packet\n",
 				        filename, hccap.eapol_size);
 				continue;
 			}
 			if (hccap.eapol_size < 91) {
 				fprintf(stderr,
-				        "%s: eapol size %u (too small), skipping packet\n",
+				        "%s: EAPOL size %u (too small), skipping packet\n",
 				        filename, hccap.eapol_size);
 				continue;
 			}
@@ -1222,7 +1232,7 @@ static void handle4way(ieee802_1x_eapol_t *auth, uint8_t *bssid)
 		if (eapol_sz > sizeof(((hccap_t*)(NULL))->eapol)) {
 			if (verbosity)
 				fprintf(stderr,
-				        "%s: eapol size %u (too large), skipping packet\n",
+				        "%s: EAPOL size %u (too large), skipping packet\n",
 				        filename, eapol_sz);
 			apsta_db[apsta].M[2].eapol_size = 0;
 			remove_handshake(apsta, 2);
@@ -1231,7 +1241,7 @@ static void handle4way(ieee802_1x_eapol_t *auth, uint8_t *bssid)
 		if (eapol_sz < 91) {
 			if (verbosity)
 				fprintf(stderr,
-				        "%s: eapol size %u (too small), skipping packet\n",
+				        "%s: EAPOL size %u (too small), skipping packet\n",
 				        filename, eapol_sz);
 			apsta_db[apsta].M[2].eapol_size = 0;
 			remove_handshake(apsta, 2);
@@ -1330,7 +1340,7 @@ static void handle4way(ieee802_1x_eapol_t *auth, uint8_t *bssid)
 		if (eapol_sz > sizeof(((hccap_t*)(NULL))->eapol)) {
 			if (verbosity)
 				fprintf(stderr,
-				        "%s: eapol size %u (too large), skipping packet\n",
+				        "%s: EAPOL size %u (too large), skipping packet\n",
 				        filename, eapol_sz);
 			apsta_db[apsta].M[4].eapol_size = 0;
 			remove_handshake(apsta, 4);
@@ -1339,7 +1349,7 @@ static void handle4way(ieee802_1x_eapol_t *auth, uint8_t *bssid)
 		if (eapol_sz < 91) {
 			if (verbosity)
 				fprintf(stderr,
-				        "%s: eapol size %u (too small), skipping packet\n",
+				        "%s: EAPOL size %u (too small), skipping packet\n",
 				        filename, eapol_sz);
 			apsta_db[apsta].M[4].eapol_size = 0;
 			remove_handshake(apsta, 4);
@@ -1430,12 +1440,14 @@ static int process_packet(uint32_t link_type)
 	int has_ht;
 	unsigned int tzsp_link = 0;
 
+	packet = full_packet;
+
 	if (filename != last_f || link_type != last_l) {
 		last_f = filename;
 		last_l = link_type;
 
 		if (link_type == LINKTYPE_IEEE802_11)
-			fprintf(stderr, "File %s: raw 802.11\n", filename);
+			fprintf(stderr, "File %s: Raw 802.11\n", filename);
 		else if (link_type == LINKTYPE_PRISM_HEADER)
 			fprintf(stderr, "File %s: Prism encapsulation\n", filename);
 		else if (link_type == LINKTYPE_RADIOTAP_HDR)
@@ -1443,8 +1455,6 @@ static int process_packet(uint32_t link_type)
 		else if (link_type == LINKTYPE_PPI_HDR)
 			fprintf(stderr, "File %s: PPI encapsulation\n", filename);
 		else if (link_type == LINKTYPE_ETHERNET) {
-			unsigned char *packet = full_packet;
-
 			if (snap_len > 47 &&
 			    packet[12] == 0x08 && packet[13] == 0x00 && // IPv4
 			    packet[23] == 17 && // UDP
@@ -1467,7 +1477,6 @@ static int process_packet(uint32_t link_type)
 		}
 	}
 
-	packet = full_packet;
 	pkt_num++;
 
 	/*
@@ -1746,7 +1755,7 @@ static int process_packet(uint32_t link_type)
 
 			if (eap->type == 0) {
 				if (snap_len < sizeof(eapext_t) + (has_qos ? 10 : 8)) {
-					fprintf(stderr, "%s: truncated packet\n", filename);
+					fprintf(stderr, "%s: Truncated packet\n", filename);
 					return 1;
 				}
 				if (eap->eaptype == EAP_TYPE_ID &&
@@ -1772,7 +1781,7 @@ static int process_packet(uint32_t link_type)
 				/* EAP key */
 				if (snap_len < sizeof(ieee802_1x_frame_hdr_t) +
 				    (has_qos ? 10 : 8)) {
-					fprintf(stderr, "%s: truncated packet\n", filename);
+					fprintf(stderr, "%s: Truncated packet\n", filename);
 				} else if (bssid)
 					handle4way((ieee802_1x_eapol_t*)p, bssid);
 				return 1;
@@ -1844,7 +1853,8 @@ void pcapng_option_walk(FILE *in, uint32_t tl)
 	while (1) {
 		res = fread(&opthdr, 1, OH_SIZE, in);
 		if (res != OH_SIZE) {
-			fprintf(stderr, "Malformed data in %s\n", filename);
+			fprintf(stderr, "%s: %s\n", filename,
+			        feof(in) ? "EOF" : strerror(errno));
 			break;
 		}
 		if (opthdr.option_code == 0) {
@@ -1877,7 +1887,7 @@ void pcapng_option_walk(FILE *in, uint32_t tl)
 				break;
 		} else {
 			// Just skip unknown options
-			fseek(in, pad_len, SEEK_CUR);
+			fseek_chk(in, pad_len, SEEK_CUR);
 		}
 	}
 }
@@ -1887,182 +1897,205 @@ static int process_ng(FILE *in)
 	unsigned int res;
 	int aktseek;
 
-	block_header_t pcapngbh;
-	section_header_block_t pcapngshb;
-	interface_description_block_t pcapngidb;
-	packet_block_t pcapngpb;
-	enhanced_packet_block_t pcapngepb;
-
 	while (1) {
-		res = fread(&pcapngbh, 1, BH_SIZE, in);
+		block_header_t pcapng_bh;
+		interface_description_block_t pcapng_idb;
+
+		res = fread(&pcapng_bh, 1, BH_SIZE, in);
 		if (res == 0) {
 			break;
 		}
 		if (res != BH_SIZE) {
-			printf("failed to read pcapng header block\n");
+			fprintf(stderr, "%s: Failed to read pcap-ng header block: %s\n",
+			       filename, strerror(errno));
 			break;
 		}
-		if (pcapngbh.block_type == PCAPNGBLOCKTYPE) {
-			res = fread(&pcapngshb, 1, SHB_SIZE, in);
+
+		if (verbosity >= 4)
+			fprintf(stderr, "pcap-ng block type %u\n", pcapng_bh.block_type);
+
+		/* SHB, Section Header Block */
+		if (pcapng_bh.block_type == PCAPNGBLOCKTYPE) {
+			section_header_block_t pcapng_shb;
+
+			res = fread(&pcapng_shb, 1, SHB_SIZE, in);
 			if (res != SHB_SIZE) {
-				printf("failed to read pcapng section header block\n");
+				fprintf(stderr, "%s: Failed to read pcap-ng SHB: %s\n",
+				       filename, feof(in) ? "EOF" : strerror(errno));
 				break;
 			}
-#if !ARCH_LITTLE_ENDIAN
-			pcapngbh.total_length = swap32u(pcapngbh.total_length);
-			pcapngshb.byte_order_magic	= swap32u(pcapngshb.byte_order_magic);
-			pcapngshb.major_version		= swap16u(pcapngshb.major_version);
-			pcapngshb.minor_version		= swap16u(pcapngshb.minor_version);
-			pcapngshb.section_length	= swap64u(pcapngshb.section_length);
-#endif
-			if (pcapngshb.byte_order_magic == PCAPNGMAGICNUMBERBE) {
-				swap_needed = 1;
-				pcapngbh.total_length = swap32u(pcapngbh.total_length);
-				pcapngshb.byte_order_magic	= swap32u(pcapngshb.byte_order_magic);
-				pcapngshb.major_version		= swap16u(pcapngshb.major_version);
-				pcapngshb.minor_version		= swap16u(pcapngshb.minor_version);
-				pcapngshb.section_length	= swap64u(pcapngshb.section_length);
+
+			swap_needed = (pcapng_shb.byte_order_magic == PCAPNGMAGICNUMBERBE);
+			swap_needed ^= !ARCH_LITTLE_ENDIAN;
+
+			if (swap_needed) {
+				pcapng_bh.block_type        = swap32u(pcapng_bh.block_type);
+				pcapng_bh.total_length      = swap32u(pcapng_bh.total_length);
+				pcapng_shb.byte_order_magic = swap32u(pcapng_shb.byte_order_magic);
+				pcapng_shb.major_version	= swap16u(pcapng_shb.major_version);
+				pcapng_shb.minor_version	= swap16u(pcapng_shb.minor_version);
+				pcapng_shb.section_length	= swap64u(pcapng_shb.section_length);
 			}
+
 			aktseek = ftell(in);
-			if (pcapngbh.total_length > (SHB_SIZE + BH_SIZE + 4)) {
-				pcapng_option_walk(in, pcapngbh.total_length);
+			if (pcapng_bh.total_length > (SHB_SIZE + BH_SIZE + 4)) {
+				pcapng_option_walk(in, pcapng_bh.total_length);
 			}
-			fseek(in, aktseek + pcapngbh.total_length - BH_SIZE - SHB_SIZE, SEEK_SET);
-			continue;
-		}
-#if !ARCH_LITTLE_ENDIAN
-		pcapngbh.block_type = swap32u(pcapngbh.block_type);
-		pcapngbh.total_length = swap32u(pcapngbh.total_length);
-#endif
-		if (swap_needed == 1) {
-			pcapngbh.block_type = swap32u(pcapngbh.block_type);
-			pcapngbh.total_length = swap32u(pcapngbh.total_length);
+
+			memset(&pcapng_idb, 0, sizeof(pcapng_idb));
+
+			fseek_chk(in, aktseek + pcapng_bh.total_length - BH_SIZE - SHB_SIZE, SEEK_SET);
 		}
 
-		if (pcapngbh.block_type == 1) {
-			res = fread(&pcapngidb, 1, IDB_SIZE, in);
+		/* IDB, Interface Description Block */
+		else if (pcapng_bh.block_type == 1) {
+			res = fread(&pcapng_idb, 1, IDB_SIZE, in);
 			if (res != IDB_SIZE) {
-				printf("failed to get pcapng interface description block\n");
+				fprintf(stderr, "%s: Failed to get pcap-ng IDB: %s\n",
+				       filename, feof(in) ? "EOF" : strerror(errno));
 				break;
 			}
-#if !ARCH_LITTLE_ENDIAN
-			pcapngidb.linktype	= swap16u(pcapngidb.linktype);
-			pcapngidb.snaplen	= swap32u(pcapngidb.snaplen);
-#endif
-			if (swap_needed == 1) {
-				pcapngidb.linktype	= swap16u(pcapngidb.linktype);
-				pcapngidb.snaplen	= swap32u(pcapngidb.snaplen);
+			if (swap_needed) {
+				pcapng_idb.linktype = swap16u(pcapng_idb.linktype);
+				pcapng_idb.snaplen  = swap32u(pcapng_idb.snaplen);
 			}
 
-			fseek(in, pcapngbh.total_length - BH_SIZE - IDB_SIZE, SEEK_CUR);
+			fseek_chk(in, pcapng_bh.total_length - BH_SIZE - IDB_SIZE, SEEK_CUR);
 		}
 
-		else if (pcapngbh.block_type == 2) {
-			res = fread(&pcapngpb, 1, PB_SIZE, in);
+		/* PB, Packet Block (deprecated) */
+		else if (pcapng_bh.block_type == 2) {
+			packet_block_t pcapng_pb;
+
+			res = fread(&pcapng_pb, 1, PB_SIZE, in);
 			if (res != PB_SIZE) {
-				printf("failed to get pcapng packet block (obsolete)\n");
+				fprintf(stderr, "%s: Failed to get pcap-ng PB: %s\n",
+				       filename, feof(in) ? "EOF" : strerror(errno));
 				break;
 			}
-#if !ARCH_LITTLE_ENDIAN
-			pcapngpb.interface_id	= swap16u(pcapngpb.interface_id);
-			pcapngpb.drops_count	= swap16u(pcapngpb.drops_count);
-			pcapngpb.timestamp_high	= swap32u(pcapngpb.timestamp_high);
-			pcapngpb.timestamp_low	= swap32u(pcapngpb.timestamp_low);
-			pcapngpb.caplen		= swap32u(pcapngpb.caplen);
-			pcapngpb.len		= swap32u(pcapngpb.len);
-#endif
-			if (swap_needed == 1) {
-				pcapngpb.interface_id	= swap16u(pcapngpb.interface_id);
-				pcapngpb.drops_count	= swap16u(pcapngpb.drops_count);
-				pcapngpb.timestamp_high	= swap32u(pcapngpb.timestamp_high);
-				pcapngpb.timestamp_low	= swap32u(pcapngpb.timestamp_low);
-				pcapngpb.caplen		= swap32u(pcapngpb.caplen);
-				pcapngpb.len		= swap32u(pcapngpb.len);
+			if (swap_needed) {
+				pcapng_pb.interface_id   = swap16u(pcapng_pb.interface_id);
+				pcapng_pb.drops_count    = swap16u(pcapng_pb.drops_count);
+				pcapng_pb.timestamp_high = swap32u(pcapng_pb.timestamp_high);
+				pcapng_pb.timestamp_low  = swap32u(pcapng_pb.timestamp_low);
+				pcapng_pb.caplen         = swap32u(pcapng_pb.caplen);
+				pcapng_pb.len            = swap32u(pcapng_pb.len);
 			}
 
-			if ((pcapngpb.timestamp_high == 0) &&
-			    (pcapngpb.timestamp_low == 0) && !warn_wpaclean++)
+			if ((pcapng_pb.timestamp_high == 0) &&
+			    (pcapng_pb.timestamp_low == 0) && !warn_wpaclean++)
 				fprintf(stderr,
 "**\n** Warning: %s seems to be processed with some dubious tool like\n"
 "** 'wpaclean'. Important information may be lost.\n**\n", filename);
 
 			MEM_FREE(full_packet);
-			safe_malloc(full_packet, pcapngpb.caplen);
-			res = fread(full_packet, 1, pcapngpb.caplen, in);
-			if (res != pcapngpb.caplen) {
-				printf("failed to read packet: %s truncated?\n", filename);
+			safe_malloc(full_packet, pcapng_pb.caplen);
+			res = fread(full_packet, 1, pcapng_pb.caplen, in);
+			if (res != pcapng_pb.caplen) {
+				fprintf(stderr, "%s: Failed to read packet: %s\n",
+				        filename, feof(in) ? "EOF" : strerror(errno));
 				break;
 			}
-			fseek(in, pcapngbh.total_length - BH_SIZE - PB_SIZE - pcapngpb.caplen, SEEK_CUR);
+			fseek_chk(in, pcapng_bh.total_length - BH_SIZE - PB_SIZE - pcapng_pb.caplen, SEEK_CUR);
+
+			if (pcapng_pb.caplen > 0) {
+				snap_len = pcapng_pb.caplen;
+				orig_len = pcapng_pb.len;
+				abs_ts64 = (((uint64_t)pcapng_pb.timestamp_high << 32) +
+				            pcapng_pb.timestamp_low);
+				if (!start_ts64)
+					start_ts64 = abs_ts64;
+				cur_ts64 = abs_ts64 - start_ts64;
+				if (!process_packet(pcapng_idb.linktype))
+					break;
+			}
+		}
+
+		/* SPB, Simple Packet Block (legacy/limited) */
+		else if (pcapng_bh.block_type == 3) {
+			simple_packet_block_t pcapng_spb;
+
+			res = fread(&pcapng_spb, 1, SPB_SIZE, in);
+			if (res != SPB_SIZE) {
+				fprintf(stderr, "%s: Failed to read pcap-ng SPB: %s\n",
+				       filename, feof(in) ? "EOF" : strerror(errno));
+				break;
+			}
+			if (swap_needed) {
+				pcapng_spb.len = swap32u(pcapng_spb.len);
+			}
 
 			MEM_FREE(full_packet);
-			safe_malloc(full_packet, pcapngpb.caplen);
-			res = fread(full_packet, 1, pcapngpb.caplen, in);
-			if (res != pcapngpb.caplen) {
-				printf("failed to read packet: %s truncated?\n", filename);
+			safe_malloc(full_packet, pcapng_spb.len);
+			res = fread(full_packet, 1, pcapng_spb.len, in);
+			if (res != pcapng_spb.len) {
+				fprintf(stderr, "%s: Failed to read packet: %s\n",
+				        filename, feof(in) ? "EOF" : strerror(errno));
 				break;
 			}
+			fseek_chk(in, pcapng_bh.total_length - BH_SIZE - SPB_SIZE - pcapng_spb.len, SEEK_CUR);
 
-			fseek(in, pcapngbh.total_length - BH_SIZE - PB_SIZE - pcapngpb.caplen, SEEK_CUR);
+			if (pcapng_spb.len > 0) {
+				snap_len = pcapng_spb.len;
+				orig_len = pcapng_spb.len;
+				abs_ts64 = cur_ts64 = 0;
+				if (!process_packet(pcapng_idb.linktype))
+					break;
+			}
 		}
 
-		else if (pcapngbh.block_type == 3) {
-			fseek(in, pcapngbh.total_length - BH_SIZE, SEEK_CUR);
-		}
+		/* EPB, Enhanced Packet Block */
+		else if (pcapng_bh.block_type == 6) {
+			enhanced_packet_block_t pcapng_epb;
 
-		else if (pcapngbh.block_type == 4) {
-			fseek(in, pcapngbh.total_length - BH_SIZE, SEEK_CUR);
-		}
-
-		else if (pcapngbh.block_type == 5) {
-			fseek(in, pcapngbh.total_length - BH_SIZE, SEEK_CUR);
-		}
-
-		else if (pcapngbh.block_type == 6) {
-			res = fread(&pcapngepb, 1, EPB_SIZE, in);
+			res = fread(&pcapng_epb, 1, EPB_SIZE, in);
 			if (res != EPB_SIZE) {
-				printf("failed to get pcapng enhanced packet block\n");
+				fprintf(stderr, "%s: Failed to get pcap-ng EPB: %s\n",
+				       filename, feof(in) ? "EOF" : strerror(errno));
 				break;
 			}
-#if !ARCH_LITTLE_ENDIAN
-			pcapngepb.interface_id		= swap32u(pcapngepb.interface_id);
-			pcapngepb.timestamp_high	= swap32u(pcapngepb.timestamp_high);
-			pcapngepb.timestamp_low		= swap32u(pcapngepb.timestamp_low);
-			pcapngepb.caplen		= swap32u(pcapngepb.caplen);
-			pcapngepb.len			= swap32u(pcapngepb.len);
-#endif
-			if (swap_needed == 1) {
-				pcapngepb.interface_id		= swap32u(pcapngepb.interface_id);
-				pcapngepb.timestamp_high	= swap32u(pcapngepb.timestamp_high);
-				pcapngepb.timestamp_low		= swap32u(pcapngepb.timestamp_low);
-				pcapngepb.caplen		= swap32u(pcapngepb.caplen);
-				pcapngepb.len			= swap32u(pcapngepb.len);
+
+			if (swap_needed) {
+				pcapng_epb.interface_id   = swap32u(pcapng_epb.interface_id);
+				pcapng_epb.timestamp_high = swap32u(pcapng_epb.timestamp_high);
+				pcapng_epb.timestamp_low  = swap32u(pcapng_epb.timestamp_low);
+				pcapng_epb.caplen         = swap32u(pcapng_epb.caplen);
+				pcapng_epb.len            = swap32u(pcapng_epb.len);
 			}
 
 			MEM_FREE(full_packet);
-			safe_malloc(full_packet, pcapngepb.caplen);
-			res = fread(full_packet, 1, pcapngepb.caplen, in);
-			if (res != pcapngepb.caplen) {
-				printf("failed to read packet: %s truncated?\n", filename);
+			safe_malloc(full_packet, pcapng_epb.caplen);
+			res = fread(full_packet, 1, pcapng_epb.caplen, in);
+			if (res != pcapng_epb.caplen) {
+				fprintf(stderr, "%s: Failed to read packet: %s\n",
+				        filename, feof(in) ? "EOF" : strerror(errno));
 				break;
 			}
-			fseek(in, pcapngbh.total_length - BH_SIZE - EPB_SIZE - pcapngepb.caplen, SEEK_CUR);
-		} else {
-			fseek(in, pcapngbh.total_length - BH_SIZE, SEEK_CUR);
+			fseek_chk(in, pcapng_bh.total_length - BH_SIZE - EPB_SIZE - pcapng_epb.caplen, SEEK_CUR);
+
+			if (pcapng_epb.caplen > 0) {
+				snap_len = pcapng_epb.caplen;
+				orig_len = pcapng_epb.len;
+				// FIXME: Honor if_tsresol from Interface Description Block
+				abs_ts64 = (((uint64_t)pcapng_epb.timestamp_high << 32) +
+				            pcapng_epb.timestamp_low);
+				if (!start_ts64)
+					start_ts64 = abs_ts64;
+				cur_ts64 = abs_ts64 - start_ts64;
+				if (!process_packet(pcapng_idb.linktype))
+					break;
+			}
 		}
-		if (pcapngepb.caplen > 0) {
-			snap_len = pcapngepb.caplen;
-			orig_len = pcapngepb.len;
-			// FIXME: Honor if_tsresol from Interface Description Block
-			abs_ts64 = (((uint64_t)pcapngepb.timestamp_high << 32) +
-			              pcapngepb.timestamp_low);
-			if (!start_ts64)
-				start_ts64 = abs_ts64;
-			cur_ts64 = abs_ts64 - start_ts64;
-			if (!process_packet(pcapngidb.linktype))
-				break;
+
+		/* Skip any other block type */
+		else {
+			if (verbosity >= 4)
+				fprintf(stderr, "Skipping (unhandled block type)\n");
+
+			fseek_chk(in, pcapng_bh.total_length - BH_SIZE, SEEK_CUR);
 		}
 	}
+
 	if (verbosity >= 2)
 		fprintf(stderr, "File %s: End of data\n", filename);
 	dump_late();
@@ -2074,12 +2107,17 @@ static int get_next_packet(FILE *in)
 	size_t read_size;
 	pcaprec_hdr_t pkt_hdr;
 
-	if (fread(&pkt_hdr, 1, sizeof(pkt_hdr), in) != sizeof(pkt_hdr))
+	if (fread(&pkt_hdr, sizeof(pkt_hdr), 1, in) != 1) {
+		if (feof(in))
+			return 0;
+		fprintf(stderr, "%s: Failed to read packet: %s\n",
+		        filename, strerror(errno));
 		return 0;
+	}
 
 	if (swap_needed) {
-		pkt_hdr.ts_sec = swap32u(pkt_hdr.ts_sec);
-		pkt_hdr.ts_usec = swap32u(pkt_hdr.ts_usec);
+		pkt_hdr.ts_sec   = swap32u(pkt_hdr.ts_sec);
+		pkt_hdr.ts_usec  = swap32u(pkt_hdr.ts_usec);
 		pkt_hdr.snap_len = swap32u(pkt_hdr.snap_len);
 		pkt_hdr.orig_len = swap32u(pkt_hdr.orig_len);
 	}
@@ -2108,7 +2146,8 @@ static int get_next_packet(FILE *in)
 	safe_malloc(full_packet, snap_len);
 	read_size = fread(full_packet, 1, snap_len, in);
 	if (verbosity && read_size < snap_len)
-		fprintf(stderr, "%s: truncated last packet\n", filename);
+		fprintf(stderr, "%s: Truncated last packet (%s)\n",
+		        filename, feof(in) ? "EOF" : strerror(errno));
 
 	return (read_size == snap_len);
 }
@@ -2118,9 +2157,7 @@ static int process(FILE *in)
 	pcap_hdr_t main_hdr;
 
 	if (fread(&main_hdr, 1, sizeof(pcap_hdr_t), in) != sizeof(pcap_hdr_t)) {
-		fprintf(stderr,
-			"%s: Error, could not read enough bytes to get a common 'main' pcap header\n",
-			filename);
+		fprintf(stderr, "%s: %s\n", filename, feof(in) ? "EOF" : strerror(errno));
 		return 0;
 	}
 	if (main_hdr.magic_number == 0xa1b2c3d4)
@@ -2128,23 +2165,25 @@ static int process(FILE *in)
 	else if (main_hdr.magic_number == 0xd4c3b2a1)
 		swap_needed = 1;
 	else if (main_hdr.magic_number == PCAPNGBLOCKTYPE) {
-		fseek(in, 0, SEEK_SET);
+		fseek_chk(in, 0, SEEK_SET);
 		return process_ng(in);
 	} else {
 		if (convert_ivs2(in)) {
-			fprintf(stderr, "%s: unknown file. Supported formats are pcap, pcap-ng and ivs2.\n", filename);
+			fprintf(stderr, "%s: Unknown file. Supported formats are pcap, pcap-ng and ivs2.\n", filename);
 			return 0;
 		}
 		return 1;
 	}
 
+	swap_needed ^= !ARCH_LITTLE_ENDIAN;
+
 	if (swap_needed) {
-		main_hdr.magic_number = swap32u(main_hdr.magic_number);
+		main_hdr.magic_number  = swap32u(main_hdr.magic_number);
 		main_hdr.version_major = swap16u(main_hdr.version_major);
 		main_hdr.version_minor = swap16u(main_hdr.version_minor);
-		main_hdr.sigfigs = swap32u(main_hdr.sigfigs);
-		main_hdr.snaplen = swap32u(main_hdr.snaplen);
-		main_hdr.network = swap32u(main_hdr.network);
+		main_hdr.sigfigs       = swap32u(main_hdr.sigfigs);
+		main_hdr.snaplen       = swap32u(main_hdr.snaplen);
+		main_hdr.network       = swap32u(main_hdr.network);
 	}
 
 

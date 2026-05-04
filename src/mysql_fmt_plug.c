@@ -77,11 +77,13 @@ static struct fmt_tests tests[] = {
 	{"1b38cd9c2f809809", "hacktivity2008"},
 	{"1b38cd9c2f809809", "hacktivity 2008"},
 	{"6fc81597422015a8", "johnmodule"},
-	{"30f098972cc8924d", "http://guh.nu"},
 	{"3fc56f6037218993", "Andrew Hintz"},
 	{"697a7de87c5390b2", "drew"},
+#if defined(WITH_ASAN) || defined(DEBUG)
+	{"30f098972cc8924d", "http://guh.nu"},
 	{"1eb71cf460712b3e", "http://4tphi.net"},
 	{"28ff8d49159ffbaf", "http://violating.us"},
+#endif
 	{"5d2e19393cc5ef67", "password"},
 	{"5030573512345671", ""},
 	{"723d80f65bf9d670", "UPPERCASE"},

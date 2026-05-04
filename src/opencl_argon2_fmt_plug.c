@@ -55,7 +55,7 @@ john_register_one(&fmt_opencl_keepass_argon2);
 
 #define BENCHMARK_COMMENT       ""
 #define BENCHMARK_LENGTH        0x107
-#define PLAINTEXT_LENGTH        125
+#define PLAINTEXT_LENGTH        MAX_PLAINTEXT_LENGTH
 #define BINARY_SIZE             256
 #define BINARY_ALIGN            sizeof(uint32_t)
 #define SALT_SIZE               64
@@ -983,20 +983,21 @@ static void set_salt(void *salt)
 static void kp_set_salt(void *salt)
 {
 	keepass_salt = *((keepass_salt_t**)salt);
+	size_t cur_salt_size = sizeof(keepass_salt_t) + keepass_salt->content_size - 1;
 
 	// The KeePass salt is dynamic size, but starts off with a plain
 	// Argon2 salt after the dyna_salt_t header
 	memcpy(&saved_salt, &keepass_salt->t_cost, sizeof(struct argon2_salt));
 
-	if (sizeof(keepass_salt_t) + keepass_salt->content_size - 1 > keepass_saltsize) {
+	if (cur_salt_size > keepass_saltsize) {
 		CLRELEASEBUFFER(cl_keepass_salt);
-		keepass_saltsize = sizeof(keepass_salt_t) + keepass_salt->content_size - 1;
+		keepass_saltsize = cur_salt_size;
 		CLCREATEBUFFER(cl_keepass_salt, CL_RO, keepass_saltsize);
 		CLKERNELARG(keepass_init, 1, cl_keepass_salt);
 		//CLKERNELARG(keepass_argon2, 1, cl_keepass_salt);
 		CLKERNELARG(keepass_final, 1, cl_keepass_salt);
 	}
-	CLWRITE(cl_keepass_salt, CL_FALSE, 0, keepass_saltsize, keepass_salt, NULL);
+	CLWRITE(cl_keepass_salt, CL_FALSE, 0, cur_salt_size, keepass_salt, NULL);
 	HANDLE_CLERROR(clFlush(queue[gpu_id]), "clFlush failed in keepass_set_salt()");
 }
 
@@ -1344,5 +1345,5 @@ struct fmt_main fmt_opencl_keepass_argon2 = {
 	}
 };
 
-#endif	/* FMT_EXTERNS_H */
+#endif	/* plugin stanza */
 #endif	/* HAVE_OPENCL */

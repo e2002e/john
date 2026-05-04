@@ -86,6 +86,12 @@ typedef struct dyna_salt_t {
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #endif
 
+#define LWS         get_local_size(0)
+#define THREAD      get_local_id(0)
+
+/* Host side always pass -DWARP_SIZE (after some heuristics) */
+#define WARP_MASK   (WARP_SIZE - 1)
+
 /*
  * Host code may pass -DV_WIDTH=2 or some other width.
  */
@@ -129,33 +135,55 @@ INLINE uint lut3(uint x, uint y, uint z, uchar m)
 #define HAVE_ANDNOT 1
 #endif
 
+/*
+ * This affects all our inline PTX for nvidia. Try defining to
+ * "volatile" for tracking down problems.
+ */
+#define ASM_VOLATILE
+
+#if 0 //SCALAR && gpu_nvidia(DEVICE_INFO)
+/*
+ * This ensures a ulong lives in a paired 64-bit virtual register.
+ */
+inline ulong mov_b64(ulong x)
+{
+    ulong y;
+    asm ASM_VOLATILE ("mov.b64 %0, %1;" : "=l"(y) : "l"(x));
+    return y;
+}
+#else
+#define mov_b64(x)	(x)
+#endif
+
 #if SCALAR && SM_MAJOR >= 5 && (DEV_VER_MAJOR > 352 || (DEV_VER_MAJOR == 352 && DEV_VER_MINOR >= 21))
 #define HAVE_LUT3	1
-INLINE uint lut3(uint a, uint b, uint c, uint imm)
+INLINE uint lut3(uint a, uint b, uint c, uchar imm)
 {
 	uint r;
-	asm("lop3.b32 %0, %1, %2, %3, %4;"
-	    : "=r" (r)
-	    : "r" (a), "r" (b), "r" (c), "i" (imm));
+	asm ASM_VOLATILE ("lop3.b32 %0, %1, %2, %3, %4;"
+	                  : "=r"(r)
+	                  : "r"(a), "r"(b), "r"(c), "n"(imm));
 	return r;
 }
 
-#if 0 /* This does no good */
 #define HAVE_LUT3_64	1
-INLINE ulong lut3_64(ulong a, ulong b, ulong c, uint imm)
+INLINE ulong lut3_64(ulong a, ulong b, ulong c, uchar imm)
 {
-	ulong t, r;
+	uint alo = (uint)a, ahi = (uint)(a >> 32);
+	uint blo = (uint)b, bhi = (uint)(b >> 32);
+	uint clo = (uint)c, chi = (uint)(c >> 32);
 
-	asm("lop3.b32 %0, %1, %2, %3, %4;"
-	    : "=r" (t)
-	    : "r" ((uint)a), "r" ((uint)b), "r" ((uint)c), "i" (imm));
-	r = t;
-	asm("lop3.b32 %0, %1, %2, %3, %4;"
-	    : "=r" (t)
-	    : "r" ((uint)(a >> 32)), "r" ((uint)(b >> 32)), "r" ((uint)(c >> 32)), "i" (imm));
-	return r + (t << 32);
+	uint rlo, rhi;
+	asm ASM_VOLATILE ("lop3.b32 %0, %1, %2, %3, %4;"
+	                  : "=r"(rlo)
+	                  : "r"(alo), "r"(blo), "r"(clo), "n"(imm));
+
+	asm ASM_VOLATILE ("lop3.b32 %0, %1, %2, %3, %4;"
+	                  : "=r"(rhi)
+	                  : "r"(ahi), "r"(bhi), "r"(chi), "n"(imm));
+
+	return mov_b64(((ulong)rhi << 32) | rlo);
 }
-#endif
 #endif
 
 #if defined cl_amd_media_ops && !__MESA__ && gpu_amd(DEVICE_INFO)
@@ -165,18 +193,18 @@ INLINE ulong lut3_64(ulong a, ulong b, ulong c, uint imm)
 INLINE uint funnel_shift_right(uint hi, uint lo, uint s)
 {
 	uint r;
-	asm("shf.r.wrap.b32 %0, %1, %2, %3;"
-	    : "=r" (r)
-	    : "r" (lo), "r" (hi), "r" (s));
+	asm ASM_VOLATILE ("shf.r.wrap.b32 %0, %1, %2, %3;"
+	                  : "=r"(r)
+	                  : "r"(lo), "r"(hi), "r"(s));
 	return r;
 }
 
-INLINE uint funnel_shift_right_imm(uint hi, uint lo, uint s)
+INLINE uint funnel_shift_right_imm(uint hi, uint lo, uchar s)
 {
 	uint r;
-	asm("shf.r.wrap.b32 %0, %1, %2, %3;"
-	    : "=r" (r)
-	    : "r" (lo), "r" (hi), "i" (s));
+	asm ASM_VOLATILE ("shf.r.wrap.b32 %0, %1, %2, %3;"
+	                  : "=r"(r)
+	                  : "r"(lo), "r"(hi), "n"(s));
 	return r;
 }
 #define BITALIGN(hi, lo, s) funnel_shift_right(hi, lo, s)
@@ -201,8 +229,11 @@ INLINE uint funnel_shift_right_imm(uint hi, uint lo, uint s)
 #endif
 #endif
 
-#define block_swap32(W, len)	for (uint i = 0; i < len; i++) W[i] = SWAP32(W[i])
-#define block_swap64(W, len)	for (uint i = 0; i < len; i++) W[i] = SWAP64(W[i])
+#define block_swap32(W, LEN)	  \
+	do { for (uint i_ = 0; i_ < (LEN); i_++) (W)[i_] = SWAP32((W)[i_]); } while (0)
+
+#define block_swap64(W, LEN)	  \
+	do { for (uint i_ = 0; i_ < (LEN); i_++) (W)[i_] = SWAP64((W)[i_]); } while (0)
 
 INLINE ushort SWAP16(ushort x)
 {
@@ -324,7 +355,6 @@ INLINE MAYBE_VECTOR_UINT VSWAP32(MAYBE_VECTOR_UINT x)
  */
 #if gpu_nvidia(DEVICE_INFO)
 #define ALLOW_ALIASING_VIOLATIONS	1
-#if __ENDIAN_LITTLE__
 #define GET_UINT32_ALIGNED(n, b, i)	(n) = ((uint*)(b))[(i) >> 2]
 #define PUT_UINT32_ALIGNED(n, b, i)	((uint*)(b))[(i) >> 2] = (n)
 #define GET_UINT32BE_ALIGNED(n, b, i)	(n) = SWAP32(((uint*)(b))[(i) >> 2])
@@ -332,15 +362,6 @@ INLINE MAYBE_VECTOR_UINT VSWAP32(MAYBE_VECTOR_UINT x)
 #define PUT_UINT64_ALIGNED(n, b, i)	((ulong*)(b))[(i) >> 3] = (n)
 #define GET_UINT64BE_ALIGNED(n, b, i)	(n) = SWAP64(((ulong*)(b))[(i) >> 3])
 #define PUT_UINT64BE_ALIGNED(n, b, i)	((ulong*)(b))[(i) >> 3] = SWAP64(n)
-#else
-#define GET_UINT32_ALIGNED(n, b, i)	(n) = SWAP32(((uint*)(b))[(i) >> 2])
-#define PUT_UINT32_ALIGNED(n, b, i)	((uint*)(b))[(i) >> 2] = SWAP32(n)
-#define GET_UINT32BE_ALIGNED(n, b, i)	(n) = ((uint*)(b))[(i) >> 2]
-#define PUT_UINT32BE_ALIGNED(n, b, i)	((uint*)(b))[(i) >> 2] = (n)
-#define PUT_UINT64_ALIGNED(n, b, i)	((ulong*)(b))[(i) >> 3] = SWAP64(n)
-#define GET_UINT64BE_ALIGNED(n, b, i)	(n) = ((ulong*)(b))[(i) >> 3]
-#define PUT_UINT64BE_ALIGNED(n, b, i)	((ulong*)(b))[(i) >> 3] = (n)
-#endif
 #endif
 
 /* Any device can do 8-bit reads BUT these macros are scalar only! */
@@ -412,9 +433,9 @@ INLINE int check_pkcs_pad(const uchar *data, int len, int blocksize)
  * If src and dst are different size types, you will get what you asked for...
  */
 #define memcpy_macro(dst, src, count) do {	  \
-		uint _memcpy_c = count; \
-		for (uint _memcpy_i = 0; _memcpy_i < _memcpy_c; _memcpy_i++) \
-			(dst)[_memcpy_i] = (src)[_memcpy_i]; \
+		uint count_ = count; \
+		for (uint i_ = 0; i_ < count_; i_++) \
+			(dst)[i_] = (src)[i_]; \
 	} while (0)
 
 /*
@@ -595,20 +616,21 @@ INLINE int memmem_pc(const void *haystack, size_t haystack_len,
 #define STRINGIZE(s) STRINGIZE2(s)
 
 /*
- * The below macros need to be called with pointer already cast to
- * uchar pointer of its type - such as "(__constant uchar*)salt->u"
- * because type is unknown to us so void* can't help us.
+ * The below macros need to be called with pointer already cast to uchar
+ * pointer of its memory type - such as "(__constant uchar*)salt->u"
+ * because the memory type is unknown to us so void* can't help us.
  */
 
+#define dump(x) dump_stuff_msg(STRINGIZE(x), x, sizeof(x))
 #define dump_le(x, size) dump_stuff_msg(STRINGIZE(x), x, size)
 #define dump_be(x, size) dump_stuff_be_msg(STRINGIZE(x), x, size)
 #define dump_be64(x, size) dump_stuff_be64_msg(STRINGIZE(x), x, size)
 
 #define dump_stuff_msg(msg, x, size) do {	  \
 		printf("%s : ", msg); \
-		for (uint xedni_ = 0; xedni_ < (uint)size; xedni_++) { \
-			printf("%02x", (x)[xedni_]); \
-			if (xedni_ % 4 == 3) \
+		for (uint i_ = 0; i_ < (uint)(size); i_++) { \
+			printf("%02x", (x)[i_]); \
+			if (i_ % 4 == 3) \
 				printf(" "); \
 		} \
 		printf("\n"); \
@@ -616,9 +638,9 @@ INLINE int memmem_pc(const void *haystack, size_t haystack_len,
 
 #define dump_stuff_be_msg(msg, x, size) do {	  \
 		printf("%s : ", msg); \
-		for (uint xedni_ = 0; xedni_ < (uint)size; xedni_++) { \
-			printf("%02x", (x)[xedni_ ^ 3]); \
-			if (xedni_ % 4 == 3) \
+		for (uint i_ = 0; i_ < (uint)(size); i_++) { \
+			printf("%02x", (x)[i_ ^ 3]); \
+			if (i_ % 4 == 3) \
 				printf(" "); \
 		} \
 		printf("\n"); \
@@ -626,9 +648,9 @@ INLINE int memmem_pc(const void *haystack, size_t haystack_len,
 
 #define dump_stuff_be64_msg(msg, x, size) do {	  \
 		printf("%s : ", msg); \
-		for (uint xedni_ = 0; xedni_ < (uint)size; xedni_++) { \
-			printf("%02x", (x)[xedni_ ^ 7]); \
-			if (xedni_ % 4 == 3) \
+		for (uint i_ = 0; i_ < (uint)(size); i_++) { \
+			printf("%02x", (x)[i_ ^ 7]); \
+			if (i_ % 4 == 3) \
 				printf(" "); \
 		} \
 		printf("\n"); \

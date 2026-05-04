@@ -46,7 +46,7 @@ john_register_one(&fmt_gost12256hash);
 #define ALGORITHM_NAME          "GOST R 34.11-2012 " ARCH_BITS_STR "/" ARCH_BITS_STR
 #endif
 
-#define PLAINTEXT_LENGTH        125
+#define PLAINTEXT_LENGTH        MAX_PLAINTEXT_LENGTH
 
 #define SALT_SIZE               sizeof(struct saltstruct)
 
@@ -258,7 +258,8 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		/* Start computation of S byte sequence. */
 		GOST34112012Init(&alt_ctx, 256);
 
-		/* For every character in the password add the entire password. */
+		/* Repeat the following 16+A[0] times, where A[0] represents the
+		   first byte in digest A interpreted as an 8-bit unsigned value */
 		for (cnt = 0; cnt < 16 + ((unsigned char*)crypt_out[index])[0]; ++cnt)
 			GOST34112012Update(&alt_ctx, cur_salt->salt, cur_salt->len);
 

@@ -36,10 +36,6 @@ static void create_clobj(size_t gws, struct fmt_main *self);
 static void release_clobj(void);
 
 /* ------- Externals ------- */
-/* Can be used to select a 'good' default gws size */
-size_t autotune_get_task_max_size(int multiplier, int keys_per_core_cpu,
-	int keys_per_core_gpu, cl_kernel crypt_kernel);
-
 /* Can be used to select a 'good' default lws size */
 size_t autotune_get_task_max_work_group_size(int use_local_memory,
 	int local_memory_size, cl_kernel crypt_kernel);
@@ -112,10 +108,12 @@ static void autotune_run_extra(struct fmt_main *self, unsigned int rounds,
 	if (options.flags & FLG_SHOW_CHK)
 		return;
 
-	// FIXME add optional test-same-sizes
 	if (self_test_running) {
-		local_work_size = 7;
-		global_work_size = 49;
+		if (cpu(device_info[gpu_id]))
+			local_work_size = get_platform_vendor_id(platform_id) == DEV_INTEL ? 8 : 1;
+		else
+			local_work_size = get_device_max_lws(gpu_id);
+		global_work_size = local_work_size;
 	}
 
 	ocl_autotune_running = 1;
@@ -150,9 +148,10 @@ static void autotune_run_extra(struct fmt_main *self, unsigned int rounds,
 			break;
 
 		case 1:
-			// Set from OpenCL query (warp size)
+			// Set from OpenCL query (kernel max. vs. preferred multiple)
 			local_work_size =
-				get_kernel_preferred_multiple(gpu_id, crypt_kernel);
+				GET_EXACT_MULTIPLE(get_task_max_work_group_size(),
+					get_kernel_preferred_multiple(gpu_id, crypt_kernel));
 			break;
 
 		default:

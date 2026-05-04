@@ -215,6 +215,7 @@ cl_uint get_max_compute_units(int sequential_id);
 cl_uint get_processors_count(int sequential_id);
 cl_uint get_processor_family(int sequential_id);
 char* get_device_name_(int sequential_id);
+uint32_t get_device_warp_size(int sequential_id);
 
 /* Vendor id for hardware */
 int get_vendor_id(int sequential_id);
@@ -253,10 +254,12 @@ void opencl_process_event(void);
 					NODE, get_error_name(__err), __FILE__, __LINE__, message); \
 			else if (options.verbosity > VERB_LEGACY) \
 				fprintf(stderr, " %u: %s\n", NODE, get_error_name(__err)); \
-			if (!(ocl_autotune_running || bench_or_test_running)) \
-				error(); \
-			else \
+			if (ocl_autotune_running) \
 				return -1; \
+			else if (bench_or_test_running) \
+				return 0; \
+			else \
+				error(); \
 		} \
 	} while (0)
 

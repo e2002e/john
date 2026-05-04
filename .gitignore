@@ -9,6 +9,7 @@
 *.tmp
 *~
 *.old
+\#*#
 *.bak
 *.in
 *.dlst
@@ -16,10 +17,13 @@
 *.sam
 
 *.o
+*.a
 *.exe
 *.dSYM
 .DS_Store
 *.pyc
+
+Makefile.dep
 
 Makefile
 john-local.conf
@@ -44,6 +48,7 @@ run/keepass2john
 run/kernels/
 run/opencl/*.bin
 run/opencl/*.config
+run/opencl/descrypt-cache/
 run/keychain2john
 run/keyring2john
 run/kwallet2john
@@ -72,8 +77,11 @@ run/vncpcap2john
 run/wpapcap2john
 run/zip2john
 
+.deps
+.deps/
+
 src/.gdbinit
-src/mbedtls/aes.a
+src/.plugin_fmt_list
 src/arch.h
 src/all_tests.lst
 src/autoconfig-stamp-h
@@ -93,9 +101,6 @@ src/fmt_registers.h
 src/generic.h
 src/john_build_rule.h
 src/memdbg_defines.h
-src/secp256k1/secp256k1.a
-src/ed25519-donna/ed25519-donna.a
-src/poly1305-donna/poly1305-donna.a
 src/stamp-h1
 src/version.h
 src/version.h.new
@@ -119,3 +124,5 @@ __pycache__/
 *.pyo
 *.pyd
 **/venv/
+**/.venv/
+**/venv2/

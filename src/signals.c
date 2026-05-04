@@ -1,8 +1,8 @@
 /*
  * This file is part of John the Ripper password cracker,
  * Copyright (c) 1996-2003,2006,2010,2013,2015 by Solar Designer
- *
- * ...with changes in the jumbo patch, by JimF and magnum.
+ * Copyright (c) 2009-2018 by JimF
+ * Copyright (c) 2009-2025 by magnum
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted.
@@ -55,9 +55,6 @@
 #include "status.h"
 #include "signals.h"
 #include "john_mpi.h"
-#ifdef HAVE_MPI
-#include "tty.h" /* For tty_has_keyboard() */
-#endif
 
 volatile int event_pending = 0, event_reload = 0;
 volatile int event_abort = 0, event_help = 0, event_save = 0, event_status = 0, event_delayed_status = 0;
@@ -177,27 +174,36 @@ static void sig_remove_reload(void)
 
 void check_abort(int be_async_signal_safe)
 {
-	char *abort_msg = (aborted_by_timer) ?
-		"Session stopped (max run-time reached)\n" :
-		"Session aborted\n";
-
 	if (!event_abort) return;
 
 	tty_done();
 
+	const char *condition = " aborted", *cause = "\n";
+
+	if (aborted_by_timer) {
+		condition = " stopped";
+		cause = " (max run-time reached)\n";
+	}
+
 #ifndef BENCH_BUILD
-	if (john_max_cands && status.cands >= john_max_cands)
-		abort_msg = "Session stopped (max candidates reached)\n";
+	if (john_max_cands && status.cands >= john_max_cands) {
+		condition = " stopped";
+		cause = " (max candidates reached)\n";
+	}
 #endif
 
 	if (be_async_signal_safe) {
-		if (john_main_process)
-			write_loop(2, abort_msg, strlen(abort_msg));
+		if (john_main_process) {
+			write_loop(2, "Session", 8);
+			write_loop(2, john_session_name, strlen(john_session_name));
+			write_loop(2, condition, strlen(condition));
+			write_loop(2, cause, strlen(cause));
+		}
 		_exit(2);
 	}
 
 	if (john_main_process)
-		fprintf(stderr, "%s", abort_msg);
+		fprintf(stderr, "Session%s%s%s", john_session_name, condition, cause);
 	log_done();
 	exit(2);
 }
@@ -539,7 +545,15 @@ static void sig_handle_status(int signum)
 	if (mpi_p > 1 || getenv("OMPI_COMM_WORLD_SIZE"))
 		event_save = 1;
 #endif
-	event_status = event_pending = 1;
+	/* SIGUSR1 now requests delayed status and a second one during the
+	 * delay will promote it to immediate. */
+	if (event_delayed_status) {
+		event_status = event_pending = 1;
+		event_delayed_status = 0;
+	} else {
+		event_delayed_status = 1;
+		write_loop(2, "Delayed status pending...\r", 26);
+	}
 #ifndef SA_RESTART
 	sig_install(sig_handle_status, signum);
 #endif

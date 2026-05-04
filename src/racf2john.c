@@ -34,7 +34,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <assert.h>
 #include <stdlib.h>
 // jumbo.h needs to be above sys/types.h and sys/stat.h for mingw, if -std=c99 used.
 #include "jumbo.h"
@@ -174,6 +173,7 @@ static void process_file(const char *filename)
 
 	if (stat(filename, &sb) == -1) {
 		perror("stat");
+		fclose(fp);
 		exit(EXIT_FAILURE);
 	}
 
@@ -184,10 +184,14 @@ static void process_file(const char *filename)
 	buffer = (unsigned char *)malloc(size);
 	if (!buffer) {
 		fprintf(stderr, "malloc failed in process_file, aborting!\n");
+		fclose(fp);
 		exit(-1);
 	}
 	count = fread(buffer, size, 1, fp);
-	assert(count == 1);
+	if (count != 1) {
+		fprintf(stderr, "Unable to read required data from %s\n", filename);
+		goto cleanup;
+	}
 
 	// our initial check below checks 7 char ahead of our i ctr, so start at i=7
 	i = 7;

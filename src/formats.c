@@ -235,6 +235,27 @@ static int exclude_formats(char *rej_format, struct fmt_main **full_fmt_list)
 	return removed;
 }
 
+/* Exclusions. Drop all format(s) up to and including the matching rej_format from full list */
+static int exclude_formats_up_to(char *rej_format, struct fmt_main **full_fmt_list)
+{
+	static int drop = 1;
+	struct fmt_main *current;
+	int removed = 0;
+
+	if ((current = *full_fmt_list))
+	do {
+		if (drop) {
+			if (fmt_match(rej_format, current, 1))
+				drop = 0;
+			*full_fmt_list = current->next;
+			removed++;
+		} else
+			break;
+	} while ((current = current->next));
+
+	return removed;
+}
+
 /* Inclusions. Move any format(s) matching req_format from full list to new list */
 static int include_formats(char *req_format, struct fmt_main **full_fmt_list)
 {
@@ -329,7 +350,7 @@ static void comma_split(struct list_main *dst, const char *src)
 
 char* fmt_type(char *name)
 {
-	if (name[1] && (name[0] == '+' || name[0] == '-'))
+	if (name[1] && (name[0] == '+' || name[0] == '-' || name[0] == '/'))
 		name++;
 
 	if (fmt_is_class(name))
@@ -357,9 +378,16 @@ int fmt_check_custom_list(void)
 			fmt_list = NULL;
 			fmt_tail = &fmt_list;
 
-			/* "-" Exclusions first, from the full list. */
+			/* "-" or "/" Exclusions first, from the full list. */
 			do {
-				if (req_format->data[0] == '-') {
+				if (req_format->data[0] == '/') {
+					char *exclude_fmt = &(req_format->data[1]);
+
+					if (!exclude_fmt[0])
+						error_msg("Error: '%s' in format list doesn't make sense\n", req_format->data);
+					num_e += exclude_formats_up_to(exclude_fmt, &full_fmt_list);
+				}
+				else if (req_format->data[0] == '-') {
 					char *exclude_fmt = &(req_format->data[1]);
 
 					if (!exclude_fmt[0])
@@ -371,7 +399,7 @@ int fmt_check_custom_list(void)
 			/* Inclusions. Move to the new list. */
 			req_format = req_formats->head;
 			do {
-				if ((req_format->data[0] != '-') && (req_format->data[0] != '+')) {
+				if ((req_format->data[0] != '-') && (req_format->data[0] != '+') && (req_format->data[0] != '/')) {
 					had_i = 1;
 					if (!include_formats(req_format->data, &full_fmt_list) && !is_in_fmt_list(req_format->data)) {
 						if (john_main_process)
@@ -602,11 +630,11 @@ static char* is_key_right(struct fmt_main *format, int index,
 		return err_buf;
 	}
 
-	if (match == 0) {
+	if (match <= 0) {
 		if (options.verbosity > VERB_LEGACY)
-			snprintf(err_buf, sizeof(err_buf), "crypt_all(%d) zero return %s", index + 1, ciphertext);
+			snprintf(err_buf, sizeof(err_buf), "crypt_all(%d) = %d for %s", index + 1, match, ciphertext);
 		else
-			sprintf(err_buf, "crypt_all(%d) zero return", index + 1);
+			sprintf(err_buf, "crypt_all(%d) = %d", index + 1, match);
 		return err_buf;
 	}
 
@@ -864,7 +892,7 @@ static char *fmt_self_test_body(struct fmt_main *format,
 	if (format->methods.cmp_exact == NULL)  return "method cmp_exact NULL";
 
 	if (format->params.plaintext_length < 1 ||
-	    format->params.plaintext_length > PLAINTEXT_BUFFER_SIZE - 3)
+	    format->params.plaintext_length > MAX_PLAINTEXT_LENGTH)
 		return "plaintext_length";
 
 	if (format->params.benchmark_length < 0 ||

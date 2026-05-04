@@ -21,8 +21,9 @@
 
 #if FMT_REGISTERS_H
 john_register_one(&FORMAT_STRUCT);
-#else
+#elif FMT_EXTERNS_H
 extern struct fmt_main FORMAT_STRUCT;
+#else
 
 #include "o5logon_common.h"
 #include "opencl_common.h"
@@ -55,6 +56,8 @@ static int static_gpu_locations[MASK_FMT_INT_PLHDR];
 static const cl_uint zero = 0;
 
 static int new_keys;
+
+extern struct fmt_main FORMAT_STRUCT;
 
 #include "opencl_autotune.h" // Must come after auto-tune definitions
 
@@ -295,7 +298,8 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 		for (int i = count; i <= gws; i++)
 			key_idx[i] = key_buf_end;
 
-		CLWRITE_CRYPT(cl_key_buf, CL_FALSE, key_offset, key_buf_end - key_offset, key_buf + key_offset, multi_profilingEvent[0]);
+		if (key_buf_end != key_offset)
+			CLWRITE_CRYPT(cl_key_buf, CL_FALSE, key_offset, key_buf_end - key_offset, key_buf + key_offset, multi_profilingEvent[0]);
 		CLWRITE_CRYPT(cl_key_idx, CL_FALSE, idx_offset, 4 * (gws + 1) - idx_offset, key_idx + (idx_offset / 4), multi_profilingEvent[1]);
 
 		if (!mask_gpu_is_static)
@@ -402,5 +406,4 @@ struct fmt_main FORMAT_STRUCT = {
 };
 
 #endif /* plugin stanza */
-
 #endif /* HAVE_OPENCL */

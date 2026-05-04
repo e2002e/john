@@ -15,7 +15,7 @@ import os
 import struct
 from binascii import hexlify
 
-KWMAGIC = "KWALLET\n\r\0\r\n"
+KWMAGIC = b"KWALLET\n\r\0\r\n"
 KWMAGIC_LEN = 12
 KWALLET_VERSION_MAJOR = 0
 KWALLET_VERSION_MINOR = 0
@@ -99,27 +99,39 @@ def process_file(filename):
     encrypted = fd.read(encrypted_size)
     encrypted_size = len(encrypted)
 
-    if encrypted_size % 8 != 0:
-        sys.stderr.write("%s : invalid file structure!\n", filename)
+    if encrypted_size % 8 != 0 or encrypted_size < 88:
+        sys.stderr.write("%s : invalid file structure!\n" % filename)
         sys.exit(7)
+
+    # Don't reveal most of the actual content.  We only need 64 bytes, but
+    # truncate at 65 to avoid false auto-detection as the "leet" format, and
+    # recent John the Ripper knows to expect exactly 65 (or non-truncated).
+    # Comment out the below line if you need a "hash" for an older version of
+    # John the Ripper (before Nov 2025), but please be aware that there were
+    # issues in the KWallet support in those older versions resulting in false
+    # negatives for many kinds of KWallet files and some password lengths, so
+    # this is strongly recommended against.
+    encrypted = encrypted[:65]
 
     if new_version:
         # read salt
         salt_filename = os.path.splitext(filename)[0] + ".salt"
         try:
-            salt = open(salt_filename).read()
-        except:
-            sys.stderr.write("%s : unable to read salt from %s\n" % (filename, salt_filename))
+            with open(salt_filename, "rb") as f:
+                salt = f.read()
+        except FileNotFoundError:
+            sys.stderr.write("%s : cannot find file %s which is required to process a salted wallet\n" % (filename, salt_filename))
             sys.exit(8)
+
         salt_len = len(salt)
         iterations = PBKDF2_SHA512_ITERATIONS  # is this fixed?
         sys.stdout.write("%s:$kwallet$%ld$%s$%d$%d$%s$%s" %
                          (os.path.basename(filename), encrypted_size,
-                          hexlify(encrypted), kwallet_minor_version, salt_len,
-                          salt.encode("hex"), iterations))
+                          hexlify(encrypted).decode('ascii'), kwallet_minor_version, salt_len,
+                          hexlify(salt).decode('ascii'), iterations))
         sys.stdout.write(":::::%s\n" % filename)
     else:
-        sys.stdout.write("%s:$kwallet$%ld$%s" % (os.path.basename(filename), encrypted_size, hexlify(encrypted)))
+        sys.stdout.write("%s:$kwallet$%ld$%s" % (os.path.basename(filename), encrypted_size, hexlify(encrypted).decode('ascii')))
         sys.stdout.write(":::::%s\n" % filename)
 
     fd.close()
@@ -130,5 +142,5 @@ if __name__ == "__main__":
         sys.stderr.write("Usage: %s <.kwl file(s)>\n" % sys.argv[0])
         sys.exit(1)
 
-    for i in range(1, len(sys.argv)):
-        process_file(sys.argv[i])
+    for file in sys.argv[1:]:
+        process_file(file)

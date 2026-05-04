@@ -30,14 +30,15 @@ john_register_one(&fmt_sm3);
 
 #include "sm3.h"
 
-#define FORMAT_LABEL       "SM3"
-#define FORMAT_TAG         "$sm3$"
+#define FORMAT_LABEL       "Raw-SM3"
+#define FORMAT_NAME        "ShangMi 3"
+#define FORMAT_TAG         "$raw-sm3$"
 #define TAG_LENGTH         (sizeof(FORMAT_TAG)-1)
-#define ALGORITHM_NAME     "32/" ARCH_BITS_STR
+#define ALGORITHM_NAME     "SM3 32/" ARCH_BITS_STR
 #define BENCHMARK_COMMENT  ""
 #define BENCHMARK_LENGTH   0x107
-#define PLAINTEXT_LENGTH   125
-#define BINARY_SIZE        sm3_hash_length
+#define PLAINTEXT_LENGTH   MAX_PLAINTEXT_LENGTH
+#define BINARY_SIZE        SM3_HASH_LENGTH
 #define BINARY_ALIGN       4
 #define SALT_SIZE          0
 #define SALT_ALIGN         1
@@ -52,7 +53,7 @@ static struct fmt_tests sm3_tests[] = {
 	{ "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0", "abc" },
 	{ "debe9ff92275b8a138604889c18e5a4d6fdb70e5387e5765293dcba39c0c5732",
 	  "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd" },
-	{ "$sm3$66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0", "abc" },
+	{ FORMAT_TAG "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0", "abc" },
 	{ NULL }
 };
 
@@ -84,7 +85,7 @@ static int valid(char *ciphertext, struct fmt_main *self)
 
 	if (!strncmp(p, FORMAT_TAG, TAG_LENGTH))
 		p += TAG_LENGTH;
-	if (hexlenl(p, &extra) != (2 * sm3_hash_length) || extra)
+	if (hexlenl(p, &extra) != (2 * SM3_HASH_LENGTH) || extra)
 		return 0;
 
 	return 1;
@@ -179,7 +180,7 @@ static char *get_key(int index)
 struct fmt_main fmt_sm3 = {
 	{
 		FORMAT_LABEL,
-		"",
+		FORMAT_NAME,
 		ALGORITHM_NAME,
 		BENCHMARK_COMMENT,
 		BENCHMARK_LENGTH,

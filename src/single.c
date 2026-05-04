@@ -190,27 +190,18 @@ static void single_init(void)
 	 *
 	 * Bodge for deprecated syntax. When dropping it we'll drop this interim variable
 	 */
-	int option_retest = 0;
+	int option_retest = parse_bool(options.single_retest_guess);
 
-	option_retest = parse_bool(options.single_retest_guess);
-
-	if ((retest_guessed = option_retest) == -1) {
-
+	if ((retest_guessed = option_retest) == -1)
 		retest_guessed = cfg_get_bool(SECTION_OPTIONS, NULL, "SingleRetestGuessed", 1);
 
-		if (!retest_guessed && single_db->salt_count == 1) {
-			retest_guessed = 0;
-			if (john_main_process)
-				fprintf(stderr, "Note: Ignoring SingleRetestGuessed option because only one salt is loaded.\n"
-				                "      You can force it with --single-retest-guess\n");
-		}
+	if (john_main_process && single_db->salt_count > 1) {
+		if (!retest_guessed)
+			fprintf(stderr, "Will not try cracked passwords against other salts\n");
+
+		if (options.seed_per_user && !retest_guessed && option_retest == -1)
+			fprintf(stderr, "Note: You might want --single-retest-guess when using --single-user-seed\n");
 	}
-
-	if (!retest_guessed && john_main_process)
-		fprintf(stderr, "Will not try cracked passwords against other salts\n");
-
-	if (options.seed_per_user && retest_guessed && option_retest == -1)
-		fprintf(stderr, "Note: You might want --single-retest-guess when using --single-user-seed\n");
 
 	if ((words_pair_max = options.single_pair_max) < 0)
 	if ((words_pair_max = cfg_get_int(SECTION_OPTIONS, NULL, "SingleWordsPairMax")) < 0)
@@ -412,7 +403,7 @@ static void single_init(void)
 	 */
 	if (words_pair_max && single_seed->count) {
 		words_pair_max += single_seed->count;
-		log_event("- SingleWordsPairMax increased for %d global seed words",
+		log_event("- SingleWordsPairMax increased for %ld global seed words",
 		          single_seed->count);
 	}
 	if (words_pair_max && log2(key_count) > words_pair_max) {
@@ -663,7 +654,7 @@ static int single_process_pw(struct db_salt *salt, struct db_password *pw,
 	struct list_entry *global_head = single_seed->head;
 	int first_global, second_global;
 	int first_number, second_number;
-	char pair[RULE_WORD_SIZE];
+	char pair[PLAINTEXT_BUFFER_SIZE];
 	int split;
 	char *key;
 
@@ -698,8 +689,8 @@ static int single_process_pw(struct db_salt *salt, struct db_password *pw,
 			if (first == second || (first_global && second_global))
 				continue;
 			if ((split = strlen(first->data)) < length) {
-				strnzcpy(pair, first->data, RULE_WORD_SIZE);
-				strnzcat(pair, second->data, RULE_WORD_SIZE);
+				strnzcpy(pair, first->data, PLAINTEXT_BUFFER_SIZE);
+				strnzcat(pair, second->data, PLAINTEXT_BUFFER_SIZE);
 
 				if ((key = rules_apply(pair, rule, split)))
 				if (ext_filter(key))
@@ -714,7 +705,7 @@ static int single_process_pw(struct db_salt *salt, struct db_password *pw,
 			if (!first_global && first->data[1]) {
 				pair[0] = first->data[0];
 				pair[1] = 0;
-				strnzcat(pair, second->data, RULE_WORD_SIZE);
+				strnzcat(pair, second->data, PLAINTEXT_BUFFER_SIZE);
 
 				if ((key = rules_apply(pair, rule, 1)))
 				if (ext_filter(key))
@@ -943,24 +934,23 @@ static void single_done(void)
 	crk_done();
 }
 
-char* do_single_crack(struct db_main *db)
+void do_single_crack(struct db_main *db)
 {
 	struct rpp_context ctx;
-	int initial_num_salts;
 
 	single_db = db;
-	initial_num_salts = db->salt_count;
 	rule_ctx = &ctx;
 	single_init();
 	single_run();
 	single_done();
 	rule_ctx = NULL; /* Just for good measure */
 
-	if (initial_num_salts > 1 && status.guess_count && !retest_guessed) {
+	if (john_main_process && db->salt_count > 1 &&
+	    status.guess_count && !retest_guessed) {
 		if (single_disabled_recursion)
-			return "Warning: Disabled SingleRetestGuessed due to deep recursion. Consider running '--loopback --rules=none' next.";
+			fprintf(stderr, "Warning: Disabled SingleRetestGuessed due to deep recursion. Consider running '--loopback --rules=none' next.\n");
 		else
-			return "Consider running '--loopback --rules=none' next.";
-	} else
-		return "";
+			fprintf(stderr, "Consider running '--loopback --rules=none' next.\n");
+	}
+	return;
 }

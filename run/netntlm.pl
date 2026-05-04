@@ -37,18 +37,18 @@ GetOptions (
 );
 
 sub showUsage {
-  print "john-netntlm.pl v$VERSION\n\n";
-  print "JoMo-Kun <jmk\@foofus.net>\n\n";
-  print "Usage: $0 [OPTIONS]\n";
-  print " $0\n";
-  print "   --seed [RainbowCrack/HalfLM Response Password]\n";
-  print "   --file [File Containing LM/NTLM challenge/responses (.lc format)]\n";
-  print "          Ex: Domain\\User:::LM response:NTLM response:challenge";
-  print "\n";
-  print " Ex:\n";
-  print " $0 --file capture.lc\n";
-  print " $0 --seed \"GERGE!!\"--file capture.lc\n";
-  print "\n";
+  print STDERR "john-netntlm.pl v$VERSION\n\n";
+  print STDERR "JoMo-Kun <jmk\@foofus.net>\n\n";
+  print STDERR "Usage: $0 [OPTIONS]\n";
+  print STDERR " $0\n";
+  print STDERR "   --seed [RainbowCrack/HalfLM Response Password]\n";
+  print STDERR "   --file [File Containing LM/NTLM challenge/responses (.lc format)]\n";
+  print STDERR "          Ex: Domain\\User:::LM response:NTLM response:challenge";
+  print STDERR "\n";
+  print STDERR " Ex:\n";
+  print STDERR " $0 --file capture.lc\n";
+  print STDERR " $0 --seed \"GERGE!!\"--file capture.lc\n";
+  print STDERR "\n";
   exit(1);
 }
 
@@ -126,9 +126,8 @@ sub showUsage {
       print STDERR "LM response is not unique from NTLM response (skipping):\n\t$credential_set\n";
       push  @{ $data{'pairs-ntlm'} }, $credential_set;
     }
-    elsif ( @cracked = grep(/^$account:/i, @{ $data{'cracked-ntlm'} }) ) {
+    elsif ( grep(/^$account:/i, @{ $data{'cracked-ntlm'} }) ) {
       print STDERR "Account $account NTLM response previously cracked.\n";
-      #print "@cracked";
     }
     else {
       print STDERR "Account $account LM response added to cracking list.\n";
@@ -214,7 +213,6 @@ sub createConf {
 
   # Add external filter to handle uncracked characters
   if ($opt{'seed'} ne "") {
-    my $i; $j;
     my @seed = split(//, $opt{'seed'});
 
     print CONF "[List.External:HalfLM]\n";
@@ -227,7 +225,7 @@ sub createConf {
     print CONF "{\n";
 
     my $len = length($opt{'seed'});
-    for ($i = 13, $j = 13 - $len; $i>=0; $i--) {
+    for (my $i = 13, my $j = 13 - $len; $i>=0; $i--) {
       if ($i >= $len) {
         print CONF "  word[$i] = word[$j];\n";
         $j--;

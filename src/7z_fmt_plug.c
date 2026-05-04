@@ -65,7 +65,7 @@ john_register_one(&fmt_sevenzip);
 #define MAX_KEYS_PER_CRYPT	NBKEYS
 #else
 #define ALGORITHM_NAME		"SHA256 32/" ARCH_BITS_STR " AES"
-#define PLAINTEXT_LENGTH	125
+#define PLAINTEXT_LENGTH	MAX_PLAINTEXT_LENGTH
 #define MIN_KEYS_PER_CRYPT	1
 #define MAX_KEYS_PER_CRYPT	1
 #endif
@@ -109,7 +109,7 @@ static void init(struct fmt_main *self)
 	CRC32_Init(&crc);
 
 	if (options.target_enc == UTF_8)
-		self->params.plaintext_length = MIN(125, 3 * PLAINTEXT_LENGTH);
+		self->params.plaintext_length = MIN(MAX_PLAINTEXT_LENGTH, 3 * PLAINTEXT_LENGTH);
 
 	if (cfg_get_bool(SECTION_FORMATS, "7z", "TrustPadding", 1))
 		sevenzip_trust_padding = 1;
@@ -366,7 +366,7 @@ struct fmt_main fmt_sevenzip = {
 			"iteration count",
 			"padding size",
 			"compression type",
-			"data length"
+			"data size penalty"
 		},
 		{ FORMAT_TAG },
 		sevenzip_tests
@@ -383,7 +383,7 @@ struct fmt_main fmt_sevenzip = {
 			sevenzip_iteration_count,
 			sevenzip_padding_size,
 			sevenzip_compression_type,
-			sevenzip_data_len
+			sevenzip_size_penalty
 		},
 		fmt_default_source,
 		{
