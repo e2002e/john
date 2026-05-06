@@ -39,6 +39,7 @@ typedef uint64_t uint_big;
 #define MAX_CAND_LENGTH PLAINTEXT_BUFFER_SIZE
 #define DEFAULT_MAX_LEN 16
 #define INTERLEAVE_STRIDE 10000   /* words generated per (L,first) pair per iteration */
+#define INTERLEAVE_SUB_STRIDE 1000   /* words generated per (L,sc) pair per iteration */
 
 char word[PLAINTEXT_BUFFER_SIZE];
 
@@ -107,10 +108,14 @@ static const char *counterChainFreq_default[][8] = {
     {"tansrldcumfpgwybvkxjqz","taonsrhldcumfpgwybvkxjqz","eairhldumfpgwybvkxjqz","etoihlcumfpgwybvkxjqz","eaoihdcumfpgwybvkxjqz","tonsrhldcumfpgwybvkxjqz","etaoishldcpgwybvkxjqz","aoinsrhlcumfpwybvkxjqz"}
 };
 
-static uint8_t ***pair_suffix;      /* [L-1][first_idx] -> array of length L-1 */
 static int **pair_exhausted;        /* kept as before */
 static double *pair_total;          /* total suffixes for this (L,first) pair (for progress) */
 static int *pair_exhausted_cnt;     /* count of exhausted pairs (for progress) */
+
+static struct {
+    uint8_t ***tails;       // [first][sc][tail_pos]  (L-2 éléments par sc)
+    int **exhausted;        // [first][sc]
+} per_len[MAX_CAND_LENGTH];
 
 static int minlength, maxlength, total_pairs;
 static int state_restored = 0;
@@ -426,64 +431,28 @@ static void init_permutations(void)
     }
 }
 
-static void alloc_pair_suffix(void)
-{
-    int L, c;
-    pair_suffix = malloc(maxlength * sizeof(uint8_t **));
-    pair_exhausted = malloc(maxlength * sizeof(int *));
-    for (L = 1; L <= maxlength; L++) {
-        pair_suffix[L-1] = malloc(tables.charset_sz * sizeof(uint8_t *));
-        pair_exhausted[L-1] = malloc(tables.charset_sz * sizeof(int));
-        for (c = 0; c < tables.charset_sz; c++) {
-            if (L > 1) {
-                pair_suffix[L-1][c] = calloc(L-1, sizeof(uint8_t));
-            } else {
-                pair_suffix[L-1][c] = NULL;   /* L=1 has no suffix */
-            }
-            pair_exhausted[L-1][c] = 0;
-        }
-    }
-}
-
-static void free_pair_suffix(void)
-{
-    int L, c;
-    if (pair_suffix) {
-        for (L = 1; L <= maxlength; L++) {
-            if (pair_suffix[L-1]) {
-                for (c = 0; c < tables.charset_sz; c++)
-                    free(pair_suffix[L-1][c]);
-                free(pair_suffix[L-1]);
-            }
-            free(pair_exhausted[L-1]);
-        }
-        free(pair_suffix);
-        free(pair_exhausted);
-        pair_suffix = NULL;
-        pair_exhausted = NULL;
-    }
-}
-
 /*
  * Advance suffix 'digits' of length 'd' (most-significant first)
  * by the repunit (111...1) modulo base^d.
  * Returns 1 if the suffix wrapped to all zeros (i.e., exhausted),
  * 0 otherwise.
  */
-static int suffix_add_repunit(uint8_t *digits, int d, int base)
+/*
+ * Standard odometer: increment least significant digit first.
+ * Digits are stored most-significant first (index 0 = first suffix char).
+ * Returns 1 if all digits wrapped to 0 (exhausted), 0 otherwise.
+ */
+static int suffix_add_one(uint8_t *digits, int d, int base)
 {
-    int carry = 0;
-    int i;
+	int i;
     for (i = d - 1; i >= 0; i--) {
-        int sum = digits[i] + 1 + carry;
-        digits[i] = (uint8_t)(sum % base);
-        carry = sum / base;
+        if (digits[i] < base - 1) {
+            digits[i]++;
+            return 0;   /* no wrap */
+        }
+        digits[i] = 0;
     }
-    /* Check if all digits are zero (the state cycled back to start) */
-    for (i = 0; i < d; i++)
-        if (digits[i] != 0)
-            return 0;
-    return 1;
+    return 1;   /* all digits back to 0 -> exhausted */
 }
 
 /* ------------------------------------------------------------------------- */
@@ -525,20 +494,22 @@ static void save_state(FILE *file)
     fprintf(file, "%d\n%d\n%d\n", minlength, maxlength, tables.charset_sz);
     fprintf(file, "%llu\n", (unsigned long long)set);
 
-    int L, c;
-    for (L = minlength; L <= maxlength; L++) {
-        for (c = 0; c < tables.charset_sz; c++) {
-            int pair_idx = (L - minlength) * tables.charset_sz + c;
+    for (int L = minlength; L <= maxlength; L++) {
+        int tail_len = (L > 2) ? L - 2 : 0;
+        for (int first = 0; first < tables.charset_sz; first++) {
+            int pair_idx = (L - minlength) * tables.charset_sz + first;
             if (pair_idx % node_count != (node_id - 1))
                 continue;
-            fprintf(file, "%d %d ", L, c);
-            if (L > 1) {
-                for (int i = 0; i < L-1; i++)
-                    fprintf(file, "%02x", pair_suffix[L-1][c][i]);
-            } else {
-                fprintf(file, "0");   /* dummy for length 1 */
+
+            /* Écriture de l'état de chaque second caractère non épuisé */
+            for (int sc = 0; sc < tables.charset_sz; sc++) {
+                if (!per_len[L-1].exhausted[first][sc]) {
+                    fprintf(file, "%d %d %d ", L, first, sc);
+                    for (int i = 0; i < tail_len; i++)
+                        fprintf(file, "%02x", per_len[L-1].tails[first][sc][i]);
+                    fprintf(file, "\n");
+                }
             }
-            fprintf(file, "\n");
         }
     }
 }
@@ -555,32 +526,36 @@ static int restore_state(FILE *file)
     if (fscanf(file, "%llu\n", &st) != 1) return 1;
     set = (uint_big)st;
 
-    /* Reset all pair states */
-    int L, c;
-    for (L = 1; L <= maxlength; L++) {
-        for (c = 0; c < tables.charset_sz; c++) {
-            if (L > 1)
-                memset(pair_suffix[L-1][c], 0, L-1);
-            pair_exhausted[L-1][c] = 0;
+    /* Réinitialisation complète de tous les états */
+    for (int L = 1; L <= maxlength; L++) {
+        int tail_len = (L > 2) ? L - 2 : 0;
+        for (int first = 0; first < tables.charset_sz; first++) {
+            for (int sc = 0; sc < tables.charset_sz; sc++) {
+                if (tail_len > 0)
+                    memset(per_len[L-1].tails[first][sc], 0, tail_len);
+                per_len[L-1].exhausted[first][sc] = 0;
+            }
+            pair_exhausted[L-1][first] = 0;
         }
     }
 
-    /* Read data for our pairs */
-    int fileL, filec;
+    /* Lecture des lignes sauvegardées */
+    int fileL, filefirst, filesc;
     char hex[2048];
-    while (fscanf(file, "%d %d %s\n", &fileL, &filec, hex) == 3) {
-        int pair_idx = (fileL - mn) * tables.charset_sz + filec;
+    while (fscanf(file, "%d %d %d %s\n", &fileL, &filefirst, &filesc, hex) == 4) {
+        int pair_idx = (fileL - mn) * tables.charset_sz + filefirst;
         if (pair_idx % node_count != (node_id - 1))
             continue;
-        if (fileL > 1) {
-            int d = fileL - 1;
-            if ((int)strlen(hex) != d * 2) continue;  /* safety */
-            for (int i = 0; i < d; i++) {
-                unsigned int byte;
-                sscanf(hex + 2*i, "%2x", &byte);
-                pair_suffix[fileL-1][filec][i] = (uint8_t)byte;
-            }
+        int tail_len = (fileL > 2) ? fileL - 2 : 0;
+        int d = tail_len;
+        if (d > 0 && (int)strlen(hex) != d * 2) continue;
+        for (int i = 0; i < d; i++) {
+            unsigned int byte;
+            sscanf(hex + 2*i, "%2x", &byte);
+            per_len[fileL-1].tails[filefirst][filesc][i] = (uint8_t)byte;
         }
+        per_len[fileL-1].exhausted[filefirst][filesc] = 0;
+        /* On ne peut pas déduire ici si la paire est épuisée, elle sera marquée plus tard */
     }
     state_restored = 1;
     return 0;
@@ -615,23 +590,41 @@ int do_inc2_crack(struct db_main *db, const char *freq_file)
 
     init_permutations();
 
-    /* ---- node splitting (round-robin) ---- */
+    /* ---- node splitting ---- */
     node_count = (options.node_count > 1) ? options.node_count : 1;
     node_id = (options.node_min > 0) ? options.node_min : 1;
     if (node_id > node_count) node_id = node_count;
 
-    total_pairs = (maxlength - minlength + 1) * tables.charset_sz;
+    pair_exhausted = malloc(maxlength * sizeof(int *));
+	for (int L = 1; L <= maxlength; L++) {
+		pair_exhausted[L-1] = calloc(tables.charset_sz, sizeof(int));
+	}
 
-       /* ---- allocate pair suffix arrays ---- */
-    free_pair_suffix();
-    alloc_pair_suffix();
+    /* Allocation des structures de suffixe pour le stride du 2e caractère */
+    for (int L = minlength; L <= maxlength; L++) {
+        int num_first = tables.charset_sz;
+        int tail_len = L - 2;  /* 0 pour L==2, <0 pour L==1 */
+        per_len[L-1].tails = malloc(num_first * sizeof(uint8_t ***));
+        per_len[L-1].exhausted = malloc(num_first * sizeof(int **));
+        for (int f = 0; f < num_first; f++) {
+            per_len[L-1].tails[f] = malloc(tables.charset_sz * sizeof(uint8_t *));
+            per_len[L-1].exhausted[f] = calloc(tables.charset_sz, sizeof(int));
+            for (int sc = 0; sc < tables.charset_sz; sc++) {
+                if (tail_len > 0) {
+                    per_len[L-1].tails[f][sc] = calloc(tail_len, sizeof(uint8_t));
+                } else {
+                    per_len[L-1].tails[f][sc] = NULL;
+                }
+            }
+        }
+    }
 
     status_init(get_progress, 0);
     rec_restore_mode(restore_state);
     rec_init(db, save_state);
 
     if (john_main_process) {
-        log_event("Proceeding with inc2 mode (unlimited fast‑rotation suffix)");
+        log_event("Proceeding with inc2 mode (weighted first & second char stride)");
         log_event("Lengths: %d-%d, charset: %d, node %d/%d",
                   minlength, maxlength, tables.charset_sz, node_id, node_count);
         if (rec_restored) fprintf(stderr, "Proceeding with inc2 mode (resumed)\n");
@@ -642,63 +635,123 @@ int do_inc2_crack(struct db_main *db, const char *freq_file)
     if (state_restored)
         state_restored = 0;
 
-        /* ---- main generation loop (with batch stride) ---- */
-    uint8_t *suffix_digits_temp = malloc(MAX_CAND_LENGTH);
     int work_done;
     do {
         work_done = 0;
         for (int L = minlength; L <= maxlength; L++) {
-			for (int first = 0; first < tables.charset_sz; first++) {
-				// compute pair_idx if needed for node splitting
-				int pair_idx = (L - minlength) * tables.charset_sz + first;
-				if (pair_idx % node_count != (node_id - 1))
-					continue;
+            int tail_len = L - 2;
+			double len_factor = 1.0 / (1.0 + (double)(L - minlength) / maxlength);   // shorter → larger
+            for (int first = 0; first < tables.charset_sz; first++) {
+                int pair_idx = (L - minlength) * tables.charset_sz + first;
+                if (pair_idx % node_count != (node_id - 1))
+                    continue;
 
-				if (pair_exhausted[L-1][first])
-					continue;
+                if (pair_exhausted[L-1][first])
+                    continue;
 
-				// same stride logic (no need to change)
-				double factor = 1.0 / (1.0 + (double)first / (double)tables.charset_sz);
-				int stride = (int)(INTERLEAVE_STRIDE * factor);
-				if (stride < 1) stride = 1;
+                /* Longueur 1 : un seul candidat */
+                if (L == 1) {
+                    build_word(1, first, NULL, word);
+                    set++;
+                    if (options.flags & FLG_MASK_CHK) {
+                        if (do_mask_crack(word)) goto out;
+                    } else {
+                        if (crk_process_key(word)) goto out;
+                    }
+                    pair_exhausted[0][first] = 1;
+                    work_done = 1;
+                    continue;
+                }
 
-				for (int s = 0; s < stride; s++) {
-					if (event_abort)
-						goto out;
-					if (pair_exhausted[L-1][first])
-						break;
+                /* Weighted total stride for this (L,first) pair */
+				double factor1 = 1.0 / (1.0 + (double)first / (double)tables.charset_sz);
+				int total_stride = (int)(INTERLEAVE_STRIDE * factor1 * len_factor);
+				if (total_stride < 1) total_stride = 1;
 
-					if (L > 1) {
-						memcpy(suffix_digits_temp, pair_suffix[L-1][first], L - 1);
-					}
+				int any_work = 0;
+				int generated = 0;   // candidates already produced for this pair
 
-					build_word(L, first, suffix_digits_temp, word);
-					set++;
+				for (int sc = 0; sc < tables.charset_sz && !pair_exhausted[L-1][first]; sc++) {
+					if (per_len[L-1].exhausted[first][sc])
+						continue;
 
-					if (options.flags & FLG_MASK_CHK) {
-						if (do_mask_crack(word)) goto out;
-					} else {
-						if (crk_process_key(word)) goto out;
-					}
+					/* Weighted sub-stride for the second character */
+					double factor2 = 1.0 / (1.0 + (double)sc / (double)tables.charset_sz);
+					int stride2 = (int)(INTERLEAVE_SUB_STRIDE * factor2);
+					if (stride2 < 1) stride2 = 1;
 
-					/* Advance suffix by one repunit step, mark exhausted if wrapped */
-					if (L > 1) {
-						if (suffix_add_repunit(pair_suffix[L-1][first], L - 1, tables.charset_sz))
-							pair_exhausted[L-1][first] = 1;
-					} else {
-						pair_exhausted[L-1][first] = 1;   /* length 1: single candidate */
+					/* Don't exceed the total budget for the first character */
+					if (generated + stride2 > total_stride)
+						stride2 = total_stride - generated;
+					if (stride2 <= 0) break;
+
+					for (int k = 0; k < stride2; k++) {
+						if (event_abort) goto out;
+						if (per_len[L-1].exhausted[first][sc])
+							break;
+
+						uint8_t suffix[PLAINTEXT_BUFFER_SIZE];
+						suffix[0] = sc;
+						if (tail_len > 0)
+							memcpy(&suffix[1], per_len[L-1].tails[first][sc], tail_len);
+						build_word(L, first, suffix, word);
+						set++;
+
+						if (options.flags & FLG_MASK_CHK) {
+							if (do_mask_crack(word)) goto out;
+						} else {
+							if (crk_process_key(word)) goto out;
+						}
+
+						if (tail_len > 0) {
+							if (suffix_add_one(per_len[L-1].tails[first][sc], tail_len, tables.charset_sz))
+								per_len[L-1].exhausted[first][sc] = 1;
+						} else {
+							per_len[L-1].exhausted[first][sc] = 1;   // L=2
+						}
+						any_work = 1;
+						generated++;
 					}
 				}
-				work_done = 1;
+				if (any_work)
+					work_done = 1;
+
+				// Mark pair exhausted when all second characters are done
+				int all_exhausted = 1;
+				for (int sc = 0; sc < tables.charset_sz; sc++) {
+					if (!per_len[L-1].exhausted[first][sc]) {
+						all_exhausted = 0;
+						break;
+					}
+				}
+				if (all_exhausted)
+					pair_exhausted[L-1][first] = 1;
 			}
-		}
+        }
         if (work_done)
             rec_save();
     } while (work_done && !event_abort);
-
 out:
-    free(suffix_digits_temp);
     crk_done();
-    rec_done(event_abort);
+    rec_done(event_abort);      // save_state est appelé dedans, donc per_len doit encore exister
+
+    /* Maintenant on peut libérer per_len */
+    for (int L = minlength; L <= maxlength; L++) {
+        for (int first = 0; first < tables.charset_sz; first++) {
+            for (int sc = 0; sc < tables.charset_sz; sc++) {
+                free(per_len[L-1].tails[first][sc]);
+            }
+            free(per_len[L-1].tails[first]);
+            free(per_len[L-1].exhausted[first]);
+        }
+        free(per_len[L-1].tails);
+        free(per_len[L-1].exhausted);
+    }
+
+    /* Libération de pair_exhausted */
+    for (int L = 1; L <= maxlength; L++)
+        free(pair_exhausted[L-1]);
+    free(pair_exhausted);
+
     return 0;
 }
