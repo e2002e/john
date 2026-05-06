@@ -105,6 +105,7 @@ static int john_omp_threads_new;
 #include "mask.h"
 #include "mkv.h"
 #include "subsets.h"
+#include "inc2.h"
 #include "external.h"
 #include "batch.h"
 #include "dynamic_compiler.h"
@@ -1865,6 +1866,9 @@ static void john_run(void)
 		else
 		if (options.flags & FLG_SUBSETS_CHK)
 			do_subsets_crack(&database, options.subset_full);
+		else
+		if (options.flags & FLG_INC2_CHK)
+			do_inc2_crack(&database, options.inc2_freq);
 		else
 #if HAVE_REXGEN
 		if ((options.flags & FLG_REGEX_CHK) &&

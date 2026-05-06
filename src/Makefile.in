@@ -118,7 +118,7 @@ JOHN_OBJS = \
 	memory.o misc.o options.o params.o path.o recovery.o rpp.o rules.o signals.o single.o status.o \
 	suppressor.o tty.o wordlist.o \
 	mkv.o mkvlib.o \
-	subsets.o unicode_range.o \
+	subsets.o inc2.o unicode_range.o \
 	listconf.o \
 	fake_salts.o \
 	win32_memmap.o mmap-windows.o \

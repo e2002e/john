@@ -1,14 +1,12 @@
 /*
  * inc2.c – Block‑interleaved lengths & first characters.
  *          First character rotates every BLOCK_SIZE words.
+ *          Suffix digits now also rotate quickly by using a large
+ *          coprime increment, so no single placeholder stays fixed
+ *          for long.
  *
  * Full version: dynamic character set, arbitrary special letters,
  *               frequency tables loaded from a file.
- *
- * Parallelisation: (length, first_char) pairs are distributed
- * round‑robin across nodes. Within a node, a small stride of
- * candidates is generated from each assigned pair per iteration,
- * ensuring early words from *all* lengths are tried quickly.
  */
 #include "os.h"
 #include <stdio.h>
@@ -40,7 +38,7 @@ typedef uint64_t uint_big;
 
 #define MAX_CAND_LENGTH PLAINTEXT_BUFFER_SIZE
 #define DEFAULT_MAX_LEN 16
-#define INTERLEAVE_STRIDE 100000   /* words generated per (L,first) pair per iteration */
+#define INTERLEAVE_STRIDE 10000   /* words generated per (L,first) pair per iteration */
 
 char word[PLAINTEXT_BUFFER_SIZE];
 
@@ -109,14 +107,10 @@ static const char *counterChainFreq_default[][8] = {
     {"tansrldcumfpgwybvkxjqz","taonsrhldcumfpgwybvkxjqz","eairhldumfpgwybvkxjqz","etoihlcumfpgwybvkxjqz","eaoihdcumfpgwybvkxjqz","tonsrhldcumfpgwybvkxjqz","etaoishldcpgwybvkxjqz","aoinsrhlcumfpwybvkxjqz"}
 };
 
-/* ------------------------------------------------------------------------- */
-/*  Odometer data – dynamically allocated                                    */
-/* ------------------------------------------------------------------------- */
-static uint8_t ***suffix_digits;      /* [L-1][first_idx][i] for i = 0..L-2 */
-static int **suffix_exhausted;        /* [L-1][first_idx] */
-
-/* Power table for progress (charset_sz^L) */
-static uint_big *pow_charset;
+static uint8_t ***pair_suffix;      /* [L-1][first_idx] -> array of length L-1 */
+static int **pair_exhausted;        /* kept as before */
+static double *pair_total;          /* total suffixes for this (L,first) pair (for progress) */
+static int *pair_exhausted_cnt;     /* count of exhausted pairs (for progress) */
 
 static int minlength, maxlength, total_pairs;
 static int state_restored = 0;
@@ -174,29 +168,6 @@ static void free_tables(struct inc2_tables *t)
     }
     free(t->special_letters);
     memset(t, 0, sizeof(*t));
-}
-
-/* ------------------------------------------------------------------------- */
-/*  Free suffix digit arrays                                                 */
-/* ------------------------------------------------------------------------- */
-static void free_suffix_arrays(void)
-{
-    int L, c;
-    if (suffix_digits) {
-        for (L = 1; L <= maxlength; L++) {
-            for (c = 0; c < tables.charset_sz; c++)
-                free(suffix_digits[L-1][c]);
-            free(suffix_digits[L-1]);
-        }
-        free(suffix_digits);
-        suffix_digits = NULL;
-    }
-    if (suffix_exhausted) {
-        for (L = 1; L <= maxlength; L++)
-            free(suffix_exhausted[L-1]);
-        free(suffix_exhausted);
-        suffix_exhausted = NULL;
-    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -455,51 +426,78 @@ static void init_permutations(void)
     }
 }
 
-/* ------------------------------------------------------------------------- */
-/*  Power tables (charset_sz^L) for progress reporting                       */
-/* ------------------------------------------------------------------------- */
-static void init_powers(void)
+static void alloc_pair_suffix(void)
 {
-    int i;
-    pow_charset = malloc((maxlength + 2) * sizeof(uint_big));
-    pow_charset[0] = 1;
-    for (i = 1; i <= maxlength + 1; i++) {
-        if (pow_charset[i-1] > UINT_BIG_MAX / tables.charset_sz)
-            pow_charset[i] = 0;
-        else
-            pow_charset[i] = pow_charset[i-1] * tables.charset_sz;
+    int L, c;
+    pair_suffix = malloc(maxlength * sizeof(uint8_t **));
+    pair_exhausted = malloc(maxlength * sizeof(int *));
+    for (L = 1; L <= maxlength; L++) {
+        pair_suffix[L-1] = malloc(tables.charset_sz * sizeof(uint8_t *));
+        pair_exhausted[L-1] = malloc(tables.charset_sz * sizeof(int));
+        for (c = 0; c < tables.charset_sz; c++) {
+            if (L > 1) {
+                pair_suffix[L-1][c] = calloc(L-1, sizeof(uint8_t));
+            } else {
+                pair_suffix[L-1][c] = NULL;   /* L=1 has no suffix */
+            }
+            pair_exhausted[L-1][c] = 0;
+        }
     }
 }
 
+static void free_pair_suffix(void)
+{
+    int L, c;
+    if (pair_suffix) {
+        for (L = 1; L <= maxlength; L++) {
+            if (pair_suffix[L-1]) {
+                for (c = 0; c < tables.charset_sz; c++)
+                    free(pair_suffix[L-1][c]);
+                free(pair_suffix[L-1]);
+            }
+            free(pair_exhausted[L-1]);
+        }
+        free(pair_suffix);
+        free(pair_exhausted);
+        pair_suffix = NULL;
+        pair_exhausted = NULL;
+    }
+}
+
+/*
+ * Advance suffix 'digits' of length 'd' (most-significant first)
+ * by the repunit (111...1) modulo base^d.
+ * Returns 1 if the suffix wrapped to all zeros (i.e., exhausted),
+ * 0 otherwise.
+ */
+static int suffix_add_repunit(uint8_t *digits, int d, int base)
+{
+    int carry = 0;
+    int i;
+    for (i = d - 1; i >= 0; i--) {
+        int sum = digits[i] + 1 + carry;
+        digits[i] = (uint8_t)(sum % base);
+        carry = sum / base;
+    }
+    /* Check if all digits are zero (the state cycled back to start) */
+    for (i = 0; i < d; i++)
+        if (digits[i] != 0)
+            return 0;
+    return 1;
+}
+
 /* ------------------------------------------------------------------------- */
-/*  Build candidate word from odometer digits                                */
+/*  Build candidate word from first char and suffix digits                   */
 /* ------------------------------------------------------------------------- */
-static void build_word_from_digits(int len, int first_idx, uint8_t *digits, char *out)
+static void build_word(int L, int first_idx, uint8_t *suffix_digits, char *out)
 {
     int i;
     out[0] = tables.base_order[0][first_idx];
-    for (i = 1; i < len; i++) {
+    for (i = 1; i < L; i++) {
         int prev = tables.char_to_index[(unsigned char)out[i-1]];
-        out[i] = tables.perm[i][prev][ digits[len - 1 - i] ];
+        out[i] = tables.perm[i][prev][ suffix_digits[i-1] ];
     }
-    out[len] = '\0';
-}
-
-/* ------------------------------------------------------------------------- */
-/*  Advance suffix odometer (base charset_sz)                                */
-/* ------------------------------------------------------------------------- */
-static int advance_suffix(int L, int first)
-{
-    int i;
-    for (i = 0; i < L - 1; i++) {
-        if (suffix_digits[L-1][first][i] < tables.charset_sz - 1) {
-            suffix_digits[L-1][first][i]++;
-            return 1;
-        }
-        suffix_digits[L-1][first][i] = 0;
-    }
-    suffix_exhausted[L-1][first] = 1;
-    return 0;
+    out[L] = '\0';
 }
 
 /* ------------------------------------------------------------------------- */
@@ -507,42 +505,40 @@ static int advance_suffix(int L, int first)
 /* ------------------------------------------------------------------------- */
 static double get_progress(void)
 {
-	int L;
     static double node_total = -1.0;
     if (node_total < 0.0) {
         node_total = 0.0;
-        for (L = minlength; L <= maxlength; L++) {
-            if (pow_charset[L] > 0)
-                node_total += (double)pow_charset[L];
+        for (int L = minlength; L <= maxlength; L++) {
+            /* charset_sz^L may overflow double, but we are safe up to ~300 chars lengths */
+            double space = pow((double)tables.charset_sz, (double)L);
+            node_total += space;
         }
-        /* Each node's share is total/node_count */
         node_total /= node_count;
     }
     if (node_total == 0.0) return -1.0;
-    double prog = (double)set / node_total;
-    return prog > 1.0 ? 1.0 : prog;
+    double done = (double)set / node_total;
+    return (done > 1.0) ? 1.0 : done;
 }
 
-/* ------------------------------------------------------------------------- */
-/*  Recovery – save/restore only the node's assigned pairs                   */
-/* ------------------------------------------------------------------------- */
 static void save_state(FILE *file)
 {
     fprintf(file, "%d\n%d\n%d\n", minlength, maxlength, tables.charset_sz);
     fprintf(file, "%llu\n", (unsigned long long)set);
 
-    int L, c, i;
+    int L, c;
     for (L = minlength; L <= maxlength; L++) {
         for (c = 0; c < tables.charset_sz; c++) {
             int pair_idx = (L - minlength) * tables.charset_sz + c;
             if (pair_idx % node_count != (node_id - 1))
-                continue;   /* not our pair */
-            /* write L and first_char index as a header for clarity */
-            fprintf(file, "%d %d\n", L, c);
-            for (i = 0; i < L - 1; i++)
-                fprintf(file, "%d ", suffix_digits[L-1][c][i]);
+                continue;
+            fprintf(file, "%d %d ", L, c);
+            if (L > 1) {
+                for (int i = 0; i < L-1; i++)
+                    fprintf(file, "%02x", pair_suffix[L-1][c][i]);
+            } else {
+                fprintf(file, "0");   /* dummy for length 1 */
+            }
             fprintf(file, "\n");
-            fprintf(file, "%d\n", suffix_exhausted[L-1][c]);
         }
     }
 }
@@ -559,37 +555,32 @@ static int restore_state(FILE *file)
     if (fscanf(file, "%llu\n", &st) != 1) return 1;
     set = (uint_big)st;
 
-    /* Reset all suffix states */
-    int L, c, i;
-    for (L = mn; L <= mx; L++) {
+    /* Reset all pair states */
+    int L, c;
+    for (L = 1; L <= maxlength; L++) {
         for (c = 0; c < tables.charset_sz; c++) {
-            memset(suffix_digits[L-1][c], 0, L-1);
-            suffix_exhausted[L-1][c] = 0;
+            if (L > 1)
+                memset(pair_suffix[L-1][c], 0, L-1);
+            pair_exhausted[L-1][c] = 0;
         }
     }
 
-    /* Read data for our pairs (identified by L and c) */
+    /* Read data for our pairs */
     int fileL, filec;
-    while (fscanf(file, "%d %d\n", &fileL, &filec) == 2) {
+    char hex[2048];
+    while (fscanf(file, "%d %d %s\n", &fileL, &filec, hex) == 3) {
         int pair_idx = (fileL - mn) * tables.charset_sz + filec;
-        if (pair_idx % node_count != (node_id - 1)) {
-            /* Unexpected pair – skip? but we only saved ours, so should never happen */
-            /* skip the data */
-            char dummy[256];
-            fgets(dummy, sizeof(dummy), file);  /* digits line */
-            fgets(dummy, sizeof(dummy), file);  /* exhausted flag */
+        if (pair_idx % node_count != (node_id - 1))
             continue;
+        if (fileL > 1) {
+            int d = fileL - 1;
+            if ((int)strlen(hex) != d * 2) continue;  /* safety */
+            for (int i = 0; i < d; i++) {
+                unsigned int byte;
+                sscanf(hex + 2*i, "%2x", &byte);
+                pair_suffix[fileL-1][filec][i] = (uint8_t)byte;
+            }
         }
-        for (i = 0; i < fileL - 1; i++) {
-            int digit;
-            if (fscanf(file, "%d ", &digit) != 1) return 1;
-            suffix_digits[fileL-1][filec][i] = (uint8_t)(digit % tables.charset_sz);
-        }
-        int newline = fgetc(file);
-        if (newline != '\n') ungetc(newline, file);
-        int exhausted;
-        if (fscanf(file, "%d\n", &exhausted) != 1) return 1;
-        suffix_exhausted[fileL-1][filec] = exhausted;
     }
     state_restored = 1;
     return 0;
@@ -623,7 +614,6 @@ int do_inc2_crack(struct db_main *db, const char *freq_file)
     }
 
     init_permutations();
-    init_powers();
 
     /* ---- node splitting (round-robin) ---- */
     node_count = (options.node_count > 1) ? options.node_count : 1;
@@ -632,30 +622,18 @@ int do_inc2_crack(struct db_main *db, const char *freq_file)
 
     total_pairs = (maxlength - minlength + 1) * tables.charset_sz;
 
-    /* ---- allocate suffix digit arrays ---- */
-    free_suffix_arrays();
-    suffix_digits = malloc(maxlength * sizeof(uint8_t **));
-    suffix_exhausted = malloc(maxlength * sizeof(int *));
-    int L, c;
-    for (L = 1; L <= maxlength; L++) {
-        suffix_digits[L-1] = malloc(tables.charset_sz * sizeof(uint8_t *));
-        suffix_exhausted[L-1] = malloc(tables.charset_sz * sizeof(int));
-        for (c = 0; c < tables.charset_sz; c++) {
-            suffix_digits[L-1][c] = malloc((L - 1) * sizeof(uint8_t));
-            memset(suffix_digits[L-1][c], 0, (L - 1));
-            suffix_exhausted[L-1][c] = 0;
-        }
-    }
+       /* ---- allocate pair suffix arrays ---- */
+    free_pair_suffix();
+    alloc_pair_suffix();
 
     status_init(get_progress, 0);
     rec_restore_mode(restore_state);
     rec_init(db, save_state);
 
     if (john_main_process) {
-        log_event("Proceeding with inc2 mode (round-robin pairs, interleaved strides)");
-        log_event("Lengths: %d-%d, charset: %d characters, special: %d",
-                  minlength, maxlength, tables.charset_sz, tables.num_special);
-        log_event("Node %d/%d of %d total pairs", node_id, node_count, total_pairs);
+        log_event("Proceeding with inc2 mode (unlimited fast‑rotation suffix)");
+        log_event("Lengths: %d-%d, charset: %d, node %d/%d",
+                  minlength, maxlength, tables.charset_sz, node_id, node_count);
         if (rec_restored) fprintf(stderr, "Proceeding with inc2 mode (resumed)\n");
     }
 
@@ -664,53 +642,62 @@ int do_inc2_crack(struct db_main *db, const char *freq_file)
     if (state_restored)
         state_restored = 0;
 
-    /* ---- main generation loop (interleaved strides) ---- */
+        /* ---- main generation loop (with batch stride) ---- */
+    uint8_t *suffix_digits_temp = malloc(MAX_CAND_LENGTH);
     int work_done;
     do {
-		work_done = 0;
-		/* Walk all possible pair indices; only process those belonging to this node */
-		int pair_idx;
-		for (pair_idx = 0; pair_idx < total_pairs; pair_idx++) {
-			if (pair_idx % node_count != (node_id - 1))
-				continue;
+        work_done = 0;
+        for (int L = minlength; L <= maxlength; L++) {
+			for (int first = 0; first < tables.charset_sz; first++) {
+				// compute pair_idx if needed for node splitting
+				int pair_idx = (L - minlength) * tables.charset_sz + first;
+				if (pair_idx % node_count != (node_id - 1))
+					continue;
 
-			int first = pair_idx / (maxlength - minlength + 1);
-			int L = minlength + (pair_idx % (maxlength - minlength + 1));
+				if (pair_exhausted[L-1][first])
+					continue;
 
-            if (suffix_exhausted[L-1][first])
-                continue;
+				// same stride logic (no need to change)
+				double factor = 1.0 / (1.0 + (double)first / (double)tables.charset_sz);
+				int stride = (int)(INTERLEAVE_STRIDE * factor);
+				if (stride < 1) stride = 1;
 
-            int first_char_rank = first;   // 0-based
-			double factor = 1.0 / (1.0 + (double)first_char_rank / (double)tables.charset_sz);
-			int stride = (int)(INTERLEAVE_STRIDE * factor);
-			if (stride < 1) stride = 1;
+				for (int s = 0; s < stride; s++) {
+					if (event_abort)
+						goto out;
+					if (pair_exhausted[L-1][first])
+						break;
 
-			uint_big stride_remain = stride;
-			while (stride_remain > 0 &&
-                   !suffix_exhausted[L-1][first] &&
-                   !event_abort) {
+					if (L > 1) {
+						memcpy(suffix_digits_temp, pair_suffix[L-1][first], L - 1);
+					}
 
-                build_word_from_digits(L, first, suffix_digits[L-1][first], word);
-                set++;
+					build_word(L, first, suffix_digits_temp, word);
+					set++;
 
-                if (options.flags & FLG_MASK_CHK) {
-                    if (do_mask_crack(word)) goto out;
-                } else {
-                    if (crk_process_key(word)) goto out;
-                }
+					if (options.flags & FLG_MASK_CHK) {
+						if (do_mask_crack(word)) goto out;
+					} else {
+						if (crk_process_key(word)) goto out;
+					}
 
-                stride_remain--;
-                if (!advance_suffix(L, first))
-                    break;
-            }
-            work_done = 1;
-        }
-        /* Save state after each full pass (all pairs) for safe recovery */
+					/* Advance suffix by one repunit step, mark exhausted if wrapped */
+					if (L > 1) {
+						if (suffix_add_repunit(pair_suffix[L-1][first], L - 1, tables.charset_sz))
+							pair_exhausted[L-1][first] = 1;
+					} else {
+						pair_exhausted[L-1][first] = 1;   /* length 1: single candidate */
+					}
+				}
+				work_done = 1;
+			}
+		}
         if (work_done)
             rec_save();
     } while (work_done && !event_abort);
 
 out:
+    free(suffix_digits_temp);
     crk_done();
     rec_done(event_abort);
     return 0;

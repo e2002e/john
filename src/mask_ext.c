@@ -136,7 +136,7 @@ void mask_ext_calc_combination(mask_cpu_context *ptr, int max_static_range)
 		error();
 	}
 
-	n = ptr->count;
+	n = ptr->active_count;
 	data = (int*) mem_alloc(n * sizeof(int));
 	mask_skip_ranges = (int*) mem_alloc(MASK_FMT_INT_PLHDR * sizeof(int));
 

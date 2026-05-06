@@ -187,6 +187,8 @@
 #define FLG_FORCE_TTY			0x2000000000000000ULL
 /* Turn off logging */
 #define FLG_NOLOG			0x4000000000000000ULL
+#define FLG_INC2_CHK			0x8000000000000000ULL
+#define FLG_INC2_SET			(FLG_INC2_CHK | FLG_CRACKING_SET)
 
 /*
  * Macro for getting correct node number regardless of if MPI or not
@@ -449,6 +451,8 @@ struct options_main {
 	int subset_min_diff;
 /* Subsets, max. diff */
 	int subset_max_diff;
+/* Inc2 frequency file */
+	char *inc2_freq;
 /* --[no-]keep-guessing tri-state option (vs. format's FMT_NOT_EXACT) */
 	int keep_guessing;
 /* --log-stderr */
