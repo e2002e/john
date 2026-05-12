@@ -38,8 +38,8 @@ typedef uint64_t uint_big;
 
 #define MAX_CAND_LENGTH PLAINTEXT_BUFFER_SIZE
 #define DEFAULT_MAX_LEN 16
-#define INTERLEAVE_STRIDE 10000   /* words generated per (L,first) pair per iteration */
-#define INTERLEAVE_SUB_STRIDE 1000   /* words generated per (L,sc) pair per iteration */
+#define INTERLEAVE_STRIDE 100000   /* words generated per (L,first) pair per iteration */
+#define INTERLEAVE_SUB_STRIDE 10000   /* words generated per (L,sc) pair per iteration */
 
 char word[PLAINTEXT_BUFFER_SIZE];
 
@@ -635,12 +635,16 @@ int do_inc2_crack(struct db_main *db, const char *freq_file)
     if (state_restored)
         state_restored = 0;
 
+	double log_charset_sz = log(tables.charset_sz);
+
     int work_done;
     do {
         work_done = 0;
         for (int L = minlength; L <= maxlength; L++) {
             int tail_len = L - 2;
-			double len_factor = 1.0 / (1.0 + (double)(L - minlength) / maxlength);   // shorter → larger
+			double diff = (double)(L - minlength) / maxlength;
+			// diff * diff squares the ratio, making the drop-off much sharper
+			double len_factor = 1.0 / (1.0 + 5.0 * (diff * diff));
             for (int first = 0; first < tables.charset_sz; first++) {
                 int pair_idx = (L - minlength) * tables.charset_sz + first;
                 if (pair_idx % node_count != (node_id - 1))
@@ -664,7 +668,8 @@ int do_inc2_crack(struct db_main *db, const char *freq_file)
                 }
 
                 /* Weighted total stride for this (L,first) pair */
-				double factor1 = 1.0 / (1.0 + (double)first / (double)tables.charset_sz);
+				double diff1 = (double)first / tables.charset_sz;
+				double factor1 = 1.0 / (1.0 + 5.0 * (diff1 * diff1));
 				int total_stride = (int)(INTERLEAVE_STRIDE * factor1 * len_factor);
 				if (total_stride < 1) total_stride = 1;
 
@@ -676,7 +681,7 @@ int do_inc2_crack(struct db_main *db, const char *freq_file)
 						continue;
 
 					/* Weighted sub-stride for the second character */
-					double factor2 = 1.0 / (1.0 + (double)sc / (double)tables.charset_sz);
+					double factor2 = log_charset_sz;//1.0 / (1.0 + (double)sc / (double)tables.charset_sz);
 					int stride2 = (int)(INTERLEAVE_SUB_STRIDE * factor2);
 					if (stride2 < 1) stride2 = 1;
 
