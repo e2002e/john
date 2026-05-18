@@ -1604,18 +1604,32 @@ static void flat_set_key_limit(mask_cpu_context *ctx, int loop, int limit) {
     template_key[mask_cur_len + loop] = '\0';
 }
 
-static int flat_next_state_limit(mask_cpu_context *ctx, int loop, int limit) {
+/*
+ * Advances the state according to the requested loop:
+ *   for (i = 0; i < limit; i++)
+ *       if (++iter[i] >= count[i]) { iter[i] = 0; break; }
+ *
+ * Returns 1 when the state wraps back to all‑zero (i.e. length exhausted).
+ */
+static int flat_next_state(mask_cpu_context *ctx, int loop, int limit) {
     int i;
     for (i = 0; i < limit; i++) {
         int ri = ctx->active_idx[i];
-        if (++ctx->ranges[ri].iter[loop] < ctx->ranges[ri].count)
-            return 0;                     /* still alive */
-        ctx->ranges[ri].iter[loop] = 0;   /* carry out */
+        if (++ctx->ranges[ri].iter[loop] >= ctx->ranges[ri].count) {
+            ctx->ranges[ri].iter[loop] = 0;
+            break;          // overflow → reset this position and stop
+        }
     }
-    return 1;   /* wrapped → exhausted */
+    /* After the update, check if all iterators are zero (full cycle completed) */
+    for (i = 0; i < limit; i++) {
+        int ri = ctx->active_idx[i];
+        if (ctx->ranges[ri].iter[loop] != 0)
+            return 0;       // not yet wrapped
+    }
+    return 1;               // wrapped → length exhausted
 }
 
-static int get_loop_limit(mask_cpu_context *ctx, int loop) {
+static int get_loop(mask_cpu_context *ctx, int loop) {
     int limit = 0;
     while (limit < ctx->active_count &&
            ctx->ranges[ctx->active_idx[limit]].pos < mask_cur_len + loop)
@@ -1643,7 +1657,7 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
             idx = (idx + 1) % (max_loop + 1);
 
         int loop = idx;
-        int limit = get_loop_limit(cpu_mask_ctx, loop);
+        int limit = get_loop(cpu_mask_ctx, loop);
         int stride_count = 0;
 
         /* Generate a block of up to STRIDE candidates from this length */
@@ -1660,7 +1674,7 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
 
             process_key(template_key);
 
-            if (flat_next_state_limit(cpu_mask_ctx, loop, limit)) {
+            if (flat_next_state(cpu_mask_ctx, loop, limit)) {
                 loop_done[loop] = 1;
                 n_active--;
                 break;  // loop exhausted
@@ -1703,7 +1717,7 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
             idx = (idx + 1) % (max_loop + 1);
 
         int loop = idx;
-        int limit = get_loop_limit(cpu_mask_ctx, loop);
+        int limit = get_loop(cpu_mask_ctx, loop);
         int stride_count = 0;
 
         /* Generate a block of up to STRIDE candidates from this length */
@@ -1719,7 +1733,7 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
 
             process_key(template_key);
 
-            if (flat_next_state_limit(cpu_mask_ctx, loop, limit)) {
+            if (flat_next_state(cpu_mask_ctx, loop, limit)) {
                 loop_done[loop] = 1;
                 n_active--;
                 break;  // loop exhausted
