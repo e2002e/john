@@ -37,7 +37,7 @@ typedef uint64_t uint_big;
 
 #define MAX_CAND_LENGTH PLAINTEXT_BUFFER_SIZE
 #define DEFAULT_MAX_LEN  16
-#define INTERLEAVE_STRIDE  1000       /* candidates per (L,first) pair per iteration */
+#define INTERLEAVE_STRIDE  10000       /* candidates per (L,first) pair per iteration */
 
 char word[PLAINTEXT_BUFFER_SIZE];
 
