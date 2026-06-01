@@ -37,10 +37,72 @@ typedef uint64_t uint_big;
 
 #define MAX_CAND_LENGTH PLAINTEXT_BUFFER_SIZE
 #define DEFAULT_MAX_LEN  16
-#define INTERLEAVE_STRIDE  10000       /* candidates per (L,first) pair per iteration */
+#define INTERLEAVE_STRIDE  1000000       /* candidates per (L,first) pair per iteration */
+
+/* Cost = sum(suffix digits) + LENGTH_PENALTY * (L - minlength)
+   Higher penalty → stronger preference for short passwords.
+   Typical value: 1–3.  0 disables. */
+#define LENGTH_PENALTY  2
 
 char word[PLAINTEXT_BUFFER_SIZE];
 
+/* ---------- Simple min‑heap for (cost, L, first) ---------- */
+struct heap_entry {
+    int cost;      /* sum of suffix digits */
+    int L;
+    int first;
+};
+
+static struct heap_entry *heap = NULL;
+static int heap_size = 0;
+static int heap_capacity = 0;
+
+static void heap_swap(int i, int j) {
+    struct heap_entry tmp = heap[i];
+    heap[i] = heap[j];
+    heap[j] = tmp;
+}
+
+static void heap_push(int cost, int L, int first) {
+    if (heap_size >= heap_capacity) {
+        heap_capacity = heap_capacity ? heap_capacity * 2 : 1024;
+        heap = realloc(heap, heap_capacity * sizeof(struct heap_entry));
+        if (!heap) {
+            fprintf(stderr, "inc2: out of memory for heap\n");
+            exit(1);
+        }
+    }
+    int i = heap_size++;
+    heap[i].cost = cost;
+    heap[i].L = L;
+    heap[i].first = first;
+    while (i > 0) {
+        int parent = (i - 1) / 2;
+        if (heap[parent].cost <= heap[i].cost) break;
+        heap_swap(parent, i);
+        i = parent;
+    }
+}
+
+static int heap_pop(int *cost, int *L, int *first) {
+    if (heap_size == 0) return 0;
+    *cost = heap[0].cost;
+    *L = heap[0].L;
+    *first = heap[0].first;
+    heap[0] = heap[--heap_size];
+    int i = 0;
+    while (1) {
+        int left = 2 * i + 1;
+        int right = 2 * i + 2;
+        int smallest = i;
+        if (left < heap_size && heap[left].cost < heap[smallest].cost) smallest = left;
+        if (right < heap_size && heap[right].cost < heap[smallest].cost) smallest = right;
+        if (smallest == i) break;
+        heap_swap(i, smallest);
+        i = smallest;
+    }
+    return 1;
+}
 /* ------------------------------------------------------------------------- */
 /*  Frequency tables (bigram + optional trigram)                              */
 /* ------------------------------------------------------------------------- */
@@ -657,96 +719,178 @@ int do_inc2_crack(struct db_main *db, const char *freq_file)
 
     crk_init(db, NULL, NULL);
 
-        int work_done;
-    do {
-        work_done = 0;
-        for (int L = minlength; L <= maxlength; L++) {
-            struct len_state *st = &states[L - minlength];
-            int d = L - 1;
-            for (int first = 0; first < tables.charset_sz; first++) {
-                int pair_idx = (L - minlength) * tables.charset_sz + first;
-                if (pair_idx % node_count != (node_id - 1)) continue;
-                if (st->exhausted[first]) continue;
+        /* NEW: Best‑first enumeration using a min‑heap */
+    /* Push the first candidate from every active (L,first) pair */
+    for (int L = minlength; L <= maxlength; L++) {
+        struct len_state *st = &states[L - minlength];
+        int d = L - 1;
+        for (int first = 0; first < tables.charset_sz; first++) {
+            int pair_idx = (L - minlength) * tables.charset_sz + first;
+            if (pair_idx % node_count != (node_id - 1)) continue;
+            if (st->exhausted[first]) continue;
 
-                if (L == 1) {
-                    word[0] = tables.base_order[0][first];
-                    word[1] = '\0'; set++;
-                    if (options.flags & FLG_MASK_CHK) { if(do_mask_crack(word)) goto out; }
-                    else { if(crk_process_key(word)) goto out; }
-                    st->exhausted[first] = 1; work_done = 1;
+            if (L == 1) {
+				heap_push(0 + (1 + st->phase[first] / 2) * (L - minlength), L, first);
+			} else {
+				memset(st->digits[first], 0, d);
+				st->phase[first] = 0;
+				int cost = 0;  /* all digits 0 */
+				heap_push(cost + (1 + st->phase[first] / 2) * (L - minlength), L, first);
+			}
+        }
+    }
+
+    int work_done = 0;
+    while (heap_size > 0) {
+        int cur_cost, cur_L, cur_first;
+        if (!heap_pop(&cur_cost, &cur_L, &cur_first))
+            break;
+
+        if (event_abort) goto out;
+
+        struct len_state *st = &states[cur_L - minlength];
+
+        /* Build and test the candidate */
+        if (cur_L == 1) {
+            word[0] = tables.base_order[0][cur_first];
+            word[1] = '\0';
+        } else {
+            build_word(cur_L, cur_first, st->digits[cur_first], word);
+        }
+
+        set++;
+        work_done = 1;
+
+        if (options.flags & FLG_MASK_CHK) {
+            if (do_mask_crack(word)) goto out;
+        } else {
+            if (crk_process_key(word)) goto out;
+        }
+
+        /* Advance odometer for this (L,first) pair and push next candidate */
+        if (cur_L == 1) {
+            st->exhausted[cur_first] = 1;   /* single char done */
+        } else {
+            int d = cur_L - 1;
+            int phase = st->phase[cur_first];
+            int cutoff = cutoff_table[phase];
+            int prev = prev_cutoff(phase);
+            int bases[MAX_CAND_LENGTH];
+
+            /* Build bases, respecting phase and optional top‑N pruning */
+            for (int i = 0; i < d; i++) {
+                int base = tables.charset_sz;
+                if (i >= 1) base = cutoff + 1;
+#if INC2_TOP_N > 0
+                if (INC2_TOP_N < base) base = INC2_TOP_N;
+#endif
+                bases[i] = base;
+            }
+
+            /* Advance odometer; if overflow, try next phase */
+            int overflow = suffix_add_mixed(st->digits[cur_first], bases, d);
+            if (overflow) {
+                /* No more candidates in this phase */
+                if (phase + 1 < num_phases) {
+                    phase++;
+                    st->phase[cur_first] = phase;
+                    cutoff = cutoff_table[phase];
+                    prev = prev_cutoff(phase);
+                    /* Reset suffix: start with the smallest valid suffix */
+                    memset(st->digits[cur_first], 0, d);
+                    if (d >= 2) st->digits[cur_first][1] = prev + 1; /* first restricted > prev */
+                    /* Recalculate bases with new cutoff */
+                    for (int i = 0; i < d; i++) {
+                        bases[i] = tables.charset_sz;
+                        if (i >= 1) bases[i] = cutoff + 1;
+#if INC2_TOP_N > 0
+                        if (INC2_TOP_N < bases[i]) bases[i] = INC2_TOP_N;
+#endif
+                    }
+                    /* Sanity check: the new suffix must be valid (max_restricted > prev) */
+                    int max_restricted = 0;
+                    for (int i = 1; i < d; i++)
+                        if (st->digits[cur_first][i] > max_restricted)
+                            max_restricted = st->digits[cur_first][i];
+                    if (max_restricted <= prev) {
+                        /* Should not happen; mark exhausted */
+                        st->exhausted[cur_first] = 1;
+                        continue;
+                    }
+                } else {
+                    st->exhausted[cur_first] = 1;
                     continue;
                 }
-
-                /* L >= 2 */
-                int phase = st->phase[first];
-                int cutoff = cutoff_table[phase];
-                int prev = prev_cutoff(phase);
-                uint8_t suffix[PLAINTEXT_BUFFER_SIZE];
-                memcpy(suffix, st->digits[first], d);
-
-                int bases[MAX_CAND_LENGTH];
-                for (int i = 0; i < d; i++) {
-                    if (i >= 1) bases[i] = cutoff + 1;
-                    else bases[i] = tables.charset_sz;
-                }
-
-                int generated = 0;
-                int steps = 0;
-                while (steps < INTERLEAVE_STRIDE) {
-                    if (event_abort) goto out;
-
-                    /* Skip if any restricted digit <= prev (already visited) */
-                    if (d >= 2) {
-                        int max_restricted = 0;
-                        for (int i = 1; i < d; i++)
-                            if (suffix[i] > max_restricted) max_restricted = suffix[i];
-                        if (max_restricted <= prev) {
-                            if (suffix_add_mixed(suffix, bases, d)) {
+            } else {
+                /* Successfully advanced; check if the new suffix is still valid
+                   (max restricted digit > prev) */
+                if (d >= 2) {
+                    int max_restricted = 0;
+                    for (int i = 1; i < d; i++)
+                        if (st->digits[cur_first][i] > max_restricted)
+                            max_restricted = st->digits[cur_first][i];
+                    if (max_restricted <= prev) {
+                        /* Skipping invalid suffix – just advance again iteratively,
+                           but to keep the heap logic simple we skip and don't push */
+                        /* We'll loop here until we find a valid suffix or exhaust,
+                           but careful not to block the event loop. We'll use a limited
+                           skips counter and push next valid. */
+                        int skips = 0;
+                        int max_skips = 1000000; /* safety */
+                        while (max_restricted <= prev && skips < max_skips) {
+                            overflow = suffix_add_mixed(st->digits[cur_first], bases, d);
+                            if (overflow) {
                                 if (phase + 1 < num_phases) {
-                                    phase++; cutoff = cutoff_table[phase]; prev = prev_cutoff(phase);
-                                    memset(suffix, 0, d);
-                                    if (d >= 2) suffix[1] = prev + 1;   // start at smallest valid digit
-                                    for (int i = 0; i < d; i++) bases[i] = (i >= 1) ? cutoff + 1 : tables.charset_sz;
-                                    st->phase[first] = phase;
-                                    continue;
+                                    phase++;
+                                    st->phase[cur_first] = phase;
+                                    cutoff = cutoff_table[phase];
+                                    prev = prev_cutoff(phase);
+                                    memset(st->digits[cur_first], 0, d);
+                                    if (d >= 2) st->digits[cur_first][1] = prev + 1;
+                                    for (int i = 0; i < d; i++) {
+                                        bases[i] = tables.charset_sz;
+                                        if (i >= 1) bases[i] = cutoff + 1;
+#if INC2_TOP_N > 0
+                                        if (INC2_TOP_N < bases[i]) bases[i] = INC2_TOP_N;
+#endif
+                                    }
                                 } else {
-                                    st->exhausted[first] = 1;
+                                    st->exhausted[cur_first] = 1;
                                     break;
                                 }
                             }
-                            continue;
+                            max_restricted = 0;
+                            for (int i = 1; i < d; i++)
+                                if (st->digits[cur_first][i] > max_restricted)
+                                    max_restricted = st->digits[cur_first][i];
+                            skips++;
                         }
-                    }
-
-                    build_word(L, first, suffix, word);
-                    set++;
-                    if (options.flags & FLG_MASK_CHK) { if(do_mask_crack(word)) goto out; }
-                    else { if(crk_process_key(word)) goto out; }
-                    generated = 1;
-                    steps++;
-
-                    if (suffix_add_mixed(suffix, bases, d)) {
-                        if (phase + 1 < num_phases) {
-                            phase++; cutoff = cutoff_table[phase]; prev = prev_cutoff(phase);
-                            memset(suffix, 0, d);
-                            if (d >= 2) suffix[1] = prev + 1;
-                            for (int i = 0; i < d; i++) bases[i] = (i >= 1) ? cutoff + 1 : tables.charset_sz;
-                            st->phase[first] = phase;
+                        if (max_restricted <= prev) {
+                            st->exhausted[cur_first] = 1;
                             continue;
-                        } else {
-                            st->exhausted[first] = 1;
-                            break;
                         }
                     }
                 }
-                memcpy(st->digits[first], suffix, d);
-                if (generated) work_done = 1;
-                if (st->exhausted[first]) continue;
             }
-        }
-        if (work_done) rec_save();
-    } while (work_done && !event_abort);
 
+            /* Push the next candidate with its new cost (sum of suffix digits) */
+            int new_cost = 0;
+			for (int i = 0; i < d; i++)
+				new_cost += st->digits[cur_first][i];
+			heap_push(new_cost + ((1 + st->phase[cur_first] / 2)) * (cur_L - minlength), cur_L, cur_first);
+        }
+
+        /* Periodic state save (every 10000 candidates) */
+        static uint_big last_save = 0;
+        if (set - last_save >= 10000) {
+            rec_save();
+            last_save = set;
+        }
+    }
+
+    /* Final save if any work was done */
+    if (work_done)
+        rec_save();
 out:
     crk_done();
     rec_done(event_abort);

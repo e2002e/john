@@ -41,7 +41,7 @@ extern void inc_hybrid_fix_state(void);
 extern void pp_hybrid_fix_state(void);
 extern void ext_hybrid_fix_state(void);
 
-#define INTERLEAVE_STRIDE 1000000
+#define INTERLEAVE_STRIDE 1000
 
 static mask_parsed_ctx parsed_mask;
 static mask_cpu_context cpu_mask_ctx, rec_ctx, restored_ctx;
@@ -1592,11 +1592,19 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
  * Returns 1 when the state wraps back to all‑zero (so the caller can break).
  */
 
-static void flat_set_key_limit(mask_cpu_context *ctx, int loop, int limit) {
+// 1. Mark functions static inline to completely eliminate function call overhead
+// 2. Use __restrict__ to allow aggressive register allocation by the compiler
+static inline void flat_set_key_limit(mask_cpu_context * __restrict__ ctx, int loop, int limit) {
     int i;
+    // Cache base pointers locally
+    mask_range * __restrict__ ranges = ctx->ranges;
+    const int * __restrict__ active_idx = ctx->active_idx;
+
     for (i = 0; i < limit; i++) {
-        int ri = ctx->active_idx[i];
-        mask_range *r = &ctx->ranges[ri];
+        int ri = active_idx[i];
+        mask_range *r = &ranges[ri];
+
+        // Direct array lookup using pre-fetched pointers
         template_key[r->pos + r->offset] =
             r->start ? (r->start + r->iter[loop])
                      : r->chars[r->iter[loop]];
@@ -1604,29 +1612,31 @@ static void flat_set_key_limit(mask_cpu_context *ctx, int loop, int limit) {
     template_key[mask_cur_len + loop] = '\0';
 }
 
-/*
- * Advances the state according to the requested loop:
- *   for (i = 0; i < limit; i++)
- *       if (++iter[i] >= count[i]) { iter[i] = 0; break; }
- *
- * Returns 1 when the state wraps back to all‑zero (i.e. length exhausted).
- */
-static int flat_next_state(mask_cpu_context *ctx, int loop, int limit) {
+static inline int flat_next_state(mask_cpu_context * __restrict__ ctx, int loop, int limit) {
     int i;
+    int broke = 0;
+    mask_range * __restrict__ ranges = ctx->ranges;
+    const int * __restrict__ active_idx = ctx->active_idx;
+
     for (i = 0; i < limit; i++) {
-        int ri = ctx->active_idx[i];
-        if (++ctx->ranges[ri].iter[loop] >= ctx->ranges[ri].count) {
-            ctx->ranges[ri].iter[loop] = 0;
-            break;          // overflow → reset this position and stop
+        int ri = active_idx[i];
+        if (++ranges[ri].iter[loop] >= ranges[ri].count) {
+            ranges[ri].iter[loop] = 0;
+            broke = 1;
+            break; // Overflow -> reset position and stop cascade
         }
     }
-    /* After the update, check if all iterators are zero (full cycle completed) */
+
+    // CRITICAL optimization: If the loop didn't break, elements incremented
+    // without rolling over. They cannot all be 0. Avoid the second loop entirely.
+    if (!broke) return 0;
+
+    /* Only verify the full wrap if an overflow actually occurred */
     for (i = 0; i < limit; i++) {
-        int ri = ctx->active_idx[i];
-        if (ctx->ranges[ri].iter[loop] != 0)
-            return 0;       // not yet wrapped
+        if (ranges[active_idx[i]].iter[loop] != 0)
+            return 0; // Not fully wrapped
     }
-    return 1;               // wrapped → length exhausted
+    return 1; // All zero -> length completely exhausted
 }
 
 static int get_loop(mask_cpu_context *ctx, int loop) {
@@ -1637,8 +1647,7 @@ static int get_loop(mask_cpu_context *ctx, int loop) {
     return limit;
 }
 
-static int generate_keys(mask_cpu_context *cpu_mask_ctx,
-                         uint64_t *my_candidates) {
+static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates) {
     char key_e[PLAINTEXT_BUFFER_SIZE];
     char *key;
     int max_loop = options.eff_maxlength - mask_cur_len;
@@ -1647,23 +1656,26 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
     int idx = 0;
 
     // Reset all iterators
-    for (int l = 0; l <= max_loop; l++)
-        for (int i = 0; i < cpu_mask_ctx->active_count; i++)
+    for (int l = 0; l <= max_loop; l++) {
+        for (int i = 0; i < cpu_mask_ctx->active_count; i++) {
             cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].iter[l] = 0;
+        }
+    }
 
     while (n_active > 0) {
-        /* Find next unfinished loop */
-        while (loop_done[idx])
-            idx = (idx + 1) % (max_loop + 1);
+        /* Replace modulo pointer advancing with explicit branch steps */
+        while (loop_done[idx]) {
+            idx++;
+            if (idx > max_loop) idx = 0;
+        }
 
         int loop = idx;
         int limit = get_loop(cpu_mask_ctx, loop);
         int stride_count = 0;
 
-        /* Generate a block of up to STRIDE candidates from this length */
         while (stride_count < INTERLEAVE_STRIDE && !loop_done[loop]) {
             flat_set_key_limit(cpu_mask_ctx, loop, limit);
-            // process the key (same as before)
+
 #define process_key(key_i) \
             do { \
                 key = key_i; \
@@ -1677,20 +1689,20 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx,
             if (flat_next_state(cpu_mask_ctx, loop, limit)) {
                 loop_done[loop] = 1;
                 n_active--;
-                break;  // loop exhausted
+                break;
             }
 
             stride_count++;
 
-            // Node support
             if (options.node_count && !(options.flags & FLG_MASK_STACKED) &&
                 !(*my_candidates)--) {
                 goto done;
             }
         }
 
-        /* Move to the next active length */
-        idx = (idx + 1) % (max_loop + 1);
+        /* Fast lookahead index increment replacing modulo operator */
+        idx++;
+        if (idx > max_loop) idx = 0;
     }
 
 done:
@@ -1698,31 +1710,35 @@ done:
 #undef process_key
 }
 
-static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
-                               uint64_t *my_candidates)
-{
+static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates) {
+    char key_e[PLAINTEXT_BUFFER_SIZE];
+    char *key;
     int max_loop = options.eff_maxlength - mask_cur_len;
     int loop_done[MAX_NUM_MASK_PLHDR] = {0};
     int n_active = max_loop + 1;
     int idx = 0;
 
     // Reset all iterators
-    for (int l = 0; l <= max_loop; l++)
-        for (int i = 0; i < cpu_mask_ctx->active_count; i++)
+    for (int l = 0; l <= max_loop; l++) {
+        for (int i = 0; i < cpu_mask_ctx->active_count; i++) {
             cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].iter[l] = 0;
+        }
+    }
 
     while (n_active > 0) {
-        /* Find next unfinished loop */
-        while (loop_done[idx])
-            idx = (idx + 1) % (max_loop + 1);
+        /* Replace modulo pointer advancing with explicit branch steps */
+        while (loop_done[idx]) {
+            idx++;
+            if (idx > max_loop) idx = 0;
+        }
 
         int loop = idx;
         int limit = get_loop(cpu_mask_ctx, loop);
         int stride_count = 0;
 
-        /* Generate a block of up to STRIDE candidates from this length */
         while (stride_count < INTERLEAVE_STRIDE && !loop_done[loop]) {
             flat_set_key_limit(cpu_mask_ctx, loop, limit);
+
 #define process_key(key)                                            \
 			mask_fmt->methods.set_key(mask_cp_to_utf8(template_key),        \
 									mask_bench_index++);                  \
@@ -1736,27 +1752,26 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx,
             if (flat_next_state(cpu_mask_ctx, loop, limit)) {
                 loop_done[loop] = 1;
                 n_active--;
-                break;  // loop exhausted
+                break;
             }
 
             stride_count++;
 
-            // Node support
             if (options.node_count && !(options.flags & FLG_MASK_STACKED) &&
                 !(*my_candidates)--) {
                 goto done;
             }
         }
 
-        /* Move to the next active length */
-        idx = (idx + 1) % (max_loop + 1);
+        /* Fast lookahead index increment replacing modulo operator */
+        idx++;
+        if (idx > max_loop) idx = 0;
     }
 
 done:
     return 0;
 #undef process_key
 }
-
 
 /* Skips iteration for positions stored in arr (internal mask ranges). */
 static void skip_position(mask_cpu_context *cpu_mask_ctx, int *arr)
