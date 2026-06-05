@@ -32,6 +32,7 @@
 #include "unicode.h"
 #include "encoding_data.h"
 #include "mask_ext.h"
+#include "markov_tables.h"
 
 //#define MASK_DEBUG
 
@@ -41,7 +42,11 @@ extern void inc_hybrid_fix_state(void);
 extern void pp_hybrid_fix_state(void);
 extern void ext_hybrid_fix_state(void);
 
-#define INTERLEAVE_STRIDE 1000
+#define INTERLEAVE_STRIDE 1024 * 32
+
+// Filtered tables for O(1) lookup in the hot loop
+static unsigned char pos_markov_table[MAX_NUM_MASK_PLHDR][256][256];
+static unsigned char pos_markov_start[MAX_NUM_MASK_PLHDR][256];
 
 static mask_parsed_ctx parsed_mask;
 static mask_cpu_context cpu_mask_ctx, rec_ctx, restored_ctx;
@@ -1393,6 +1398,34 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 	}
 	cpu_mask_ctx->cpu_count = cpu_mask_ctx->active_count;
 
+	// --- AVALANCHE MARKOV FIX: PRECOMPUTE FILTERED TABLES ---
+	for (i = 0; i < cpu_mask_ctx->active_count; i++) {
+		int ri = cpu_mask_ctx->active_idx[i];
+		mask_range *r = &cpu_mask_ctx->ranges[ri];
+		int valid_idx;
+		int m, prev;
+
+		// 1. Build filtered start nodes for this position
+		valid_idx = 0;
+		for (m = 0; m < 256; m++) {
+			unsigned char cand = markov_start_nodes[m];
+			// Only add the character if the mask (-mask=...) allows it
+			if (memchr((const char*)r->chars, cand, r->count)) {
+				pos_markov_start[ri][valid_idx++] = cand;
+			}
+		}
+
+		// 2. Build filtered transition table for this position
+		for (prev = 0; prev < 256; prev++) {
+			valid_idx = 0;
+			for (m = 0; m < 256; m++) {
+				unsigned char cand = markov_table[prev][m];
+				if (memchr((const char*)r->chars, cand, r->count)) {
+					pos_markov_table[ri][prev][valid_idx++] = cand;
+				}
+			}
+		}
+	}
 #ifdef MASK_DEBUG
 	fprintf(stderr, "%s() count is %d\n", __FUNCTION__, cpu_mask_ctx->cpu_count);
 #endif
@@ -1472,9 +1505,8 @@ static void truncate_mask(mask_cpu_context *cpu_mask_ctx, int range_idx, int ran
 		mask_tot_cand *= cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].count;
 	}
 
-	if (options.node_count && !(options.flags & FLG_MASK_STACKED))
-		mask_tot_cand = mask_tot_cand *
-			(options.node_max + 1 - options.node_min) / options.node_count;
+	/* FIX: Removed the options.node_count division block from here.
+	 * Scaling it here caused a double-division cascade downstream. */
 }
 
 /*
@@ -1528,6 +1560,20 @@ static char *generate_template_key(char *mask, const char *key, int key_len,
 			}
 	}
 
+	/*
+	 * Replace placeholders for any ranges that were handed off to the GPU.
+	 * They must not stay as '#' – use the first character of that range.
+	 */
+	for (i = 0; i < MAX_NUM_MASK_PLHDR; i++) {
+		if (cpu_mask_ctx->ranges[i].count > 0 &&
+		    !cpu_mask_ctx->active_positions[i]) {
+			int p = cpu_mask_ctx->ranges[i].pos +
+			        cpu_mask_ctx->ranges[i].offset;
+			if (p < max_keylen && template_key[p] == '#')
+				template_key[p] = cpu_mask_ctx->ranges[i].chars[0];
+		}
+	}
+
 	template_key[k] = '\0';
 
 	if (!mask_has_8bit && !(options.flags & FLG_MASK_STACKED)) {
@@ -1552,6 +1598,7 @@ static char *generate_template_key(char *mask, const char *key, int key_len,
 #ifdef MASK_DEBUG
 	fprintf(stderr, "%s(): Template key: '%s'%s\n", __FUNCTION__, template_key, mask_has_8bit && !(options.flags & FLG_MASK_STACKED) ? " has 8-bit" : "");
 #endif
+
 
 	return template_key;
 }
@@ -1594,49 +1641,120 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
 
 // 1. Mark functions static inline to completely eliminate function call overhead
 // 2. Use __restrict__ to allow aggressive register allocation by the compiler
+// Déclaration du tableau de probabilités précalculé
+// (À initialiser ailleurs dans ton code, par ex. lors du parsing du .chr)
+extern unsigned char markov_table[256][256];
+extern unsigned char markov_start_nodes[256]; // Probabilités pour la 1ère lettre
+
 static inline void flat_set_key_limit(mask_cpu_context * __restrict__ ctx, int loop, int limit) {
+    if (limit == 0) {
+        /* Safety: fill with first allowed char to avoid raw '#' */
+        for (int i = 0; i < ctx->active_count; i++) {
+            int ri = ctx->active_idx[i];
+            mask_range *r = &ctx->ranges[ri];
+            template_key[r->pos + r->offset] =
+                r->start ? r->start : pos_markov_start[ri][0];
+        }
+        template_key[mask_cur_len + loop] = '\0';
+        return;
+    }
+
     int i;
-    // Cache base pointers locally
     mask_range * __restrict__ ranges = ctx->ranges;
     const int * __restrict__ active_idx = ctx->active_idx;
 
-    for (i = 0; i < limit; i++) {
+    int first_ri = active_idx[0];
+    mask_range *first_r = &ranges[first_ri];
+
+    // CPU unconditionally sets its first handled position
+    template_key[first_r->pos + first_r->offset] =
+        first_r->start ? (first_r->start + first_r->iter[loop])
+                       : pos_markov_start[first_ri][first_r->iter[loop]];
+
+    // CPU conditionally sets the rest
+    for (i = 1; i < limit; i++) {
         int ri = active_idx[i];
         mask_range *r = &ranges[ri];
 
-        // Direct array lookup using pre-fetched pointers
+        unsigned char prev_char = (unsigned char)template_key[r->pos + r->offset - 1];
+
         template_key[r->pos + r->offset] =
             r->start ? (r->start + r->iter[loop])
-                     : r->chars[r->iter[loop]];
+                     : pos_markov_table[ri][prev_char][r->iter[loop]];
     }
+
     template_key[mask_cur_len + loop] = '\0';
 }
 
 static inline int flat_next_state(mask_cpu_context * __restrict__ ctx, int loop, int limit) {
-    int i;
-    int broke = 0;
-    mask_range * __restrict__ ranges = ctx->ranges;
-    const int * __restrict__ active_idx = ctx->active_idx;
+	int i, j;
+	mask_range * __restrict__ ranges = ctx->ranges;
+	const int * __restrict__ active_idx = ctx->active_idx;
+	int weight_to_redistribute = 0;
 
-    for (i = 0; i < limit; i++) {
-        int ri = active_idx[i];
-        if (++ranges[ri].iter[loop] >= ranges[ri].count) {
-            ranges[ri].iter[loop] = 0;
-            broke = 1;
-            break; // Overflow -> reset position and stop cascade
-        }
-    }
+	/* Anti-diagonal (Simplex Lattice) state advance:
+	 * Scan right-to-left to find the first position where we can shift
+	 * "rank weight" from a left wheel to a right wheel, keeping the total sum (K) constant. */
+	for (i = limit - 2; i >= 0; i--) {
+		int ri = active_idx[i];
+		int ri_next = active_idx[i + 1];
 
-    // CRITICAL optimization: If the loop didn't break, elements incremented
-    // without rolling over. They cannot all be 0. Avoid the second loop entirely.
-    if (!broke) return 0;
+		// Can we shift weight from position i to position i+1 for this specific loop?
+		if (ranges[ri].iter[loop] > 0 && ranges[ri_next].iter[loop] < ranges[ri_next].count - 1) {
 
-    /* Only verify the full wrap if an overflow actually occurred */
-    for (i = 0; i < limit; i++) {
-        if (ranges[active_idx[i]].iter[loop] != 0)
-            return 0; // Not fully wrapped
-    }
-    return 1; // All zero -> length completely exhausted
+			ranges[ri].iter[loop]--;    // Decrement left wheel rank
+			ranges[ri_next].iter[loop]++;  // Increment right wheel rank
+
+			/* Collect all residual rank weights from wheels further to the right */
+			for (j = i + 2; j < limit; j++) {
+				int rj = active_idx[j];
+				weight_to_redistribute += ranges[rj].iter[loop];
+				ranges[rj].iter[loop] = 0; // Reset right-side wheel back to baseline
+			}
+
+			/* Pour the collected weight back as far left as possible to start the next permutation */
+			j = i + 1;
+			while (weight_to_redistribute > 0 && j < limit) {
+				int rj = active_idx[j];
+				int max_allowed = ranges[rj].count - 1 - ranges[rj].iter[loop];
+				int add = (weight_to_redistribute > max_allowed) ? max_allowed : weight_to_redistribute;
+
+				ranges[rj].iter[loop] += add;
+				weight_to_redistribute -= add;
+				j++;
+			}
+
+			return 0; // Successfully advanced to the next state within the current K-layer
+		}
+	}
+
+	/* If the loop completes, the current Markov Rank-Sum layer (K) for this loop is completely exhausted.
+	 * Advance to the next probability tier (K + 1). */
+	ctx->current_k[loop]++;
+
+	/* Reset the state arrays to the absolute first configuration of the new K layer.
+	 * We pack the target sum into the leftmost wheels up to their individual 'count' capacities. */
+	int remaining_k = ctx->current_k[loop];
+	for (i = 0; i < limit; i++) {
+		int ri = active_idx[i];
+		int max_idx = ranges[ri].count - 1;
+
+		if (remaining_k <= max_idx) {
+			ranges[ri].iter[loop] = remaining_k;
+			remaining_k = 0;
+		} else {
+			ranges[ri].iter[loop] = max_idx;
+			remaining_k -= max_idx;
+		}
+	}
+
+	/* If remaining_k is still greater than 0, even with every single active position maxed out,
+	 * the entire keyspace for this interleaved loop length is completely exhausted. */
+	if (remaining_k > 0) {
+		return 1;
+	}
+
+	return 0; // Successfully wrapped around to the beginning of the next K-layer
 }
 
 static int get_loop(mask_cpu_context *ctx, int loop) {
@@ -1648,96 +1766,111 @@ static int get_loop(mask_cpu_context *ctx, int loop) {
 }
 
 static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates) {
-    char key_e[PLAINTEXT_BUFFER_SIZE];
-    char *key;
-    int max_loop = options.eff_maxlength - mask_cur_len;
-    int loop_done[MAX_NUM_MASK_PLHDR] = {0};
-    int n_active = max_loop + 1;
-    int idx = 0;
+	char key_e[PLAINTEXT_BUFFER_SIZE];
+	char *key;
+	int max_loop = options.eff_maxlength - mask_cur_len;
+	int *loop_done = mem_calloc(max_loop + 1, sizeof(int));  // ← correct size
+	int n_active = max_loop + 1;
+	int idx = 0;
 
-    // Reset all iterators
-    for (int l = 0; l <= max_loop; l++) {
-        for (int i = 0; i < cpu_mask_ctx->active_count; i++) {
-            cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].iter[l] = 0;
-        }
-    }
+	if (!options.node_count && !restored) {
+		for (int l = 0; l <= max_loop; l++) {
+			cpu_mask_ctx->current_k[l] = 0;       // ← ADD THIS
+			for (int i = 0; i < cpu_mask_ctx->active_count; i++)
+				cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].iter[l] = 0;
+		}
+	}
 
-    while (n_active > 0) {
-        /* Replace modulo pointer advancing with explicit branch steps */
-        while (loop_done[idx]) {
-            idx++;
-            if (idx > max_loop) idx = 0;
-        }
+	while (n_active > 0) {
+		while (loop_done[idx]) {
+			idx++;
+			if (idx > max_loop) idx = 0;
+		}
+		int loop = idx;
+		int stride_count = 0;
+		int limit = get_loop(cpu_mask_ctx, loop);
+		if (limit == 0) {
+			loop_done[loop] = 1;
+			n_active--;
+			idx++;
+			if (idx > max_loop) idx = 0;
+			continue;
+		}
 
-        int loop = idx;
-        int limit = get_loop(cpu_mask_ctx, loop);
-        int stride_count = 0;
-
-        while (stride_count < INTERLEAVE_STRIDE && !loop_done[loop]) {
-            flat_set_key_limit(cpu_mask_ctx, loop, limit);
+		while (stride_count < INTERLEAVE_STRIDE && !loop_done[loop]) {
+			flat_set_key_limit(cpu_mask_ctx, loop, limit);
 
 #define process_key(key_i) \
-            do { \
-                key = key_i; \
-                if (!f_filter || ext_filter_body(key_i, key = key_e)) \
-                    if (crk_process_key(mask_cp_to_utf8(key))) \
-                        return 1; \
-            } while(0)
+			do { \
+				key = key_i; \
+				if (!f_filter || ext_filter_body(key_i, key = key_e)) \
+					if (crk_process_key(mask_cp_to_utf8(key))) \
+						return 1; \
+			} while(0)
 
-            process_key(template_key);
+			process_key(template_key);
 
-            if (flat_next_state(cpu_mask_ctx, loop, limit)) {
-                loop_done[loop] = 1;
-                n_active--;
-                break;
-            }
+			if (flat_next_state(cpu_mask_ctx, loop, limit)) {
+				loop_done[loop] = 1;
+				n_active--;
+				break;
+			}
 
-            stride_count++;
+			stride_count++;
 
-            if (options.node_count && !(options.flags & FLG_MASK_STACKED) &&
-                !(*my_candidates)--) {
-                goto done;
-            }
-        }
+			if (options.node_count && !(options.flags & FLG_MASK_STACKED) &&
+			    !(*my_candidates)--) {
+				goto done;
+			}
+		}
 
-        /* Fast lookahead index increment replacing modulo operator */
-        idx++;
-        if (idx > max_loop) idx = 0;
-    }
+		/* Fast lookahead index increment replacing modulo operator */
+		idx++;
+		if (idx > max_loop) idx = 0;
+	}
 
 done:
-    return 0;
+	MEM_FREE(loop_done);
+	return 0;
 #undef process_key
 }
 
 static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates) {
-    char key_e[PLAINTEXT_BUFFER_SIZE];
-    char *key;
-    int max_loop = options.eff_maxlength - mask_cur_len;
-    int loop_done[MAX_NUM_MASK_PLHDR] = {0};
-    int n_active = max_loop + 1;
-    int idx = 0;
+	char key_e[PLAINTEXT_BUFFER_SIZE];
+	char *key;
+	int max_loop = options.eff_maxlength - mask_cur_len;
+	int *loop_done = mem_calloc(max_loop + 1, sizeof(int));  // ← correct size
+	int n_active = max_loop + 1;
+	int idx = 0;
 
-    // Reset all iterators
-    for (int l = 0; l <= max_loop; l++) {
-        for (int i = 0; i < cpu_mask_ctx->active_count; i++) {
-            cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].iter[l] = 0;
-        }
-    }
+	/* FIX: Only wipe iterators if we aren't distributed across nodes and not restoring a checkpoint.
+	 * This prevents destroying the unique offsets assigned to each fork. */
+	if (!options.node_count && !restored) {
+		for (int l = 0; l <= max_loop; l++) {
+			cpu_mask_ctx->current_k[l] = 0;       // ← ADD THIS
+			for (int i = 0; i < cpu_mask_ctx->active_count; i++)
+				cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].iter[l] = 0;
+		}
+	}
 
-    while (n_active > 0) {
-        /* Replace modulo pointer advancing with explicit branch steps */
-        while (loop_done[idx]) {
-            idx++;
-            if (idx > max_loop) idx = 0;
-        }
+	while (n_active > 0) {
+		while (loop_done[idx]) {
+			idx++;
+			if (idx > max_loop) idx = 0;
+		}
+		int loop = idx;
+		int stride_count = 0;
+		int limit = get_loop(cpu_mask_ctx, loop);
+		if (limit == 0) {
+			loop_done[loop] = 1;
+			n_active--;
+			idx++;
+			if (idx > max_loop) idx = 0;
+			continue;
+		}
 
-        int loop = idx;
-        int limit = get_loop(cpu_mask_ctx, loop);
-        int stride_count = 0;
-
-        while (stride_count < INTERLEAVE_STRIDE && !loop_done[loop]) {
-            flat_set_key_limit(cpu_mask_ctx, loop, limit);
+		while (stride_count < INTERLEAVE_STRIDE && !loop_done[loop]) {
+			flat_set_key_limit(cpu_mask_ctx, loop, limit);
 
 #define process_key(key)                                            \
 			mask_fmt->methods.set_key(mask_cp_to_utf8(template_key),        \
@@ -1747,29 +1880,30 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_cand
 				return 1;                                                   \
 			}
 
-            process_key(template_key);
+			process_key(template_key);
 
-            if (flat_next_state(cpu_mask_ctx, loop, limit)) {
-                loop_done[loop] = 1;
-                n_active--;
-                break;
-            }
+			if (flat_next_state(cpu_mask_ctx, loop, limit)) {
+				loop_done[loop] = 1;
+				n_active--;
+				break;
+			}
 
-            stride_count++;
+			stride_count++;
 
-            if (options.node_count && !(options.flags & FLG_MASK_STACKED) &&
-                !(*my_candidates)--) {
-                goto done;
-            }
-        }
+			if (options.node_count && !(options.flags & FLG_MASK_STACKED) &&
+			    !(*my_candidates)--) {
+				goto done;
+			}
+		}
 
-        /* Fast lookahead index increment replacing modulo operator */
-        idx++;
-        if (idx > max_loop) idx = 0;
-    }
+		/* Fast lookahead index increment replacing modulo operator */
+		idx++;
+		if (idx > max_loop) idx = 0;
+	}
 
 done:
-    return 0;
+	MEM_FREE(loop_done);
+	return 0;
 #undef process_key
 }
 
@@ -1778,7 +1912,8 @@ static void skip_position(mask_cpu_context *cpu_mask_ctx, int *arr)
 {
 	if (arr != NULL) {
 		int k = 0;
-		while (k < MASK_FMT_INT_PLHDR && arr[k] >= 0 && arr[k] < cpu_mask_ctx->active_count) {
+		/* FIX: Check absolute index against MAX_NUM_MASK_PLHDR, not active_count */
+		while (k < MASK_FMT_INT_PLHDR && arr[k] >= 0 && arr[k] < MAX_NUM_MASK_PLHDR) {
 			int idx = arr[k];
 			cpu_mask_ctx->active_positions[idx] = 0;
 			k++;
@@ -1798,17 +1933,18 @@ static void skip_position(mask_cpu_context *cpu_mask_ctx, int *arr)
 /*
  * Divide a work between multiple nodes.  Called by finalize_mask()
  */
+/*
+ * Divide a work between multiple nodes.  Called by finalize_mask()
+ * FIX: Replaced float distribution with pure integer math to prevent overlap.
+ */
 static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 {
-	uint64_t offset, sub_offset, my_candidates, total_candidates, ctr;
+	uint64_t offset, my_candidates, total_candidates, ctr;
 	int i, j;
-	double fract;
 
 #ifdef MASK_DEBUG
 	fprintf(stderr, "%s()\n", __FUNCTION__);
 #endif
-
-	fract = (double)(options.node_max - options.node_min + 1) / options.node_count;
 
 	offset = 1;
 	for (i = 0; i < cpu_mask_ctx->active_count; i++) {
@@ -1817,23 +1953,21 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 			offset *= cpu_mask_ctx->ranges[ri].count;
 	}
 
-	sub_offset = 1;
-	for (i = 0; i < cpu_mask_ctx->active_count; i++) {
-		int ri = cpu_mask_ctx->active_idx[i];
-		if (cpu_mask_ctx->ranges[ri].pos < mask_cur_len - 1)
-			sub_offset *= cpu_mask_ctx->ranges[ri].count;
-	}
-
-	offset += sub_offset;
-
 	total_candidates = offset;
-	offset *= fract;
-	my_candidates = offset;
-	offset = my_candidates * (options.node_min - 1);
 
-	/* Compensate for rounding errors */
-	if (options.node_max == options.node_count)
-		my_candidates = total_candidates - offset;
+	/* 1. Calculate base share and remainder */
+	uint64_t node_share = total_candidates / options.node_count;
+	uint64_t remainder = total_candidates % options.node_count;
+
+	/* 2. Calculate exact integer start boundary for this node */
+	offset = node_share * (options.node_min - 1) +
+	         ((options.node_min - 1) < remainder ? (options.node_min - 1) : remainder);
+
+	/* 3. Calculate exact integer end boundary to size my_candidates */
+	uint64_t end_offset = node_share * options.node_max +
+	                      (options.node_max < remainder ? options.node_max : remainder);
+
+	my_candidates = end_offset - offset;
 
 	if (!my_candidates && !mask_increments_len) {
 		if (john_main_process)
@@ -1841,6 +1975,7 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 		error();
 	}
 
+	/* 4. Set iterator starting states from the perfectly aligned offset */
 	for (j = 0; j <= options.eff_maxlength - mask_cur_len; j++) {
 		ctr = 1;
 		for (i = 0; i < cpu_mask_ctx->active_count; i++) {
@@ -2543,16 +2678,10 @@ int do_mask_crack(const char *extern_key)
 
 	mask_parent_keys++;
 
-	/*
-	 * If not in hybrid mode and --min-len and/or --max-len are used (and
-	 * different), we iterate over lengths, stretching/truncating mask per
-	 * length.
-	 */
 	if (mask_increments_len) {
 		/* all lengths processed together, round‑robin */
 		mask_cur_len = options.eff_minlength;
 		if (mask_cur_len == 0) {
-			/* handle empty key separately */
 			if (john_main_process) {
 				if (!format_cannot_reset && (mask_fmt->params.flags & FMT_MASK)) {
 					finalize_mask(0);
@@ -2564,27 +2693,41 @@ int do_mask_crack(const char *extern_key)
 			mask_cur_len++;
 		}
 
-		/* finalize for the maximum length (template can hold up to max) */
+		/* finalize for the maximum length */
 		finalize_mask(options.eff_maxlength);
 		generate_template_key(mask, extern_key, extern_key_len, &parsed_mask, &cpu_mask_ctx, options.eff_maxlength);
 
-		/* compute correct total candidates across all lengths */
-		mask_tot_cand = 0;
+		/* FIX: compute correct GLOBAL total candidates across all lengths cleanly */
+		uint64_t global_tot_cand = 0;
 		for (int loop = 0; loop <= options.eff_maxlength - mask_cur_len; loop++) {
 			uint64_t len_cand = 1;
-			for (int i = 0; i < cpu_mask_ctx.active_count; i++) {
-				int ri = cpu_mask_ctx.active_idx[i];
+			for (int j = 0; j < cpu_mask_ctx.active_count; j++) {
+				int ri = cpu_mask_ctx.active_idx[j];
 				if (cpu_mask_ctx.ranges[ri].pos < mask_cur_len + loop)
 					len_cand *= cpu_mask_ctx.ranges[ri].count;
 			}
-			mask_tot_cand += len_cand * mask_int_cand.num_int_cand;
+			global_tot_cand += len_cand * mask_int_cand.num_int_cand;
 		}
-		if (options.node_count && !(options.flags & FLG_MASK_STACKED))
-			mask_tot_cand = mask_tot_cand * (options.node_max + 1 - options.node_min) / options.node_count;
 
-		/* initialise state: if not restored, all iterators start at 0; node distribution skipped for simplicity */
-		if (!restored)
-			cand = mask_tot_cand;   /* single node total */
+		mask_tot_cand = global_tot_cand;
+
+		/* FIX: Apply a single, perfectly bounded node division using integer math.
+		 * Eliminates the double-division bug that was zeroing out cand. */
+		if (!restored && options.node_count && !(options.flags & FLG_MASK_STACKED)) {
+			uint64_t share = global_tot_cand / options.node_count;
+			uint64_t rem = global_tot_cand % options.node_count;
+
+			cand = share * (options.node_max - options.node_min + 1);
+
+			uint64_t start_rem = (options.node_min - 1 < rem) ? (options.node_min - 1) : rem;
+			uint64_t end_rem = (options.node_max < rem) ? options.node_max : rem;
+			cand += (end_rem - start_rem);
+
+			/* Localize the progress indicator total to this node's actual run */
+			mask_tot_cand = cand;
+		} else if (!restored) {
+			cand = mask_tot_cand;
+		}
 
 		if (options.flags & FLG_TEST_CHK) {
 			if (bench_generate_keys(&cpu_mask_ctx, &cand))

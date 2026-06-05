@@ -485,4 +485,20 @@ int ocl_hc_128_cmp_exact(char *source, int index)
 	return 1;
 }
 
+void ocl_hc_128_get_buffers(cl_mem *p_bitmaps, cl_mem *p_offset_table,
+                            cl_mem *p_hash_table, cl_mem *p_return_hashes,
+                            cl_mem *p_hash_ids, cl_mem *p_bitmap_dupe)
+{
+	*p_bitmaps       = buffer_bitmaps;
+	*p_offset_table  = buffer_offset_table;
+	*p_hash_table    = buffer_hash_table;
+	*p_return_hashes = buffer_return_hashes;
+	*p_hash_ids      = buffer_hash_ids;
+	*p_bitmap_dupe   = buffer_bitmap_dupe;
+}
+
+cl_uint *ocl_hc_128_get_loaded_hashes(void)
+{
+    return loaded_hashes;
+}
 #endif /* HAVE_OPENCL */

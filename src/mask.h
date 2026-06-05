@@ -72,6 +72,7 @@ typedef struct {
 	int active_count;
 	/* Number of placeholders active for iteration on CPU (same as active_count) */
 	int cpu_count;
+	int current_k[MASK_MAX_INC_LEN];
 } mask_cpu_context;
 
 /*

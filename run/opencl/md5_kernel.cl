@@ -62,6 +62,89 @@
 /* This handles an input of 0xffffffffU correctly */
 #define BITMAP_SHIFT ((BITMAP_MASK >> 5) + 1)
 
+#define MAX_LIMIT 16
+
+typedef struct {
+    int count;
+    int pos;                     // <-- ADD THIS
+    unsigned char chars[256];
+} opencl_mask_range;
+
+typedef struct {
+    int active_idx[MAX_LIMIT];
+    int current_k;
+    int limit;
+} opencl_placeholder;
+
+typedef struct {
+    int num_loops_interleaved;
+    int iterations_per_thread;
+} opencl_mask_config;
+
+inline int opencl_flat_next_state(
+    __global const opencl_mask_range *ranges,   // <-- here
+    __private int *active_idx,
+    __private int *local_iter,
+    __private int *current_k,
+    int limit
+) {
+    int i, j;
+    int weight_to_redistribute = 0;
+
+    /* Anti-diagonal weight shifting path */
+    for (i = limit - 2; i >= 0; i--) {
+        int ri = active_idx[i];
+        int ri_next = active_idx[i + 1];
+
+        if (local_iter[i] > 0 && local_iter[i + 1] < ranges[ri_next].count - 1) {
+            local_iter[i]--;
+            local_iter[i + 1]++;
+
+            for (j = i + 2; j < limit; j++) {
+                weight_to_redistribute += local_iter[j];
+                local_iter[j] = 0;
+            }
+
+            j = i + 1;
+            while (weight_to_redistribute > 0 && j < limit) {
+                int rj = active_idx[j];
+                int max_allowed = ranges[rj].count - 1 - local_iter[j];
+                int add = (weight_to_redistribute > max_allowed) ? max_allowed : weight_to_redistribute;
+
+                local_iter[j] += add;
+                weight_to_redistribute -= add;
+                j++;
+            }
+
+            return 0; /* Successfully stepped within current K-layer */
+        }
+    }
+
+    /* Current K layer exhausted. Move to the next anti-diagonal plane */
+    (*current_k)++;
+
+    /* Reset array layout to the baseline configuration of the new K layer */
+    int remaining_k = *current_k;
+    for (i = 0; i < limit; i++) {
+        int ri = active_idx[i];
+        int max_idx = ranges[ri].count - 1;
+
+        if (remaining_k <= max_idx) {
+            local_iter[i] = remaining_k;
+            remaining_k = 0;
+        } else {
+            local_iter[i] = max_idx;
+            remaining_k -= max_idx;
+        }
+    }
+
+    if (remaining_k > 0) {
+        return 1; /* Complete keyspace exhaustion for this mask */
+    }
+
+    return 0;
+}
+
 INLINE void md5_encrypt(uint *hash, uint *W, uint len)
 {
 	hash[0] = 0x67452301;
@@ -255,106 +338,109 @@ INLINE void cmp(uint gid,
 /* OpenCL kernel entry point. Copy key to be hashed from
  * global to local (thread) memory. Break the key into 16 32-bit (uint)
  * words. MD5 hash of a key is 128 bit (uint4). */
-__kernel void md5(__global uint *keys,
-		  __global uint *index,
-		  __global uint *int_key_loc,
-#if USE_CONST_CACHE
-		  constant
-#else
-		  __global
-#endif
-		  uint *int_keys,
-		  __global uint *bitmaps,
-		  __global uint *offset_table,
-		  __global uint *hash_table,
-		  __global uint *return_hashes,
-		  volatile __global uint *out_hash_ids,
-		  volatile __global uint *bitmap_dupe)
+__kernel void md5(
+    __global const opencl_mask_range *mask_ranges,
+    __global       opencl_placeholder *mask_plhdrs,
+    __global       int *global_iters,
+    __global const opencl_mask_config *mask_config,
+    __global const uint *saved_keys,                 // 4: Cast to uint for faster loads
+    __global const uint *saved_idx,                  // 5
+    __global       uint *bitmaps,
+    __global       uint *offset_table,
+    __global       uint *hash_table,
+    __global       uint *return_hashes,
+    volatile __global uint *output,
+    volatile __global uint *bitmap_dupe
+)
 {
-	uint i;
-	uint gid = get_global_id(0);
-	uint base = index[gid];
-	uint W[16] = { 0 };
-	uint len = base & 63;
-	uint hash[4];
+    uint gid = get_global_id(0);
 
-#if NUM_INT_KEYS > 1 && !IS_STATIC_GPU_MASK
-	uint ikl = int_key_loc[gid];
-	uint loc0 = ikl & 0xff;
-#if MASK_FMT_INT_PLHDR > 1
-#if LOC_1 >= 0
-	uint loc1 = (ikl & 0xff00) >> 8;
-#endif
-#endif
-#if MASK_FMT_INT_PLHDR > 2
-#if LOC_2 >= 0
-	uint loc2 = (ikl & 0xff0000) >> 16;
-#endif
-#endif
-#if MASK_FMT_INT_PLHDR > 3
-#if LOC_3 >= 0
-	uint loc3 = (ikl & 0xff000000) >> 24;
-#endif
-#endif
-#endif
+    // 1. EXTRACT BATCH CONSTRAINTS
+    int iters_per_thread = mask_config->iterations_per_thread;
 
-#if !IS_STATIC_GPU_MASK
-#define GPU_LOC_0 loc0
-#define GPU_LOC_1 loc1
-#define GPU_LOC_2 loc2
-#define GPU_LOC_3 loc3
-#else
-#define GPU_LOC_0 LOC_0
-#define GPU_LOC_1 LOC_1
-#define GPU_LOC_2 LOC_2
-#define GPU_LOC_3 LOC_3
-#endif
+    // 2. LOAD STATE COORDINATES
+    int local_iter[MAX_LIMIT];
+    int local_active_idx[MAX_LIMIT];
+    int current_k  = mask_plhdrs[gid].current_k;
+    int mask_limit = mask_plhdrs[gid].limit;
+    uint pw_len    = saved_idx[gid];                 // FIX: Actual password length
+
+    for (int i = 0; i < mask_limit; i++) {
+        local_iter[i] = global_iters[gid * MAX_LIMIT + i];
+        local_active_idx[i] = mask_plhdrs[gid].active_idx[i];
+    }
+
+    // 3. PRELOAD BASE KEY AND APPLY PADDING (Outside the loop!)
+    uint W_base[16];
+    for (int i = 0; i < 16; i++) {
+        // Read 64 bytes of base plaintext (16 uints)
+        W_base[i] = saved_keys[gid * 16 + i];
+    }
+
+    __private uchar *W_base_bytes = (__private uchar *)W_base;
+    W_base_bytes[pw_len] = 0x80;                     // FIX: Pad at actual length
+    W_base[14] = pw_len << 3;                        // FIX: MD5 bit length
 
 #if USE_LOCAL_BITMAPS
-	uint lid = get_local_id(0);
-	uint lws = get_local_size(0);
-	__local uint s_bitmaps[BITMAP_SHIFT * SELECT_CMP_STEPS];
+    uint i_bm;
+    uint lid = get_local_id(0);
+    uint lws = get_local_size(0);
+    __local uint s_bitmaps[BITMAP_SHIFT * SELECT_CMP_STEPS];
 
-	for (i = lid; i < BITMAP_SHIFT * SELECT_CMP_STEPS; i+= lws)
-		s_bitmaps[i] = bitmaps[i];
+    for (i_bm = lid; i_bm < BITMAP_SHIFT * SELECT_CMP_STEPS; i_bm += lws)
+        s_bitmaps[i_bm] = bitmaps[i_bm];
 
-	barrier(CLK_LOCAL_MEM_FENCE);
+    barrier(CLK_LOCAL_MEM_FENCE);
 #endif
 
-	keys += base >> 6;
+    // 4. EXECUTION LOOP
+    for (int loop = 0; loop < iters_per_thread; loop++) {
+        uint W[16];
+        uint hash[4];
 
-	for (i = 0; i < (len+3)/4; i++)
-		W[i] = *keys++;
+        // Fast register-to-register copy of the pre-padded base key
+        for (int i = 0; i < 16; i++) {
+            W[i] = W_base[i];
+        }
 
-	PUTCHAR(W, len, 0x80);
-	W[14] = len << 3;
+        __private uchar *W_bytes = (__private uchar *)W;
 
-	for (i = 0; i < NUM_INT_KEYS; i++) {
-#if NUM_INT_KEYS > 1
-		PUTCHAR(W, GPU_LOC_0, (int_keys[i] & 0xff));
-#if MASK_FMT_INT_PLHDR > 1
-#if LOC_1 >= 0
-		PUTCHAR(W, GPU_LOC_1, ((int_keys[i] & 0xff00) >> 8));
-#endif
-#endif
-#if MASK_FMT_INT_PLHDR > 2
-#if LOC_2 >= 0
-		PUTCHAR(W, GPU_LOC_2, ((int_keys[i] & 0xff0000) >> 16));
-#endif
-#endif
-#if MASK_FMT_INT_PLHDR > 3
-#if LOC_3 >= 0
-		PUTCHAR(W, GPU_LOC_3, ((int_keys[i] & 0xff000000) >> 24));
-#endif
-#endif
-#endif
-		md5_encrypt(hash, W, len);
-		cmp(gid, i, hash,
+        for (int i = 0; i < mask_limit; i++) {
+			int active_pos = local_active_idx[i];
+			int pos        = mask_ranges[active_pos].pos;
+			if (pos < pw_len)                              // ← guard: never touch padding
+				W_bytes[pos] = mask_ranges[active_pos].chars[local_iter[i]];
+		}
+
+        // Run core MD5 transformation
+        md5_encrypt(hash, W, pw_len);
+
+        // Cross-reference hashes
+        cmp(gid, loop, hash,
 #if USE_LOCAL_BITMAPS
-		    s_bitmaps
+            s_bitmaps
 #else
-		    bitmaps
+            bitmaps
 #endif
-		    , offset_table, hash_table, return_hashes, out_hash_ids, bitmap_dupe);
-	}
+            , offset_table, hash_table, return_hashes, output, bitmap_dupe);
+
+        // Advance state machine engine
+        int keyspace_exhausted = opencl_flat_next_state(
+            mask_ranges,
+            local_active_idx,
+            local_iter,
+            &current_k,
+            mask_limit
+        );
+
+        if (keyspace_exhausted) {
+            break;
+        }
+    }
+
+    // 5. CACHE STATE REGISTERS BACK
+    mask_plhdrs[gid].current_k = current_k;
+    for (int i = 0; i < mask_limit; i++) {
+        global_iters[gid * MAX_LIMIT + i] = local_iter[i];
+    }
 }

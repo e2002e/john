@@ -23,3 +23,7 @@ extern void ocl_hc_128_rlobj(void);
 extern int ocl_hc_128_cmp_all(void *binary, int count);
 extern int ocl_hc_128_cmp_one(void *binary, int index);
 extern int ocl_hc_128_cmp_exact(char *source, int index);
+void ocl_hc_128_get_buffers(cl_mem *p_bitmaps, cl_mem *p_offset_table,
+                            cl_mem *p_hash_table, cl_mem *p_return_hashes,
+                            cl_mem *p_hash_ids, cl_mem *p_bitmap_dupe);
+extern cl_uint *ocl_hc_128_get_loaded_hashes(void);
