@@ -42,11 +42,12 @@ extern void inc_hybrid_fix_state(void);
 extern void pp_hybrid_fix_state(void);
 extern void ext_hybrid_fix_state(void);
 
-#define INTERLEAVE_STRIDE 1024 * 32
+#define INTERLEAVE_STRIDE 1024 * 64
 
 // Filtered tables for O(1) lookup in the hot loop
 static unsigned char pos_markov_table[MAX_NUM_MASK_PLHDR][256][256];
 static unsigned char pos_markov_start[MAX_NUM_MASK_PLHDR][256];
+static int pos_markov_row_counts[MAX_NUM_MASK_PLHDR][256];
 
 static mask_parsed_ctx parsed_mask;
 static mask_cpu_context cpu_mask_ctx, rec_ctx, restored_ctx;
@@ -1389,6 +1390,17 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 		}
 	}
 
+#ifdef MASK_DEBUG
+	fprintf(stderr, "%s() count is %d\n", __FUNCTION__, cpu_mask_ctx->cpu_count);
+#endif
+
+	if (restored) {
+		memcpy(cpu_mask_ctx->active_idx, restored_ctx.active_idx,
+		       sizeof(cpu_mask_ctx->active_idx));
+		cpu_mask_ctx->active_count = restored_ctx.active_count;
+		cpu_mask_ctx->cpu_count = restored_ctx.cpu_count;
+	}
+
 	// Build the flat active index list
 	cpu_mask_ctx->active_count = 0;
 	for (i = 0; i < MAX_NUM_MASK_PLHDR; i++) {
@@ -1409,13 +1421,12 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 		valid_idx = 0;
 		for (m = 0; m < 256; m++) {
 			unsigned char cand = markov_start_nodes[m];
-			// Only add the character if the mask (-mask=...) allows it
 			if (memchr((const char*)r->chars, cand, r->count)) {
 				pos_markov_start[ri][valid_idx++] = cand;
 			}
 		}
 
-		// 2. Build filtered transition table for this position
+		// 2. Build filtered transition table AND track row counts for this position
 		for (prev = 0; prev < 256; prev++) {
 			valid_idx = 0;
 			for (m = 0; m < 256; m++) {
@@ -1424,17 +1435,10 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 					pos_markov_table[ri][prev][valid_idx++] = cand;
 				}
 			}
+			// --- MODIFICATION GOES HERE ---
+			// Store the exact count of valid options available for this specific 'prev' context
+			pos_markov_row_counts[ri][prev] = valid_idx;
 		}
-	}
-#ifdef MASK_DEBUG
-	fprintf(stderr, "%s() count is %d\n", __FUNCTION__, cpu_mask_ctx->cpu_count);
-#endif
-
-	if (restored) {
-		memcpy(cpu_mask_ctx->active_idx, restored_ctx.active_idx,
-		       sizeof(cpu_mask_ctx->active_idx));
-		cpu_mask_ctx->active_count = restored_ctx.active_count;
-		cpu_mask_ctx->cpu_count = restored_ctx.cpu_count;
 	}
 }
 
@@ -1672,16 +1676,32 @@ static inline void flat_set_key_limit(mask_cpu_context * __restrict__ ctx, int l
                        : pos_markov_start[first_ri][first_r->iter[loop]];
 
     // CPU conditionally sets the rest
-    for (i = 1; i < limit; i++) {
-        int ri = active_idx[i];
-        mask_range *r = &ranges[ri];
+	for (i = 1; i < limit; i++) {
+		int ri = active_idx[i];
+		mask_range *r = &ranges[ri];
 
-        unsigned char prev_char = (unsigned char)template_key[r->pos + r->offset - 1];
+		unsigned char prev_char = (unsigned char)template_key[r->pos + r->offset - 1];
 
-        template_key[r->pos + r->offset] =
-            r->start ? (r->start + r->iter[loop])
-                     : pos_markov_table[ri][prev_char][r->iter[loop]];
-    }
+		if (r->start) {
+			template_key[r->pos + r->offset] = r->start + r->iter[loop];
+		} else {
+			int available_choices = pos_markov_row_counts[ri][prev_char];
+			int target_idx = r->iter[loop];
+
+			if (available_choices > 0) {
+				// Safety clamp: if the simplex rank exceeds available Markov transitions,
+				// fall back to the last available (least probable) valid choice
+				if (target_idx >= available_choices) {
+					target_idx = available_choices - 1;
+				}
+				template_key[r->pos + r->offset] = pos_markov_table[ri][prev_char][target_idx];
+			} else {
+				// Hard fallback: if this previous character has 0 valid transitions in the matrix,
+				// fall back to the first character permitted globally by the mask
+				template_key[r->pos + r->offset] = r->chars[0];
+			}
+		}
+	}
 
     template_key[mask_cur_len + loop] = '\0';
 }
@@ -1765,6 +1785,8 @@ static int get_loop(mask_cpu_context *ctx, int loop) {
     return limit;
 }
 
+uint64_t global_idx = 0;   /* declared once at top of generate_keys */
+
 static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates) {
 	char key_e[PLAINTEXT_BUFFER_SIZE];
 	char *key;
@@ -1808,7 +1830,10 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates
 						return 1; \
 			} while(0)
 
-			process_key(template_key);
+			if (!options.node_count ||
+				(global_idx % options.node_count) == (uint64_t)(options.node_min - 1))
+				process_key(template_key);
+			global_idx++;
 
 			if (flat_next_state(cpu_mask_ctx, loop, limit)) {
 				loop_done[loop] = 1;
@@ -1939,18 +1964,18 @@ static void skip_position(mask_cpu_context *cpu_mask_ctx, int *arr)
  */
 static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 {
-	uint64_t offset, my_candidates, total_candidates, ctr;
+	uint64_t offset, my_candidates, total_candidates;
 	int i, j;
 
 #ifdef MASK_DEBUG
 	fprintf(stderr, "%s()\n", __FUNCTION__);
 #endif
 
+	// --- FIX 1: Calculate total candidates across ALL active positions ---
 	offset = 1;
 	for (i = 0; i < cpu_mask_ctx->active_count; i++) {
 		int ri = cpu_mask_ctx->active_idx[i];
-		if (cpu_mask_ctx->ranges[ri].pos < mask_cur_len)
-			offset *= cpu_mask_ctx->ranges[ri].count;
+		offset *= cpu_mask_ctx->ranges[ri].count;
 	}
 
 	total_candidates = offset;
@@ -1975,15 +2000,78 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 		error();
 	}
 
-	/* 4. Set iterator starting states from the perfectly aligned offset */
-	for (j = 0; j <= options.eff_maxlength - mask_cur_len; j++) {
-		ctr = 1;
-		for (i = 0; i < cpu_mask_ctx->active_count; i++) {
-			int ri = cpu_mask_ctx->active_idx[i];
-			cpu_mask_ctx->ranges[ri].iter[j] = (offset / ctr) % cpu_mask_ctx->ranges[ri].count;
-			ctr *= cpu_mask_ctx->ranges[ri].count;
+	/* 4. Set iterator starting states from the perfectly aligned offset inside the Lattice */
+	int max_loop = options.eff_maxlength - mask_cur_len;
+	for (j = 0; j <= max_loop; j++) {
+
+		int limit = 0;
+		while (limit < cpu_mask_ctx->active_count &&
+		       cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[limit]].pos < mask_cur_len + j) {
+			limit++;
+		}
+
+		if (limit > 0) {
+			// Calculate the absolute maximum K (worst-case probability penalty) for this length
+			int max_k = 0;
+			for (i = 0; i < limit; i++) {
+				max_k += cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].count - 1;
+			}
+
+			// --- THE FIX: DYNAMIC PROGRAMMING TIER JUMPING ---
+			// 4a. Build a DP table to count exact permutations per K-Layer
+			int K_SIZE = max_k + 1;
+			uint64_t *dp = mem_calloc((limit + 1) * K_SIZE, sizeof(uint64_t));
+			dp[0 * K_SIZE + 0] = 1;
+
+			for (int w = 1; w <= limit; w++) {
+				int C = cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[w - 1]].count;
+				for (int k = 0; k <= max_k; k++) {
+					uint64_t prev_val = dp[(w - 1) * K_SIZE + k];
+					if (prev_val > 0) {
+						for (int val = 0; val < C; val++) {
+							if (k + val <= max_k) {
+								dp[w * K_SIZE + (k + val)] += prev_val;
+							}
+						}
+					}
+				}
+			}
+
+			// 4b. Find the target K-layer by mathematically skipping full tiers
+			uint64_t fw_offset = offset;
+			int target_k = 0;
+			// As long as the offset is larger than the entire K-layer, subtract it and jump!
+			while (target_k <= max_k && fw_offset >= dp[limit * K_SIZE + target_k]) {
+				fw_offset -= dp[limit * K_SIZE + target_k];
+				target_k++;
+			}
+
+			// 4c. Set the actual state arrays to the absolute beginning of target_k
+			cpu_mask_ctx->current_k[j] = target_k;
+			int remaining_k = target_k;
+			for (i = 0; i < limit; i++) {
+				int ri = cpu_mask_ctx->active_idx[i];
+				int max_idx = cpu_mask_ctx->ranges[ri].count - 1;
+				if (remaining_k <= max_idx) {
+					cpu_mask_ctx->ranges[ri].iter[j] = remaining_k;
+					remaining_k = 0;
+				} else {
+					cpu_mask_ctx->ranges[ri].iter[j] = max_idx;
+					remaining_k -= max_idx;
+				}
+			}
+
+			// 4d. Fast-forward ONLY the remaining offset inside this specific K-layer
+			// This turns an N=50,000,000,000 loop into practically zero.
+			while (fw_offset > 0) {
+				flat_next_state(cpu_mask_ctx, j, limit);
+				fw_offset--;
+			}
+
+			MEM_FREE(dp);
 		}
 	}
+
 	return my_candidates;
 }
 
@@ -2591,7 +2679,7 @@ static void finalize_mask(int len)
 	/* If running hybrid (stacked), we let the parent mode distribute */
 	if (!restored) {
 		if (options.node_count && !(options.flags & FLG_MASK_STACKED)) {
-			cand = divide_work(&cpu_mask_ctx);
+			;//cand = divide_work(&cpu_mask_ctx);
 		} else {
 			cand = 1;
 			for (i = 0; i < cpu_mask_ctx.active_count; i++) {

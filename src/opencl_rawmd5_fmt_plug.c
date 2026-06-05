@@ -85,43 +85,9 @@ static cl_mem hc_return_hashes = NULL;
 static cl_mem hc_hash_ids      = NULL;
 static cl_mem hc_bitmap_dupe   = NULL;
 
-// 1:1 Mapping of your OpenCL structures
-typedef struct {
-    int count;
-    int pos;
-    unsigned char chars[256];
-} opencl_mask_range;
-
-typedef struct {
-	int active_idx[MAX_LIMIT];
-	int current_k;
-	int limit;
-} opencl_placeholder;
-
-typedef struct {
-	int num_loops_interleaved;
-	int iterations_per_thread;
-} opencl_mask_config;
-
-// Host-side arrays to build the data before transferring to the device
-static opencl_mask_range  *host_mask_ranges = NULL;
-static opencl_placeholder *host_mask_plhdrs = NULL;
-static int                *host_global_iters = NULL;
-static opencl_mask_config host_mask_config;
-
-// OpenCL device memory objects
-static cl_mem mem_mask_ranges = NULL;
-static cl_mem mem_mask_plhdrs = NULL;
-static cl_mem mem_global_iters = NULL;
-static cl_mem mem_mask_config = NULL;
-
 // ---- FIX BEGIN: track allocated buffer size to avoid overruns ----
 static size_t allocated_kpc = 0;
 // ---- FIX END ----
-
-static int custom_mask_initialized = 0;
-static int num_loops_interleaved = 1; // Default to 1 if not otherwise defined
-static int new_mask_data_ready = 0;
 
 #define MIN_KEYS_PER_CRYPT      1
 #define MAX_KEYS_PER_CRYPT      1
@@ -148,33 +114,22 @@ struct fmt_main FMT_STRUCT;
 
 static void set_kernel_args(void)
 {
-    if (!mem_mask_ranges || !mem_mask_plhdrs || !mem_global_iters || !mem_mask_config) {
-        fprintf(stderr, "FATAL: mask buffers not allocated!\n");
-        exit(1);
-    }
+    if (buffer_keys)
+        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 0, sizeof(cl_mem), &buffer_keys),        "arg 0");
+    if (buffer_idx)
+        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 1, sizeof(cl_mem), &buffer_idx),         "arg 1");
+    if (buffer_int_key_loc)
+        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 2, sizeof(cl_mem), &buffer_int_key_loc), "arg 2");
+    if (buffer_int_keys)
+        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 3, sizeof(cl_mem), &buffer_int_keys),    "arg 3");
 
-    // Arguments 0‑3 (mask)
-    HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 0, sizeof(cl_mem), &mem_mask_ranges),  "Error arg 0");
-    HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 1, sizeof(cl_mem), &mem_mask_plhdrs),  "Error arg 1");
-    HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 2, sizeof(cl_mem), &mem_global_iters), "Error arg 2");
-    HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 3, sizeof(cl_mem), &mem_mask_config),  "Error arg 3");
-
-    // Arguments 4 & 5 (key data)
-    if (!buffer_keys || !buffer_idx) {
-        fprintf(stderr, "FATAL: key buffers not allocated!\n");
-        exit(1);
-    }
-    HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 4, sizeof(cl_mem), &buffer_keys), "Error arg 4");
-    HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 5, sizeof(cl_mem), &buffer_idx),  "Error arg 5");
-
-    // Arguments 6‑11 (hash‑check) – only if already initialized (after create_clobj())
     if (hc_bitmaps) {
-        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 6,  sizeof(cl_mem), &hc_bitmaps),       "Error arg 6");
-        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 7,  sizeof(cl_mem), &hc_offset_table),  "Error arg 7");
-        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 8,  sizeof(cl_mem), &hc_hash_table),    "Error arg 8");
-        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 9,  sizeof(cl_mem), &hc_return_hashes), "Error arg 9");
-        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 10, sizeof(cl_mem), &hc_hash_ids),      "Error arg 10");
-        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 11, sizeof(cl_mem), &hc_bitmap_dupe),   "Error arg 11");
+        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 4, sizeof(cl_mem), &hc_bitmaps),       "arg 4");
+        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 5, sizeof(cl_mem), &hc_offset_table),  "arg 5");
+        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 6, sizeof(cl_mem), &hc_hash_table),    "arg 6");
+        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 7, sizeof(cl_mem), &hc_return_hashes), "arg 7");
+        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 8, sizeof(cl_mem), &hc_hash_ids),      "arg 8");
+        HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 9, sizeof(cl_mem), &hc_bitmap_dupe),   "arg 9");
     }
 }
 
@@ -189,59 +144,28 @@ static void release_clobj(void);
 
 static void create_clobj_kpc(size_t kpc)
 {
-    // If any mask buffers exist, release them completely
-    if (mem_mask_ranges || mem_mask_plhdrs || host_mask_ranges) {
+    if (buffer_keys || saved_plain)
         release_clobj_kpc();
-    }
 
     allocated_kpc = kpc;
 
-    // Allocate host arrays fresh (never reuse old pointers)
-    host_mask_ranges  = mem_calloc(MAX_LIMIT, sizeof(opencl_mask_range));
-    host_mask_plhdrs  = mem_calloc(kpc, sizeof(opencl_placeholder));
-    host_global_iters = mem_calloc(kpc * MAX_LIMIT, sizeof(int));
+    saved_plain       = mem_calloc(kpc, 64);
+    saved_idx         = mem_calloc(kpc, sizeof(cl_uint));
+    saved_int_key_loc = mem_calloc(kpc, sizeof(cl_uint));
+    ui_keys           = mem_calloc(kpc, sizeof(*ui_keys));
 
-    // mask_config is a static struct, just clear it
-    memset(&host_mask_config, 0, sizeof(host_mask_config));
-    host_mask_config.iterations_per_thread = 1;
-    host_mask_config.num_loops_interleaved = 1;
-
-    // Key buffers (even if not used by this kernel, some host code expects them)
-    saved_plain = mem_calloc(kpc, 64);
-    saved_idx   = mem_calloc(kpc, sizeof(cl_uint));
-    ui_keys     = mem_calloc(kpc, sizeof(*ui_keys));
-
-    // Create mask device buffers
-    mem_mask_ranges = clCreateBuffer(context[gpu_id], CL_MEM_READ_ONLY,
-        MAX_LIMIT * sizeof(opencl_mask_range), NULL, &ret_code);
-    HANDLE_CLERROR(ret_code, "mem_mask_ranges");
-
-    mem_mask_plhdrs = clCreateBuffer(context[gpu_id], CL_MEM_READ_WRITE,
-        kpc * sizeof(opencl_placeholder), NULL, &ret_code);
-    HANDLE_CLERROR(ret_code, "mem_mask_plhdrs");
-
-    mem_global_iters = clCreateBuffer(context[gpu_id], CL_MEM_READ_WRITE,
-        kpc * MAX_LIMIT * sizeof(int), NULL, &ret_code);
-    HANDLE_CLERROR(ret_code, "mem_global_iters");
-
-    mem_mask_config = clCreateBuffer(context[gpu_id], CL_MEM_READ_ONLY,
-        sizeof(opencl_mask_config), NULL, &ret_code);
-    HANDLE_CLERROR(ret_code, "mem_mask_config");
-
-    // Key device buffers (again, for completeness)
-    buffer_keys = clCreateBuffer(context[gpu_id], CL_MEM_READ_WRITE,
+    buffer_keys = clCreateBuffer(context[gpu_id], CL_MEM_READ_ONLY,
         kpc * 64, NULL, &ret_code);
     HANDLE_CLERROR(ret_code, "buffer_keys");
 
-    buffer_idx = clCreateBuffer(context[gpu_id], CL_MEM_READ_WRITE,
+    buffer_idx = clCreateBuffer(context[gpu_id], CL_MEM_READ_ONLY,
         kpc * sizeof(cl_uint), NULL, &ret_code);
     HANDLE_CLERROR(ret_code, "buffer_idx");
 
-    // Upload initial mask config
-    clEnqueueWriteBuffer(queue[gpu_id], mem_mask_config, CL_TRUE, 0,
-        sizeof(opencl_mask_config), &host_mask_config, 0, NULL, NULL);
+    buffer_int_key_loc = clCreateBuffer(context[gpu_id], CL_MEM_READ_ONLY,
+        kpc * sizeof(cl_uint), NULL, &ret_code);
+    HANDLE_CLERROR(ret_code, "buffer_int_key_loc");
 
-    // Set kernel arguments (mask‑only at this point – hash args will be added later)
     set_kernel_args();
 }
 
@@ -278,55 +202,14 @@ static void create_clobj(void)
 
 static void release_clobj_kpc(void)
 {
-    // Unmap and free key buffers
-    if (buffer_keys) {
-        if (pinned_saved_keys) {
-            clEnqueueUnmapMemObject(queue[gpu_id], pinned_saved_keys, saved_plain, 0, NULL, NULL);
-            clReleaseMemObject(pinned_saved_keys);
-            pinned_saved_keys = NULL;
-        } else {
-            MEM_FREE(saved_plain);
-            saved_plain = NULL;
-        }
-        if (pinned_saved_idx) {
-            clEnqueueUnmapMemObject(queue[gpu_id], pinned_saved_idx, saved_idx, 0, NULL, NULL);
-            clReleaseMemObject(pinned_saved_idx);
-            pinned_saved_idx = NULL;
-        } else {
-            MEM_FREE(saved_idx);
-            saved_idx = NULL;
-        }
-        if (pinned_int_key_loc) {
-            clEnqueueUnmapMemObject(queue[gpu_id], pinned_int_key_loc, saved_int_key_loc, 0, NULL, NULL);
-            clReleaseMemObject(pinned_int_key_loc);
-            pinned_int_key_loc = NULL;
-        } else {
-            MEM_FREE(saved_int_key_loc);
-            saved_int_key_loc = NULL;
-        }
+    if (buffer_keys)        { clReleaseMemObject(buffer_keys);        buffer_keys = NULL; }
+    if (buffer_idx)         { clReleaseMemObject(buffer_idx);         buffer_idx = NULL; }
+    if (buffer_int_key_loc) { clReleaseMemObject(buffer_int_key_loc); buffer_int_key_loc = NULL; }
 
-        clFinish(queue[gpu_id]);
-
-        clReleaseMemObject(buffer_keys);    buffer_keys = NULL;
-		clReleaseMemObject(buffer_idx);     buffer_idx  = NULL;
-		if (buffer_int_key_loc) {
-			clReleaseMemObject(buffer_int_key_loc);
-			buffer_int_key_loc = NULL;
-		}
-    }
-
-    // Release mask device buffers
-    if (mem_mask_ranges)  { clReleaseMemObject(mem_mask_ranges);  mem_mask_ranges  = NULL; }
-    if (mem_mask_plhdrs)  { clReleaseMemObject(mem_mask_plhdrs);  mem_mask_plhdrs  = NULL; }
-    if (mem_global_iters) { clReleaseMemObject(mem_global_iters); mem_global_iters = NULL; }
-    if (mem_mask_config)  { clReleaseMemObject(mem_mask_config);  mem_mask_config  = NULL; }
-
-    // Free host mask arrays – CRITICAL: set pointers to NULL!
-    MEM_FREE(host_mask_ranges);   host_mask_ranges  = NULL;
-    MEM_FREE(host_mask_plhdrs);   host_mask_plhdrs  = NULL;
-    MEM_FREE(host_global_iters);  host_global_iters = NULL;
-
-    MEM_FREE(ui_keys);  ui_keys = NULL;
+    MEM_FREE(saved_plain);
+    MEM_FREE(saved_idx);
+    MEM_FREE(saved_int_key_loc);
+    MEM_FREE(ui_keys);
 
     allocated_kpc = 0;
 }
@@ -497,161 +380,49 @@ static int get_hash_6(int index) { return bt_hash_table_128[ocl_hc_hash_ids[3 + 
 
 static void clear_keys(void)
 {
-    // 1. Clear existing JTR buffers defensively
-    if (saved_idx != NULL) {
+    if (saved_idx != NULL)
         memset(saved_idx, 0, sizeof(cl_uint) * global_work_size);
-    }
-
-    // 2. Clear your NEW custom buffers defensively
-    if (host_mask_ranges != NULL) {
-        memset(host_mask_ranges, 0, MAX_LIMIT * sizeof(opencl_mask_range));
-    }
-
-    if (host_mask_plhdrs != NULL) {
-        // ---- FIX BEGIN: use allocated capacity for safety ----
-        memset(host_mask_plhdrs, 0, allocated_kpc * sizeof(opencl_placeholder));
-        // ---- FIX END ----
-    }
-
-    if (host_global_iters != NULL) {
-        // ---- FIX BEGIN ----
-        memset(host_global_iters, 0, allocated_kpc * MAX_LIMIT * sizeof(int));
-        // ---- FIX END ----
-    }
-
-	memset(&host_mask_config, 0, sizeof(host_mask_config));
-	host_mask_config.iterations_per_thread = 1;
-	host_mask_config.num_loops_interleaved = 1;
-
     key_idx = 0;
 }
 
 static void set_key(char *_key, int index)
 {
-    // Allocate UI array if needed
-    if (ui_keys == NULL) {
-        ui_keys = mem_calloc(self->params.max_keys_per_crypt, sizeof(*ui_keys));
-    }
-
-    // Allocate key buffers for GPU transfer if not yet done
-    if (saved_plain == NULL) {
-        saved_plain = mem_calloc(self->params.max_keys_per_crypt, 64);
-        saved_idx   = mem_calloc(self->params.max_keys_per_crypt, sizeof(cl_uint));
-    }
-
-    // Save the plaintext for host retrieval (get_key)
     int len = strlen(_key);
     if (len > PLAINTEXT_LENGTH) len = PLAINTEXT_LENGTH;
+
+    if (ui_keys == NULL)
+        ui_keys = mem_calloc(self->params.max_keys_per_crypt, sizeof(*ui_keys));
+    if (saved_plain == NULL) {
+        saved_plain       = mem_calloc(self->params.max_keys_per_crypt, 64);
+        saved_idx         = mem_calloc(self->params.max_keys_per_crypt, sizeof(cl_uint));
+        saved_int_key_loc = mem_calloc(self->params.max_keys_per_crypt, sizeof(cl_uint));
+    }
+
     memcpy(ui_keys[index], _key, len);
     ui_keys[index][len] = '\0';
 
-    // Save the base key for the GPU (64 bytes per key, padded with zeros)
-    char *key_buf = (char*)&saved_plain[index * 16];  // 16 uints = 64 bytes
-    memset(key_buf, 0, 64);
-    memcpy(key_buf, _key, len);
-    saved_idx[index] = len;   // for direct mode: full password length
-                              // for mask mode: template length = mask length
+    char *kb = (char *)&saved_plain[index * 16];
+    memset(kb, 0, 64);
+    memcpy(kb, _key, len);
+    saved_idx[index] = len;
 
-    // Mask‑mode setup (only once per batch, at index 0)
-    mask_cpu_context *ctx = mask_int_cand.int_cpu_mask_ctx;
-	if (ctx && index == 0) {
-		int current_limit = ctx->active_count;
-		if (current_limit > MAX_LIMIT) current_limit = MAX_LIMIT;
-
-		for (int i = 0; i < current_limit; i++) {
-			int ri = ctx->active_idx[i];          // source: actual JtR range index (11,12,13,14)
-			host_mask_ranges[i].count = ctx->ranges[ri].count;   // dest: sequential i
-			host_mask_ranges[i].pos   = ctx->ranges[ri].pos;
-			memcpy(&host_mask_ranges[i].chars, ctx->ranges[ri].chars,
-				ctx->ranges[ri].count);
-		}
-
-		for (size_t gid = 0; gid < allocated_kpc; gid++) {
-			host_mask_plhdrs[gid].limit = current_limit;
-			host_mask_plhdrs[gid].current_k = 0;
-			for (int i = 0; i < current_limit; i++)
-				host_mask_plhdrs[gid].active_idx[i] = i;  // sequential: 0,1,2,3
-		}
-		memset(host_global_iters, 0, allocated_kpc * MAX_LIMIT * sizeof(int));
-
-        // Set mask config (iterations per thread)
-        host_mask_config.iterations_per_thread = (mask_int_cand.num_int_cand > 0) ? mask_int_cand.num_int_cand : 1;
-        host_mask_config.num_loops_interleaved = 1;
-
-        new_mask_data_ready = 1;
+    /* Only needed when the GPU positions move per key (hybrid). For a pure
+     * static mask, mask_gpu_is_static == 1 and this is skipped. */
+    if (!mask_gpu_is_static) {
+        cl_uint loc = 0;
+        for (int i = 0; i < MASK_FMT_INT_PLHDR; i++) {
+            if (mask_skip_ranges && mask_skip_ranges[i] != -1) {
+                int p = mask_int_cand.int_cpu_mask_ctx->ranges[mask_skip_ranges[i]].pos
+                      + mask_int_cand.int_cpu_mask_ctx->ranges[mask_skip_ranges[i]].offset;
+                loc |= ((cl_uint)(p & 0xff)) << (i * 8);
+            } else {
+                loc |= ((cl_uint)0x80) << (i * 8);  /* sentinel: unused */
+            }
+        }
+        saved_int_key_loc[index] = loc;
     }
 
     key_idx = index;
-}
-
-/*
- * Host-side C port of the OpenCL opencl_flat_next_state() kernel function.
- * Advances the anti-diagonal mask enumeration by exactly one step.
- * Returns 0 on success, 1 when the entire keyspace is exhausted.
- *
- * All parameters are identical in semantics to the OpenCL version so that
- * replaying N steps on the host produces the same character sequence as the
- * GPU loop counter `iter`.
- */
-static int host_flat_next_state(
-        const opencl_mask_range *ranges,
-        const int               *active_idx,
-        int                     *local_iter,
-        int                     *current_k,
-        int                      limit)
-{
-    int i, j, weight;
-
-    /* ── Anti-diagonal weight-shifting within the current K-plane ── */
-    for (i = limit - 2; i >= 0; i--) {
-        int ri      = active_idx[i];
-        int ri_next = active_idx[i + 1];
-
-        if (local_iter[i] > 0 &&
-            local_iter[i + 1] < ranges[ri_next].count - 1)
-        {
-            local_iter[i]--;
-            local_iter[i + 1]++;
-
-            /* Redistribute weight from positions i+2 onwards */
-            weight = 0;
-            for (j = i + 2; j < limit; j++) {
-                weight         += local_iter[j];
-                local_iter[j]   = 0;
-            }
-            j = i + 1;
-            while (weight > 0 && j < limit) {
-                int rj          = active_idx[j];
-                int can_add     = ranges[rj].count - 1 - local_iter[j];
-                int add         = (weight > can_add) ? can_add : weight;
-                local_iter[j]  += add;
-                weight         -= add;
-                j++;
-            }
-            return 0; /* still inside current K-plane */
-        }
-    }
-
-    /* ── Current K-plane exhausted: move to the next anti-diagonal ── */
-    (*current_k)++;
-
-    {
-        int remaining = *current_k;
-        for (i = 0; i < limit; i++) {
-            int ri      = active_idx[i];
-            int max_idx = ranges[ri].count - 1;
-            if (remaining <= max_idx) {
-                local_iter[i] = remaining;
-                remaining     = 0;
-            } else {
-                local_iter[i] = max_idx;
-                remaining    -= max_idx;
-            }
-        }
-        if (remaining > 0)
-            return 1; /* keyspace fully exhausted */
-    }
-    return 0;
 }
 
 /*
@@ -666,70 +437,34 @@ static int host_flat_next_state(
  */
 static char *get_key(int index)
 {
-    static char reconstructed[PLAINTEXT_LENGTH + 1];
+    static char out[PLAINTEXT_LENGTH + 1];
     cl_uint gid, iter;
-    int     i, len, limit;
-    int     local_iter_state[MAX_LIMIT];
-    int     current_k;
+    int i, len;
 
-    if (index < 0)
-        index = 0;
-
-    /* ── Safety: before any GPU run ui_keys[0] is the best we can do ── */
     if (ui_keys == NULL)
         return "";
     if (ocl_hc_hash_ids == NULL || (cl_uint)ocl_hc_hash_ids[0] == 0)
         return ui_keys[index % self->params.max_keys_per_crypt];
 
-    /* ── Extract (gid, iter) from the GPU match record ── */
-    gid  = ocl_hc_hash_ids[1 + 3 * index]; /* work-item that found the match  */
-    iter = ocl_hc_hash_ids[2 + 3 * index]; /* kernel loop counter at the match */
+    gid  = ocl_hc_hash_ids[1 + 3 * index];
+    iter = ocl_hc_hash_ids[2 + 3 * index];
+    if (gid >= (cl_uint)self->params.max_keys_per_crypt) gid = 0;
 
-    if (gid >= (cl_uint)self->params.max_keys_per_crypt)
-        gid = 0;
-
-    /* ── Start from the base/template key that set_key() stored ── */
     len = (saved_idx != NULL) ? (int)saved_idx[gid] : 0;
-    if (len < 0 || len > PLAINTEXT_LENGTH)
-        len = PLAINTEXT_LENGTH;
-    memcpy(reconstructed, ui_keys[gid], len);
-    reconstructed[len] = '\0';
+    if (len < 0 || len > PLAINTEXT_LENGTH) len = PLAINTEXT_LENGTH;
+    memcpy(out, ui_keys[gid], len);
+    out[len] = '\0';
 
-    /* ── Replay the mask state machine `iter` steps from [0,0,...,0] ── *
-     *                                                                    *
-     * Every GID begins with the same initial state (all local_iter = 0, *
-     * current_k = 0) as set up in set_key().  Advancing `iter` times    *
-     * yields exactly the characters the GPU thread used.                 */
-    if (host_mask_ranges == NULL || host_mask_plhdrs == NULL)
-        return reconstructed; /* no mask – template is the full key */
-
-    limit = host_mask_plhdrs[gid].limit;
-    if (limit <= 0)
-        return reconstructed;
-
-    memset(local_iter_state, 0, sizeof(local_iter_state));
-    current_k = 0;
-
-    for (cl_uint step = 0; step < iter; step++) {
-        if (host_flat_next_state(
-                host_mask_ranges,
-                host_mask_plhdrs[gid].active_idx,
-                local_iter_state,
-                &current_k,
-                limit))
-            break; /* exhausted – shouldn't happen for a real crack */
+    /* Drop the matched internal candidate's chars at the GPU positions */
+    if (mask_int_cand.num_int_cand > 1 && mask_int_cand.int_cand) {
+        cl_uint packed = ((cl_uint *)mask_int_cand.int_cand)[iter];
+        for (i = 0; i < MASK_FMT_INT_PLHDR; i++) {
+            int loc = static_gpu_locations[i];
+            if (loc >= 0 && loc < PLAINTEXT_LENGTH)
+                out[loc] = (char)((packed >> (8 * i)) & 0xff);
+        }
     }
-
-    /* ── Inject the reconstructed characters into the template ── */
-    for (i = 0; i < limit; i++) {
-        int active_pos = host_mask_plhdrs[gid].active_idx[i];
-        int pos        = host_mask_ranges[active_pos].pos;
-        int c_idx      = local_iter_state[i];
-        if (pos >= 0 && pos < PLAINTEXT_LENGTH)
-            reconstructed[pos] = (char)host_mask_ranges[active_pos].chars[c_idx];
-    }
-
-    return reconstructed;
+    return out;
 }
 
 static int crypt_all(int *pcount, struct db_salt *salt)
@@ -743,8 +478,8 @@ static int crypt_all(int *pcount, struct db_salt *salt)
         exit(1);
     }
 
-    // Ensure mask + key buffers exist
-    if (!mem_mask_ranges || !mem_mask_plhdrs || !buffer_keys) {
+    // key buffers exist
+    if (!buffer_keys) {
         create_clobj_kpc(self->params.max_keys_per_crypt);
         set_kernel_args();
     }
@@ -784,27 +519,11 @@ static int crypt_all(int *pcount, struct db_salt *salt)
         global_work_size * sizeof(cl_uint), saved_idx, 0, NULL, NULL),
         "Write buffer_idx");
 
-    // Upload mask data if changed
-    if (new_mask_data_ready) {
-        BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], mem_mask_ranges, CL_FALSE, 0,
-            MAX_LIMIT * sizeof(opencl_mask_range), host_mask_ranges, 0, NULL, NULL),
-            "Ranges");
-        BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], mem_mask_plhdrs, CL_FALSE, 0,
-            global_work_size * sizeof(opencl_placeholder), host_mask_plhdrs, 0, NULL, NULL),
-            "Placeholders");
-        BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], mem_global_iters, CL_FALSE, 0,
-            global_work_size * MAX_LIMIT * sizeof(int), host_global_iters, 0, NULL, NULL),
-            "Iters");
-        host_mask_config.iterations_per_thread = (mask_int_cand.num_int_cand > 0) ? mask_int_cand.num_int_cand : 1;
-        host_mask_config.num_loops_interleaved = 1;
-        BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], mem_mask_config, CL_TRUE, 0,
-            sizeof(opencl_mask_config), &host_mask_config, 0, NULL, NULL),
-            "Config");
-        new_mask_data_ready = 0;
-    }
+    if (!mask_gpu_is_static)
+        BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], buffer_int_key_loc, CL_TRUE, 0,
+            global_work_size * sizeof(cl_uint), saved_int_key_loc, 0, NULL, NULL),
+            "Write int_key_loc");
 
-    // ── RESET THE **ENTIRE** OUTPUT BUFFER AND DUPLICATE BITMAP BEFORE LAUNCH ──
-    // This is the only safe way to prevent stale data from causing phantom cracks.
     if (hc_hash_ids) {
         size_t output_sz = (3 * ocl_hc_num_loaded_hashes + 1) * sizeof(cl_uint);
         cl_uint *zero_output = mem_calloc(3 * ocl_hc_num_loaded_hashes + 1, sizeof(cl_uint));
@@ -1059,11 +778,6 @@ static void reset(struct db_main *db)
 
     create_clobj_kpc(self->params.max_keys_per_crypt);
     create_clobj();
-
-    if (mem_mask_ranges == NULL) {
-        fprintf(stderr, "FATAL: Buffers failed to allocate. Check logs.\n");
-        exit(1);
-    }
 
     set_kernel_args();
     auto_tune(db, 100);
