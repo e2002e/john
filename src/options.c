@@ -116,7 +116,6 @@ static struct opt_entry opt_list[] = {
 	{"subsets-required", FLG_ONCE, 0, FLG_SUBSETS_CHK, OPT_REQ_PARAM, "%u", &options.subset_must},
 	{"subsets-min-diff", FLG_ONCE, 0, FLG_SUBSETS_CHK, OPT_REQ_PARAM, "%u", &options.subset_min_diff},
 	{"subsets-max-diff", FLG_ONCE, 0, FLG_SUBSETS_CHK, OPT_REQ_PARAM, "%u", &options.subset_max_diff},
-	{"inc2", FLG_INC2_SET, FLG_CRACKING_CHK, 0, 0, OPT_FMT_STR_ALLOC, &options.inc2_freq},
 	{"subsets-prefer-short", FLG_SUBSETS_SHORT, FLG_SUBSETS_SHORT, FLG_SUBSETS_CHK, FLG_SUBSETS_SMALL},
 	{"subsets-prefer-small", FLG_SUBSETS_SMALL, FLG_SUBSETS_SMALL, FLG_SUBSETS_CHK, FLG_SUBSETS_SHORT},
 	{"no-mask", FLG_NO_MASK_BENCH, FLG_NO_MASK_BENCH, FLG_TEST_CHK, FLG_MASK_CHK},
@@ -302,7 +301,6 @@ JOHN_USAGE_REGEX \
 "                           relative to word length)\n" \
 "--subsets-prefer-short     Prefer shorter candidates over smaller subsets\n" \
 "--subsets-prefer-small     Prefer smaller subsets over shorter candidates\n" \
-"--inc2[=FREQUENCY_FILE]	   \"Inc2\" generation mode\n" \
 "--make-charset=FILE        Make a charset, FILE will be overwritten\n" \
 "--stdout[=LENGTH]          Just output candidate passwords [cut at LENGTH]\n" \
 "--session=NAME             Give a new session the NAME\n" \

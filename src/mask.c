@@ -1,9 +1,6 @@
 /*
  * This file is part of John the Ripper password cracker,
  * Copyright (c) 2013-2018 by magnum
- *
- * This file is part of John the Ripper password cracker,
- * Copyright (c) 2013-2018 by magnum
  * Copyright (c) 2014 by Sayantan Datta
  *
  * Redistribution and use in source and binary forms, with or without
@@ -1431,7 +1428,7 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 	}
 	cpu_mask_ctx->cpu_count = cpu_mask_ctx->active_count;
 
-	// --- AVALANCHE MARKOV FIX: PRECOMPUTE FILTERED TABLES ---
+	/* Precompute filtered Markov tables for O(1) lookup in the hot loop */
 	for (i = 0; i < cpu_mask_ctx->active_count; i++) {
 		int ri = cpu_mask_ctx->active_idx[i];
 		mask_range *r = &cpu_mask_ctx->ranges[ri];
@@ -1456,7 +1453,6 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 					pos_markov_table[ri][prev][valid_idx++] = cand;
 				}
 			}
-			// --- MODIFICATION GOES HERE ---
 			// Store the exact count of valid options available for this specific 'prev' context
 			pos_markov_row_counts[ri][prev] = valid_idx;
 		}
@@ -1651,25 +1647,49 @@ static MAYBE_INLINE char* mask_utf8_to_cp(const char *in)
 }
 
 /*
- * Flat carry loop: increments the state for a given length increment.
- * Exactly implements:
- *   for (i = 0; i < word_length; i++) {
- *       if (++state[i] < charset_size) break;
- *       state[i] = 0;
- *   }
+ * ----------------------------------------------------------------------------
+ *  Markov-ordered mask enumeration via a simplex-lattice walk
+ * ----------------------------------------------------------------------------
+ *
+ * Each active mask position behaves like a "wheel" whose characters have been
+ * pre-sorted by Markov probability (most probable first) in the pos_markov_*
+ * tables. A wheel's state is its rank iter[i]: iter[i] == 0 selects the most
+ * probable character for that position, iter[i] == 1 the next, and so on, up to
+ * count[i] - 1.
+ *
+ * A candidate's total "improbability" is the rank-sum
+ *
+ *     K = sum over i of iter[i].
+ *
+ * We emit candidates from most to least probable, i.e. in order of increasing
+ * K. For a fixed K the set of valid rank vectors
+ *
+ *     { iter : 0 <= iter[i] <= count[i]-1,  sum iter[i] = K }
+ *
+ * is exactly the integer points of a simplex (the bounded compositions of K) --
+ * the "K-layer". The enumeration therefore proceeds one layer at a time: every
+ * point of the K=0 layer, then K=1, then K=2, ... Within a layer the points are
+ * walked in descending-lexicographic order of iter[].
+ *
+ * Three routines implement this:
+ *
+ *   simplex_build_key()  - materialize template_key from the current iter[]
+ *                          vector using the Markov tables. Incremental: only
+ *                          rebuilds positions from the leftmost changed wheel.
+ *   simplex_next_state() - advance iter[] to the next point of the current
+ *                          K-layer; when the layer is exhausted, bump K and
+ *                          reset to the first point of the next layer.
+ *   divide_work()        - for --node distribution, unrank a global offset
+ *                          straight into (K, iter[]) with a suffix DP instead
+ *                          of stepping simplex_next_state() billions of times.
+ * ----------------------------------------------------------------------------
  */
 
-/*
- * Advances the state for one length increment.
- * Returns 1 when the state wraps back to all‑zero (so the caller can break).
- */
-
-// 1. Mark functions static inline to completely eliminate function call overhead
-// 2. Use __restrict__ to allow aggressive register allocation by the compiler
-// Déclaration du tableau de probabilités précalculé
-// (À initialiser ailleurs dans ton code, par ex. lors du parsing du .chr)
+/* markov_table[prev][rank] -> char; markov_start_nodes[rank] -> char for the
+ * first position. Both are sorted most-probable-first and filled in elsewhere
+ * (when the Markov stats are loaded). */
 extern unsigned char markov_table[256][256];
-extern unsigned char markov_start_nodes[256]; // Probabilités pour la 1ère lettre
+extern unsigned char markov_start_nodes[256];
 
 /* Rebuild the hoisted per-loop cache for the 'limit' active positions of
  * length-loop 'loop'. Cheap (called once per ~INTERLEAVE_STRIDE candidates). */
@@ -1690,7 +1710,12 @@ static inline void prepare_loop_cache(mask_cpu_context * __restrict__ ctx, int l
 	}
 }
 
-static inline void flat_set_key_limit(mask_cpu_context * __restrict__ ctx, int loop, int limit, int start_from) {
+/* Materialize template_key from the current iter[] rank vector for length-loop
+ * 'loop'. 'start_from' is the leftmost wheel that changed since the previous
+ * call (reported by simplex_next_state) so we only rebuild positions that can
+ * have moved; everything to its left, including the prev_char feeding it, is
+ * still correct in template_key. */
+static inline void simplex_build_key(mask_cpu_context * __restrict__ ctx, int loop, int limit, int start_from) {
     if (limit == 0) {
         /* Safety: fill with first allowed char to avoid raw '#' */
         for (int i = 0; i < ctx->active_count; i++) {
@@ -1706,7 +1731,7 @@ static inline void flat_set_key_limit(mask_cpu_context * __restrict__ ctx, int l
     int i;
 
     /* Incremental rebuild: positions [0, start_from) are unchanged since the
-     * previous key (flat_next_state reported start_from as the leftmost wheel
+     * previous key (simplex_next_state reported start_from as the leftmost wheel
      * it touched), so their bytes in template_key are already correct and so
      * is the prev_char dependency feeding position start_from. */
     if (start_from <= 0) {
@@ -1745,13 +1770,19 @@ static inline void flat_set_key_limit(mask_cpu_context * __restrict__ ctx, int l
     template_key[mask_cur_len + loop] = '\0';
 }
 
-static inline int flat_next_state(mask_cpu_context * __restrict__ ctx, int loop, int limit, int *changed_from) {
+/* Advance iter[] to the next point of the current K-layer for length-loop
+ * 'loop', writing the leftmost wheel that changed into *changed_from (so the
+ * caller can rebuild template_key incrementally). When the layer is exhausted
+ * we bump K and reset to the first point of the next layer. Returns 1 only when
+ * even the maxed-out configuration cannot reach the new K, i.e. this loop's
+ * whole keyspace is exhausted. */
+static inline int simplex_next_state(mask_cpu_context * __restrict__ ctx, int loop, int limit, int *changed_from) {
 	int i, j;
 	int weight_to_redistribute = 0;
 
-	/* Anti-diagonal (Simplex Lattice) state advance:
-	 * Scan right-to-left to find the first position where we can shift
-	 * "rank weight" from a left wheel to a right wheel, keeping the total sum (K) constant. */
+	/* Anti-diagonal (simplex-lattice) state advance: scan right-to-left for the
+	 * first position where we can shift one unit of "rank weight" from a left
+	 * wheel to its right neighbour, keeping the total sum K constant. */
 	for (i = limit - 2; i >= 0; i--) {
 
 		// Can we shift weight from position i to position i+1 for this specific loop?
@@ -1822,19 +1853,49 @@ static int get_loop(mask_cpu_context *ctx, int loop) {
     return limit;
 }
 
+/* Weighted round-robin: give each length-loop a per-visit stride proportional
+ * to P(length) from the Markov corpus, so the common lengths get more airtime
+ * than the rare ones (passwords cluster at ~7-10 chars). loop l is word length
+ * mask_cur_len + l; its weight is markov_len_count[len] (from markov_tables.h),
+ * scaled so the most frequent active length gets the full INTERLEAVE_STRIDE and
+ * the rest get proportionally smaller strides, floored at 1 so no length is
+ * ever fully starved. An all-zero histogram (no length data) yields a flat
+ * INTERLEAVE_STRIDE for every loop, i.e. plain round-robin. */
+static void compute_loop_strides(int max_loop, int *loop_stride) {
+    unsigned long long maxc = 0;
+    for (int l = 0; l <= max_loop; l++) {
+        int len = mask_cur_len + l;
+        unsigned long long c = (len >= 0 && len < MARKOV_MAXLEN) ? markov_len_count[len] : 0;
+        if (c > maxc) maxc = c;
+    }
+    for (int l = 0; l <= max_loop; l++) {
+        if (maxc == 0) {
+            loop_stride[l] = INTERLEAVE_STRIDE;
+            continue;
+        }
+        int len = mask_cur_len + l;
+        unsigned long long c = (len >= 0 && len < MARKOV_MAXLEN) ? markov_len_count[len] : 0;
+        unsigned long long s = ((unsigned long long)INTERLEAVE_STRIDE * c) / maxc;
+        loop_stride[l] = s < 1 ? 1 : (int)s;
+    }
+}
+
 uint64_t global_idx = 0;   /* declared once at top of generate_keys */
 
 static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates) {
 	char key_e[PLAINTEXT_BUFFER_SIZE];
 	char *key;
 	int max_loop = options.eff_maxlength - mask_cur_len;
-	int *loop_done = mem_calloc(max_loop + 1, sizeof(int));  // ← correct size
+	int *loop_done = mem_calloc(max_loop + 1, sizeof(int));
 	int n_active = max_loop + 1;
 	int idx = 0;
+	int loop_stride[MASK_MAX_INC_LEN];
+
+	compute_loop_strides(max_loop, loop_stride);
 
 	if (!options.node_count && !restored) {
 		for (int l = 0; l <= max_loop; l++) {
-			cpu_mask_ctx->current_k[l] = 0;       // ← ADD THIS
+			cpu_mask_ctx->current_k[l] = 0;
 			for (int i = 0; i < cpu_mask_ctx->active_count; i++)
 				cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].iter[l] = 0;
 		}
@@ -1865,8 +1926,8 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates
 		prepare_loop_cache(cpu_mask_ctx, loop, limit);
 		int dirty_from = 0;
 
-		while (stride_count < INTERLEAVE_STRIDE && !loop_done[loop]) {
-			flat_set_key_limit(cpu_mask_ctx, loop, limit, dirty_from);
+		while (stride_count < loop_stride[loop] && !loop_done[loop]) {
+			simplex_build_key(cpu_mask_ctx, loop, limit, dirty_from);
 
 #define process_key(key_i) \
 			do { \
@@ -1886,7 +1947,7 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates
 				break;
 			}
 
-			if (flat_next_state(cpu_mask_ctx, loop, limit, &dirty_from)) {
+			if (simplex_next_state(cpu_mask_ctx, loop, limit, &dirty_from)) {
 				loop_done[loop] = 1;
 				n_active--;
 				break;
@@ -1906,18 +1967,19 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates
 }
 
 static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates) {
-	char key_e[PLAINTEXT_BUFFER_SIZE];
-	char *key;
 	int max_loop = options.eff_maxlength - mask_cur_len;
-	int *loop_done = mem_calloc(max_loop + 1, sizeof(int));  // ← correct size
+	int *loop_done = mem_calloc(max_loop + 1, sizeof(int));
 	int n_active = max_loop + 1;
 	int idx = 0;
+	int loop_stride[MASK_MAX_INC_LEN];
+
+	compute_loop_strides(max_loop, loop_stride);
 
 	/* FIX: Only wipe iterators if we aren't distributed across nodes and not restoring a checkpoint.
 	 * This prevents destroying the unique offsets assigned to each fork. */
 	if (!options.node_count && !restored) {
 		for (int l = 0; l <= max_loop; l++) {
-			cpu_mask_ctx->current_k[l] = 0;       // ← ADD THIS
+			cpu_mask_ctx->current_k[l] = 0;
 			for (int i = 0; i < cpu_mask_ctx->active_count; i++)
 				cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].iter[l] = 0;
 		}
@@ -1942,8 +2004,8 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_cand
 		prepare_loop_cache(cpu_mask_ctx, loop, limit);
 		int dirty_from = 0;
 
-		while (stride_count < INTERLEAVE_STRIDE && !loop_done[loop]) {
-			flat_set_key_limit(cpu_mask_ctx, loop, limit, dirty_from);
+		while (stride_count < loop_stride[loop] && !loop_done[loop]) {
+			simplex_build_key(cpu_mask_ctx, loop, limit, dirty_from);
 
 #define process_key(key)                                            \
 			mask_fmt->methods.set_key(mask_cp_to_utf8(template_key),        \
@@ -1955,7 +2017,7 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_cand
 
 			process_key(template_key);
 
-			if (flat_next_state(cpu_mask_ctx, loop, limit, &dirty_from)) {
+			if (simplex_next_state(cpu_mask_ctx, loop, limit, &dirty_from)) {
 				loop_done[loop] = 1;
 				n_active--;
 				break;
@@ -2059,7 +2121,7 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 				max_k += cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].count - 1;
 			}
 
-			// --- COMBINATORIAL TIER-JUMP + UNRANK (O(limit*K), no linear FF) ---
+			/* Combinatorial tier-jump + unrank (O(limit*K), no linear fast-forward) */
 			// 4a. Build a SUFFIX DP: suf[i][s] = number of valid iter[]
 			// configurations of wheels i..limit-1 whose rank-sum equals s.
 			// suf[0][k] is then the size of the whole K=k probability layer.
@@ -2085,11 +2147,11 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 			}
 			cpu_mask_ctx->current_k[j] = target_k;
 
-			// 4c. Unrank fw_offset directly into the iter[] vector. flat_next_state
+			// 4c. Unrank fw_offset directly into the iter[] vector. simplex_next_state
 			// walks each K-layer in *descending-lexicographic* order of iter[], so
 			// at each wheel we try the largest value first and subtract the count
 			// of suffix configurations it skips. This replaces a loop of up to
-			// billions of flat_next_state() calls with limit*K arithmetic.
+			// billions of simplex_next_state() calls with limit*K arithmetic.
 			int remaining_k = target_k;
 			uint64_t rank = fw_offset;
 			for (i = 0; i < limit; i++) {

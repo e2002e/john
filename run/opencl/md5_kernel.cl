@@ -62,7 +62,6 @@
 /* This handles an input of 0xffffffffU correctly */
 #define BITMAP_SHIFT ((BITMAP_MASK >> 5) + 1)
 
-
 INLINE void md5_encrypt(uint *hash, uint *W, uint len)
 {
 	hash[0] = 0x67452301;
@@ -256,81 +255,106 @@ INLINE void cmp(uint gid,
 /* OpenCL kernel entry point. Copy key to be hashed from
  * global to local (thread) memory. Break the key into 16 32-bit (uint)
  * words. MD5 hash of a key is 128 bit (uint4). */
-__kernel void md5(
-    __global const uint  *keys,        /* 0: base/template keys, 64B each */
-    __global const uint  *index,       /* 1: per-key length               */
-    __global const uint  *int_key_loc, /* 2: per-key insert locations     */
-    __global const uint  *int_keys,    /* 3: NUM_INT_KEYS packed candidates */
-    __global uint        *bitmaps,     /* 4..9: hash-check, unchanged      */
-    __global uint        *offset_table,
-    __global uint        *hash_table,
-    __global uint        *return_hashes,
-    volatile __global uint *output,
-    volatile __global uint *bitmap_dupe)
+__kernel void md5(__global uint *keys,
+		  __global uint *index,
+		  __global uint *int_key_loc,
+#if USE_CONST_CACHE
+		  constant
+#else
+		  __global
+#endif
+		  uint *int_keys,
+		  __global uint *bitmaps,
+		  __global uint *offset_table,
+		  __global uint *hash_table,
+		  __global uint *return_hashes,
+		  volatile __global uint *out_hash_ids,
+		  volatile __global uint *bitmap_dupe)
 {
-    uint gid = get_global_id(0);
-    uint i;
-    uint pw_len = index[gid];
+	uint i;
+	uint gid = get_global_id(0);
+	uint base = index[gid];
+	uint W[16] = { 0 };
+	uint len = base & 63;
+	uint hash[4];
 
-    /* Load and pre-pad the base key once (single-block, len <= 55) */
-    uint W_base[16];
-    for (i = 0; i < 16; i++)
-        W_base[i] = keys[gid * 16 + i];
+#if NUM_INT_KEYS > 1 && !IS_STATIC_GPU_MASK
+	uint ikl = int_key_loc[gid];
+	uint loc0 = ikl & 0xff;
+#if MASK_FMT_INT_PLHDR > 1
+#if LOC_1 >= 0
+	uint loc1 = (ikl & 0xff00) >> 8;
+#endif
+#endif
+#if MASK_FMT_INT_PLHDR > 2
+#if LOC_2 >= 0
+	uint loc2 = (ikl & 0xff0000) >> 16;
+#endif
+#endif
+#if MASK_FMT_INT_PLHDR > 3
+#if LOC_3 >= 0
+	uint loc3 = (ikl & 0xff000000) >> 24;
+#endif
+#endif
+#endif
 
-    __private uchar *base_bytes = (__private uchar *)W_base;
-    base_bytes[pw_len] = 0x80;
-    W_base[14] = pw_len << 3;
-
-#if IS_STATIC_GPU_MASK
+#if !IS_STATIC_GPU_MASK
+#define GPU_LOC_0 loc0
+#define GPU_LOC_1 loc1
+#define GPU_LOC_2 loc2
+#define GPU_LOC_3 loc3
+#else
 #define GPU_LOC_0 LOC_0
 #define GPU_LOC_1 LOC_1
 #define GPU_LOC_2 LOC_2
 #define GPU_LOC_3 LOC_3
-#else
-    uint ikl = int_key_loc[gid];
-#define GPU_LOC_0 ( ikl        & 0xff)
-#define GPU_LOC_1 ((ikl >>  8) & 0xff)
-#define GPU_LOC_2 ((ikl >> 16) & 0xff)
-#define GPU_LOC_3 ((ikl >> 24) & 0xff)
 #endif
 
 #if USE_LOCAL_BITMAPS
-    uint lid = get_local_id(0);
-    uint lws = get_local_size(0);
-    __local uint s_bitmaps[BITMAP_SHIFT * SELECT_CMP_STEPS];
-    for (uint b = lid; b < BITMAP_SHIFT * SELECT_CMP_STEPS; b += lws)
-        s_bitmaps[b] = bitmaps[b];
-    barrier(CLK_LOCAL_MEM_FENCE);
+	uint lid = get_local_id(0);
+	uint lws = get_local_size(0);
+	__local uint s_bitmaps[BITMAP_SHIFT * SELECT_CMP_STEPS];
+
+	for (i = lid; i < BITMAP_SHIFT * SELECT_CMP_STEPS; i+= lws)
+		s_bitmaps[i] = bitmaps[i];
+
+	barrier(CLK_LOCAL_MEM_FENCE);
 #endif
 
-    for (i = 0; i < NUM_INT_KEYS; i++) {
-        uint W[16];
-        uint hash[4];
+	keys += base >> 6;
 
-        for (uint j = 0; j < 16; j++)
-            W[j] = W_base[j];
+	for (i = 0; i < (len+3)/4; i++)
+		W[i] = *keys++;
 
+	PUTCHAR(W, len, 0x80);
+	W[14] = len << 3;
+
+	for (i = 0; i < NUM_INT_KEYS; i++) {
 #if NUM_INT_KEYS > 1
-        PUTCHAR(W, GPU_LOC_0,  int_keys[i]        & 0xff);
+		PUTCHAR(W, GPU_LOC_0, (int_keys[i] & 0xff));
 #if MASK_FMT_INT_PLHDR > 1
-        PUTCHAR(W, GPU_LOC_1, (int_keys[i] >>  8) & 0xff);
+#if LOC_1 >= 0
+		PUTCHAR(W, GPU_LOC_1, ((int_keys[i] & 0xff00) >> 8));
+#endif
 #endif
 #if MASK_FMT_INT_PLHDR > 2
-        PUTCHAR(W, GPU_LOC_2, (int_keys[i] >> 16) & 0xff);
+#if LOC_2 >= 0
+		PUTCHAR(W, GPU_LOC_2, ((int_keys[i] & 0xff0000) >> 16));
+#endif
 #endif
 #if MASK_FMT_INT_PLHDR > 3
-        PUTCHAR(W, GPU_LOC_3, (int_keys[i] >> 24) & 0xff);
+#if LOC_3 >= 0
+		PUTCHAR(W, GPU_LOC_3, ((int_keys[i] & 0xff000000) >> 24));
 #endif
 #endif
-
-        md5_encrypt(hash, W, pw_len);
-
-        cmp(gid, i, hash,
+#endif
+		md5_encrypt(hash, W, len);
+		cmp(gid, i, hash,
 #if USE_LOCAL_BITMAPS
-            s_bitmaps,
+		    s_bitmaps
 #else
-            bitmaps,
+		    bitmaps
 #endif
-            offset_table, hash_table, return_hashes, output, bitmap_dupe);
-    }
+		    , offset_table, hash_table, return_hashes, out_hash_ids, bitmap_dupe);
+	}
 }

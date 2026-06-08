@@ -2,9 +2,15 @@ import sys
 from collections import defaultdict
 
 def generate_tables(wordlist_path):
+    # Longueur maximale suivie dans l'histogramme des longueurs (doit valoir
+    # MARKOV_MAXLEN côté C). Les mots plus longs sont ignorés pour ce comptage.
+    MARKOV_MAXLEN = 256
+
     # Dictionnaires pour compter les occurrences
     start_counts = defaultdict(int)
     transition_counts = defaultdict(lambda: defaultdict(int))
+    # Histogramme des longueurs de mots (pour la pondération par longueur côté C)
+    length_counts = defaultdict(int)
 
     print("[*] Analyse du dictionnaire en cours...", file=sys.stderr)
 
@@ -15,6 +21,10 @@ def generate_tables(wordlist_path):
             word = line.strip()
             if not word:
                 continue
+
+            # Longueur du mot
+            if len(word) < MARKOV_MAXLEN:
+                length_counts[len(word)] += 1
 
             # Premier caractère
             start_counts[ord(word[0])] += 1
@@ -44,6 +54,7 @@ def generate_tables(wordlist_path):
     print("/* Fichier autogénéré par le générateur Markov Avalanche */")
     print("#ifndef MARKOV_TABLES_H")
     print("#define MARKOV_TABLES_H\n")
+    print(f"#define MARKOV_MAXLEN {MARKOV_MAXLEN}\n")
 
     # Table des nœuds de départ (markov_start_nodes)
     print("unsigned char markov_start_nodes[256] = {")
@@ -63,6 +74,15 @@ def generate_tables(wordlist_path):
         # Petit commentaire pour rendre le C lisible (affiche le char ASCII si imprimable)
         char_label = chr(i) if 32 <= i <= 126 else f"HEX {hex(i)}"
         print(f"    /* {char_label} */ {{ " + ", ".join(str(c) for c in ranked) + " },")
+    print("};")
+
+    # Histogramme des longueurs : markov_len_count[L] = nombre de mots de
+    # longueur L dans le corpus. Le côté C s'en sert pour donner à chaque
+    # longueur un temps de génération proportionnel à P(longueur) (round-robin
+    # pondéré). Un tableau entièrement nul = pas de données -> round-robin plat.
+    print("\nunsigned long long markov_len_count[MARKOV_MAXLEN] = {")
+    len_vals = [str(length_counts.get(i, 0)) for i in range(MARKOV_MAXLEN)]
+    print("    " + ", ".join(len_vals))
     print("};")
 
     print("\n#endif /* MARKOV_TABLES_H */")
