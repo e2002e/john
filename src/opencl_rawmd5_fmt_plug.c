@@ -527,6 +527,11 @@ static void auto_tune(struct db_main *db, long double kernel_run_ms)
 		create_clobj_kpc(count);
 		set_kernel_args_kpc();
 		pcount = count;
+		/* The kpc buffers were just (re)allocated for 'count' entries, but
+		 * global_work_size may still hold a larger value from the gws-tuning
+		 * crypt above; clear_keys() memsets sizeof(cl_uint) * global_work_size,
+		 * so sync it to the allocation to avoid overflowing saved_idx. */
+		global_work_size = count;
 		clear_keys();
 		for (i = 0; i < pcount; i++)
 			set_key(key, i);

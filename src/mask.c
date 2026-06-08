@@ -1717,14 +1717,29 @@ static inline void prepare_loop_cache(mask_cpu_context * __restrict__ ctx, int l
  * still correct in template_key. */
 static inline void simplex_build_key(mask_cpu_context * __restrict__ ctx, int loop, int limit, int start_from) {
     if (limit == 0) {
-        /* Safety: fill with first allowed char to avoid raw '#' */
+        /* No host-iterated positions for this length: this is the single base
+         * key that the GPU internal mask expands into mask_int_cand.num_int_cand
+         * candidates (e.g. a 1-char length whose only position was assigned to
+         * the GPU). Fill every position within the length - host-active ones and
+         * the GPU internal-mask positions (which the GPU overwrites) - with a
+         * placeholder first char so strlen(template_key) equals the length. */
+        int L = mask_cur_len + loop;
         for (int i = 0; i < ctx->active_count; i++) {
             int ri = ctx->active_idx[i];
             mask_range *r = &ctx->ranges[ri];
-            template_key[r->pos + r->offset] =
-                r->start ? r->start : pos_markov_start[ri][0];
+            if (r->pos + r->offset < L)
+                template_key[r->pos + r->offset] =
+                    r->start ? r->start : pos_markov_start[ri][0];
         }
-        template_key[mask_cur_len + loop] = '\0';
+        if (mask_skip_ranges)
+            for (int s = 0; s < MASK_FMT_INT_PLHDR && mask_skip_ranges[s] != -1; s++) {
+                int ri = mask_skip_ranges[s];
+                mask_range *r = &ctx->ranges[ri];
+                if (r->pos + r->offset < L)
+                    template_key[r->pos + r->offset] =
+                        r->start ? r->start : pos_markov_start[ri][0];
+            }
+        template_key[L] = '\0';
         return;
     }
 
@@ -1882,6 +1897,28 @@ static void compute_loop_strides(int max_loop, int *loop_stride) {
 
 uint64_t global_idx = 0;   /* declared once at top of generate_keys */
 
+/* A length-loop with no host-iterated positions (limit == 0) still has one host
+ * "base" candidate (the empty product) that the GPU internal mask expands into
+ * mask_int_cand.num_int_cand candidates - e.g. a 1-char length whose only
+ * position was assigned to the GPU. Return 1 if that base key must be emitted:
+ * there is a GPU internal mask and every GPU placeholder fits within the length
+ * (otherwise the GPU would write past the key, so the length is genuinely
+ * unenumerable and is skipped). */
+static inline int loop_emits_gpu_base(mask_cpu_context *ctx, int loop) {
+	int L = mask_cur_len + loop;
+	int s, any = 0;
+
+	if (L <= 0 || mask_int_cand.num_int_cand <= 1 || !mask_skip_ranges)
+		return 0;
+	for (s = 0; s < MASK_FMT_INT_PLHDR && mask_skip_ranges[s] != -1; s++) {
+		any = 1;
+		if (ctx->ranges[mask_skip_ranges[s]].pos +
+		    ctx->ranges[mask_skip_ranges[s]].offset >= L)
+			return 0;
+	}
+	return any;
+}
+
 static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates) {
 	char key_e[PLAINTEXT_BUFFER_SIZE];
 	char *key;
@@ -1901,6 +1938,14 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates
 		}
 	}
 
+#define process_key(key_i) \
+		do { \
+			key = key_i; \
+			if (!f_filter || ext_filter_body(key_i, key = key_e)) \
+				if (crk_process_key(mask_cp_to_utf8(key))) \
+					return 1; \
+		} while(0)
+
 	while (n_active > 0) {
 		while (loop_done[idx]) {
 			idx++;
@@ -1913,6 +1958,18 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates
 		 * with empty/exhausted budget is done. */
 		int node_budgeted = options.node_count && !(options.flags & FLG_MASK_STACKED);
 		if (limit == 0 || (node_budgeted && node_loop_cand[loop] == 0)) {
+			/* A length whose only in-range positions are GPU-internal has no
+			 * host work (limit == 0) but still has one base key to emit so the
+			 * GPU can expand it (e.g. a 1-char length sitting entirely on the
+			 * GPU). Emit it once, unless this node's block budget is spent. */
+			if (limit == 0 && !(node_budgeted && node_loop_cand[loop] == 0) &&
+			    loop_emits_gpu_base(cpu_mask_ctx, loop)) {
+				simplex_build_key(cpu_mask_ctx, loop, 0, 0);
+				process_key(template_key);
+				global_idx++;
+				if (node_budgeted)
+					--node_loop_cand[loop];
+			}
 			loop_done[loop] = 1;
 			n_active--;
 			idx++;
@@ -1928,14 +1985,6 @@ static int generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_candidates
 
 		while (stride_count < loop_stride[loop] && !loop_done[loop]) {
 			simplex_build_key(cpu_mask_ctx, loop, limit, dirty_from);
-
-#define process_key(key_i) \
-			do { \
-				key = key_i; \
-				if (!f_filter || ext_filter_body(key_i, key = key_e)) \
-					if (crk_process_key(mask_cp_to_utf8(key))) \
-						return 1; \
-			} while(0)
 
 			process_key(template_key);
 			global_idx++;
@@ -1985,6 +2034,14 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_cand
 		}
 	}
 
+#define process_key(key)                                            \
+		mask_fmt->methods.set_key(mask_cp_to_utf8(template_key),        \
+								mask_bench_index++);                  \
+		if (mask_bench_index >= mask_fmt->params.max_keys_per_crypt) {  \
+			mask_bench_index = 0;                                       \
+			return 1;                                                   \
+		}
+
 	while (n_active > 0) {
 		while (loop_done[idx]) {
 			idx++;
@@ -1994,6 +2051,11 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_cand
 		int stride_count = 0;
 		int limit = get_loop(cpu_mask_ctx, loop);
 		if (limit == 0) {
+			/* GPU-only length: emit its single base key (see generate_keys). */
+			if (loop_emits_gpu_base(cpu_mask_ctx, loop)) {
+				simplex_build_key(cpu_mask_ctx, loop, 0, 0);
+				process_key(template_key);
+			}
 			loop_done[loop] = 1;
 			n_active--;
 			idx++;
@@ -2006,14 +2068,6 @@ static int bench_generate_keys(mask_cpu_context *cpu_mask_ctx, uint64_t *my_cand
 
 		while (stride_count < loop_stride[loop] && !loop_done[loop]) {
 			simplex_build_key(cpu_mask_ctx, loop, limit, dirty_from);
-
-#define process_key(key)                                            \
-			mask_fmt->methods.set_key(mask_cp_to_utf8(template_key),        \
-									mask_bench_index++);                  \
-			if (mask_bench_index >= mask_fmt->params.max_keys_per_crypt) {  \
-				mask_bench_index = 0;                                       \
-				return 1;                                                   \
-			}
 
 			process_key(template_key);
 
@@ -2631,6 +2685,23 @@ void mask_init(struct db_main *db, char *unprocessed_mask)
 			options.eff_minlength = orig_len;
 	}
 
+	/*
+	 * An explicit, fixed-length mask (non-default, non-stacked) with no
+	 * requested length range is exactly mask_len(mask) characters long. Pin
+	 * the effective lengths (and max_keylen) to it, otherwise eff_minlength
+	 * stays 0 and the mask is stretched up to the format's maximum length,
+	 * emitting wrong-length candidates (or none at all on GPU formats).
+	 */
+	if (!mask_increments_len && !using_default_mask &&
+	    !(options.flags & FLG_MASK_STACKED) &&
+	    options.req_minlength < 0 && !options.req_maxlength) {
+		int fixed_len = mask_len(mask);
+
+		options.eff_minlength = options.eff_maxlength = fixed_len;
+		if (!options.rule_stack)
+			max_keylen = fixed_len;
+	}
+
 	if (format_cannot_reset) {
 		if (options.flags & FLG_MASK_STACKED)
 			mask_cur_len = 0;
@@ -2639,6 +2710,18 @@ void mask_init(struct db_main *db, char *unprocessed_mask)
 		finalize_mask(max_keylen);
 	} else if (!((mask_fmt->params.flags & FMT_MASK) && mask_increments_len)) {
 		mask_cur_len = options.eff_minlength;
+		finalize_mask(max_keylen);
+	} else {
+		/*
+		 * Increment-length on a FMT_MASK (GPU) format. Finalize at the max
+		 * length now so the GPU kernel - built in the format's reset(), before
+		 * the first do_mask_crack() - is compiled for the correct internal-mask
+		 * configuration (mask_skip_ranges / static_gpu_locations). Otherwise
+		 * those are still unset at kernel-build time and get_key() reconstructs
+		 * cracked plaintext with a stale -1 location (out-of-bounds write).
+		 * do_mask_crack() re-finalizes per parent key, so this is idempotent.
+		 */
+		mask_cur_len = options.eff_maxlength;
 		finalize_mask(max_keylen);
 	}
 
