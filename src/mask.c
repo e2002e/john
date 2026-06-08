@@ -2059,60 +2059,55 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 				max_k += cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].count - 1;
 			}
 
-			// --- THE FIX: DYNAMIC PROGRAMMING TIER JUMPING ---
-			// 4a. Build a DP table to count exact permutations per K-Layer
+			// --- COMBINATORIAL TIER-JUMP + UNRANK (O(limit*K), no linear FF) ---
+			// 4a. Build a SUFFIX DP: suf[i][s] = number of valid iter[]
+			// configurations of wheels i..limit-1 whose rank-sum equals s.
+			// suf[0][k] is then the size of the whole K=k probability layer.
 			int K_SIZE = max_k + 1;
-			uint64_t *dp = mem_calloc((limit + 1) * K_SIZE, sizeof(uint64_t));
-			dp[0 * K_SIZE + 0] = 1;
-
-			for (int w = 1; w <= limit; w++) {
-				int C = cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[w - 1]].count;
-				for (int k = 0; k <= max_k; k++) {
-					uint64_t prev_val = dp[(w - 1) * K_SIZE + k];
-					if (prev_val > 0) {
-						for (int val = 0; val < C; val++) {
-							if (k + val <= max_k) {
-								dp[w * K_SIZE + (k + val)] += prev_val;
-							}
-						}
-					}
+			uint64_t *suf = mem_calloc((limit + 1) * K_SIZE, sizeof(uint64_t));
+			suf[limit * K_SIZE + 0] = 1;
+			for (i = limit - 1; i >= 0; i--) {
+				int C = cpu_mask_ctx->ranges[cpu_mask_ctx->active_idx[i]].count;
+				for (int s = 0; s <= max_k; s++) {
+					uint64_t acc = 0;
+					for (int v = 0; v < C && v <= s; v++)
+						acc += suf[(i + 1) * K_SIZE + (s - v)];
+					suf[i * K_SIZE + s] = acc;
 				}
 			}
 
-			// 4b. Find the target K-layer by mathematically skipping full tiers
+			// 4b. Skip whole probability tiers until the offset lands inside one.
 			uint64_t fw_offset = offset;
 			int target_k = 0;
-			// As long as the offset is larger than the entire K-layer, subtract it and jump!
-			while (target_k <= max_k && fw_offset >= dp[limit * K_SIZE + target_k]) {
-				fw_offset -= dp[limit * K_SIZE + target_k];
+			while (target_k <= max_k && fw_offset >= suf[0 * K_SIZE + target_k]) {
+				fw_offset -= suf[0 * K_SIZE + target_k];
 				target_k++;
 			}
-
-			// 4c. Set the actual state arrays to the absolute beginning of target_k
 			cpu_mask_ctx->current_k[j] = target_k;
+
+			// 4c. Unrank fw_offset directly into the iter[] vector. flat_next_state
+			// walks each K-layer in *descending-lexicographic* order of iter[], so
+			// at each wheel we try the largest value first and subtract the count
+			// of suffix configurations it skips. This replaces a loop of up to
+			// billions of flat_next_state() calls with limit*K arithmetic.
 			int remaining_k = target_k;
+			uint64_t rank = fw_offset;
 			for (i = 0; i < limit; i++) {
 				int ri = cpu_mask_ctx->active_idx[i];
-				int max_idx = cpu_mask_ctx->ranges[ri].count - 1;
-				if (remaining_k <= max_idx) {
-					cpu_mask_ctx->ranges[ri].iter[j] = remaining_k;
-					remaining_k = 0;
-				} else {
-					cpu_mask_ctx->ranges[ri].iter[j] = max_idx;
-					remaining_k -= max_idx;
+				int C = cpu_mask_ctx->ranges[ri].count;
+				int vmax = remaining_k < (C - 1) ? remaining_k : (C - 1);
+				int v;
+				for (v = vmax; v >= 0; v--) {
+					uint64_t cnt = suf[(i + 1) * K_SIZE + (remaining_k - v)];
+					if (rank < cnt)
+						break;
+					rank -= cnt;
 				}
+				cpu_mask_ctx->ranges[ri].iter[j] = v;
+				remaining_k -= v;
 			}
 
-			// 4d. Fast-forward ONLY the remaining offset inside this specific K-layer
-			// This turns an N=50,000,000,000 loop into practically zero.
-			int fw_changed;
-			prepare_loop_cache(cpu_mask_ctx, j, limit);
-			while (fw_offset > 0) {
-				flat_next_state(cpu_mask_ctx, j, limit, &fw_changed);
-				fw_offset--;
-			}
-
-			MEM_FREE(dp);
+			MEM_FREE(suf);
 		}
 	}
 
