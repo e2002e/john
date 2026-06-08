@@ -1745,6 +1745,25 @@ static inline void simplex_build_key(mask_cpu_context * __restrict__ ctx, int lo
 
     int i;
 
+    /* Fill the GPU internal-mask positions (which the GPU overwrites) with a
+     * placeholder char. They're not host-iterated, so simplex never writes them,
+     * yet template_key is shared across all length-loops: a shorter loop may have
+     * left a '\0' at a GPU position, which would truncate this (longer) key right
+     * at that position - the host would then hand the GPU a too-short key and the
+     * real candidates for this length are never generated. Re-fill every call
+     * (few positions) so the key is always the correct length regardless of what
+     * a previous loop left behind, and so the Markov prev_char dependency feeding
+     * any host position just past a GPU one reads a stable byte. */
+    if (mask_skip_ranges) {
+        int L = mask_cur_len + loop;
+        for (int s = 0; s < MASK_FMT_INT_PLHDR && mask_skip_ranges[s] != -1; s++) {
+            mask_range *r = &ctx->ranges[mask_skip_ranges[s]];
+            if (r->pos + r->offset < L)
+                template_key[r->pos + r->offset] =
+                    r->start ? r->start : pos_markov_start[mask_skip_ranges[s]][0];
+        }
+    }
+
     /* Incremental rebuild: positions [0, start_from) are unchanged since the
      * previous key (simplex_next_state reported start_from as the leftmost wheel
      * it touched), so their bytes in template_key are already correct and so
@@ -2870,6 +2889,20 @@ static void finalize_mask(int len)
 	        "init_cpu_mask()):\n%s\n", __FUNCTION__, mask);
 #endif
 	init_cpu_mask(mask, &parsed_mask, &cpu_mask_ctx, max_keylen);
+
+	/* On a GPU (FMT_MASK) format iterating over length, the internal-mask
+	 * placeholder is written at a fixed key position by the kernel; for any
+	 * length shorter than that position the write corrupts the MD5 padding and
+	 * the candidates are lost. Cap the placeholder to a position that fits the
+	 * shortest length in the run (length 0 is the empty-key special case, so the
+	 * shortest enumerated length is at least 1). Other cases impose no cap. */
+	if ((mask_fmt->params.flags & FMT_MASK) && mask_increments_len &&
+	    !(options.flags & FLG_MASK_STACKED)) {
+		int min_len = options.eff_minlength > 0 ? options.eff_minlength : 1;
+		mask_int_max_pos = min_len - 1;
+	} else
+		mask_int_max_pos = -1;
+
 	mask_ext_calc_combination(&cpu_mask_ctx, max_static_range);
 
 #ifdef MASK_DEBUG

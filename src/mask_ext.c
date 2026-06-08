@@ -20,6 +20,7 @@ int *mask_skip_ranges = NULL;
 int mask_max_skip_loc = -1;
 int mask_int_cand_target = 0;
 int mask_gpu_is_static = 0;
+int mask_int_max_pos = -1;
 mask_int_cand_ctx mask_int_cand = { NULL, NULL, 1 };
 
 static void combination_util(int *data, int start, int end, int index,
@@ -29,6 +30,19 @@ static void combination_util(int *data, int start, int end, int index,
 
 	if (index == r) {
 		int tmp = 1;
+
+		/* When length-incrementing on a GPU (FMT_MASK) format, the kernel writes
+		 * each internal-mask placeholder at a fixed key position; if that position
+		 * is >= the key length the write lands on (or past) the MD5 padding and
+		 * corrupts the hash, so every length shorter than the placeholder position
+		 * is silently lost. mask_int_max_pos caps the placeholder to a position
+		 * that fits the shortest length in the run; reject combinations that
+		 * exceed it. */
+		if (mask_int_max_pos >= 0)
+			for (i = 0; i < r; i++)
+				if (ptr->ranges[data[i]].pos > mask_int_max_pos)
+					return;
+
 		for (i = 0; i < r; i++)
 			tmp *= ptr->ranges[data[i]].count;
 

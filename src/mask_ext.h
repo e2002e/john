@@ -47,6 +47,14 @@ extern int mask_max_skip_loc;
 extern int mask_int_cand_target;
 
 /*
+ * Upper bound on the key position a GPU internal-mask placeholder may occupy
+ * (-1 = no limit). Used when length-incrementing on a FMT_MASK format so the
+ * placeholder fits the shortest length in the run; a placeholder at a position
+ * >= the key length corrupts the hash on GPU.
+ */
+extern int mask_int_max_pos;
+
+/*
  * Masks like ?d?d or ?d?w are "static" on GPU, as in "positions are static".
  * ?w?d is not static (base word length may vary), but ?d?w?d may be static
  * as long as last ?d is not GPU-side.
