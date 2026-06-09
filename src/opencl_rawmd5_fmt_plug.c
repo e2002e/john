@@ -70,6 +70,12 @@ static int g_uploaded_loop = -1;     /* loop whose suf is currently on the devic
 static cl_uint gen_R = 256;
 static void gen_release_all(void);
 
+/* True when the GPU actually generates candidates. This is mask_gpu_gen EXCEPT in
+ * MASK_GPU_CPU validation, where mask mode streams host-materialized candidates
+ * through the normal crypt path - so the gen kernel/crypt/get_key must stay off.
+ * Set in reset() before the kernel is built. */
+static int gen_active = 0;
+
 static unsigned int shift64_ht_sz, shift64_ot_sz;
 
 static unsigned int key_idx = 0;
@@ -260,12 +266,12 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 #endif
 	);
 
-	if (mask_gpu_gen)
+	if (gen_active)
 		strcat(build_opts, " -D GPU_GEN");
 
 	opencl_build_kernel("$JOHN/opencl/md5_kernel.cl", gpu_id, build_opts, 0);
 	crypt_kernel = clCreateKernel(program[gpu_id],
-	                              mask_gpu_gen ? "md5_gen" : "md5", &ret_code);
+	                              gen_active ? "md5_gen" : "md5", &ret_code);
 	HANDLE_CLERROR(ret_code, "Error creating kernel. Double-check kernel name?");
 }
 
@@ -396,7 +402,7 @@ static char *get_key(int index)
 	int i, len, int_index, t;
 	char *key;
 
-	if (mask_gpu_gen) {
+	if (gen_active) {
 		int kl;
 		uint64_t off;
 
@@ -582,7 +588,7 @@ static int crypt_all(int *pcount, struct db_salt *salt)
 
 	size_t *lws = local_work_size ? &local_work_size : NULL;
 
-	if (mask_gpu_gen)
+	if (gen_active)
 		return gen_crypt(pcount, salt);
 
 	global_work_size = GET_NEXT_MULTIPLE(count, local_work_size);
@@ -617,7 +623,7 @@ static void auto_tune(struct db_main *db, long double kernel_run_ms)
 	/* GPU generation pushes no host keys, so the key-streaming tuner doesn't
 	 * apply. Pick a fixed work size and prepare the (otherwise unused) kpc
 	 * buffers so the arg-0..2 contract is still satisfied. */
-	if (mask_gpu_gen) {
+	if (gen_active) {
 		size_t maxlws;
 		const char *renv = getenv("JOHN_GEN_R");
 		const char *genv = getenv("JOHN_GEN_GWS");
@@ -629,8 +635,10 @@ static void auto_tune(struct db_main *db, long double kernel_run_ms)
 		maxlws = get_kernel_max_lws(gpu_id, crypt_kernel);
 		if (local_work_size > maxlws)
 			local_work_size = maxlws;
+		/* 1<<18 work-items keeps a modern GPU's SMs saturated for the
+		 * register-resident gen kernel; override with JOHN_GEN_GWS. */
 		global_work_size = GET_NEXT_MULTIPLE(
-		    (genv && atoi(genv) > 0) ? (size_t)atoi(genv) : (1 << 16),
+		    (genv && atoi(genv) > 0) ? (size_t)atoi(genv) : (1 << 18),
 		    local_work_size);
 
 		release_clobj_kpc();
@@ -823,6 +831,11 @@ static void reset(struct db_main *db)
 	mask_gpu_gen = !self_test_running &&
 	               (options.flags & FLG_MASK_CHK) &&
 	               !(options.flags & FLG_MASK_STACKED);
+
+	/* In MASK_GPU_CPU validation the host streams candidates through the normal
+	 * crypt path, so keep mask_gpu_gen set (mask.c drives the host unrank) but run
+	 * the format as non-gen: normal md5 kernel, crypt and get_key. */
+	gen_active = mask_gpu_gen && !mask_gpu_cpu_validate;
 
 	ocl_hc_num_loaded_hashes = db->salts->count;
 	ocl_hc_128_prepare_table(db->salts);

@@ -144,6 +144,13 @@ extern int mask_increments_len;
 /* Set to 1 by the format (in its reset/init) to request GPU generation. */
 extern int mask_gpu_gen;
 
+/* Set to 1 (from the MASK_GPU_CPU env) to validate the GPU K-ordered generator:
+ * mask mode materializes each candidate on the host via mask_gpu_unrank_key() and
+ * streams it through the format's NORMAL crypt path. A format that supports GPU
+ * generation must therefore disable its gen kernel/crypt/get_key when this is set
+ * (treat it as non-gen) even though mask_gpu_gen stays 1. */
+extern int mask_gpu_cpu_validate;
+
 /* Cursor the format's gen-crypt reads to know which block to generate:
  * candidates [mask_gpu_cur_base, +count) of length-loop mask_gpu_cur_loop. */
 extern int mask_gpu_cur_loop;

@@ -387,13 +387,21 @@ __kernel void md5_gen(__global uint *keys_unused,
 		  volatile __global uint *bitmap_dupe,
 		  __global ulong *suf,
 		  __global uchar *g_table,
-		  __global uchar *g_startv,
-		  __global uchar *g_rowcnt,
-		  __global uchar *g_littmpl,
-		  __global int   *g_keypos,
-		  __global int   *g_count,
-		  __global uchar *g_cstart,
-		  __global uchar *g_chars0,
+		  /*
+		   * The small per-position tables are uniform across all work-items and
+		   * read every candidate (g_count in the odometer; keypos/cstart/chars0
+		   * and the Markov startv/rowcnt in materialization), so they live in
+		   * __constant for broadcast via the hardware constant cache. suf and the
+		   * big [npos][256][256] g_table can exceed the 64 KiB constant limit, so
+		   * they stay __global; g_littmpl is written once per work-item.
+		   */
+		  __constant uchar *g_startv,
+		  __constant uchar *g_rowcnt,
+		  __global   uchar *g_littmpl,
+		  __constant int   *g_keypos,
+		  __constant int   *g_count,
+		  __constant uchar *g_cstart,
+		  __constant uchar *g_chars0,
 		  uint glimit,
 		  uint glen,
 		  uint gmax_k,
@@ -428,49 +436,133 @@ __kernel void md5_gen(__global uint *keys_unused,
 			key[i] = g_littmpl[i];
 
 		/*
+		 * Fold the MD5 padding into key[] once: the 0x80 terminator sits at the
+		 * constant position len, and the up-to-three tail bytes that share its
+		 * final word are zeroed. The per-candidate W build then packs key[]
+		 * word-wise (ndw words, padding included) with no dynamic byte index into
+		 * W, so W stays in registers and md5_encrypt runs register-resident -
+		 * the byte-wise PUTCHAR(W, i, ...) loop it replaces spilled W to local
+		 * memory, which the 64 md5 rounds then paid for on every candidate.
+		 */
+		key[len]     = 0x80;
+		key[len + 1] = 0;
+		key[len + 2] = 0;
+		key[len + 3] = 0;
+		W[14] = len << 3;
+		uint ndw = (len + 4) / 4;   /* data words incl. the 0x80 pad byte */
+
+		/*
 		 * Each work-item handles gR contiguous candidates gl = gid*gR + j
 		 * (j = 0..gR-1), global index g = gbase + gl. Contiguous layout plus
 		 * the stable gid sort in ocl_hc keeps reported cracks in exact
 		 * increasing-K order; the sub-index j is carried in cmp's int_index
 		 * slot so get_key can reconstruct g. len is constant across the loop,
 		 * so W's padding stays valid and only the data bytes are rewritten.
+		 *
+		 * Only the first candidate (j == 0) is unranked from scratch via the
+		 * suffix-DP - an O(glimit * charset) walk over global suf[]. The rest
+		 * advance the iter[] vector incrementally with the device mirror of
+		 * mask.c:simplex_next_state(), which only touches a few wheels and lets
+		 * us rebuild key[] from the leftmost changed position onward. This keeps
+		 * the heavy global-memory unrank off the per-candidate hot path (gR-1 of
+		 * every gR candidates), so md5_encrypt dominates again. cur_k carries the
+		 * current K-layer across the j loop for the layer-rollover reset.
 		 */
+		uint cur_k = 0;
+
 		for (j = 0; j < gR; j++) {
 			ulong gl = gl0 + j;
-			ulong g, fw, rank;
-			uint target_k, remaining_k;
+			uint mfrom;     /* leftmost iter[] position that changed */
 
 			if (gl >= gcount)
 				break;
-			g = gbase + gl;
 
-			/* Skip whole K-layers, then unrank within the target layer in
-			 * descending-lexicographic order (matches simplex_next_state). */
-			fw = g;
-			target_k = 0;
-			while (target_k <= gmax_k && fw >= suf[target_k]) {
-				fw -= suf[target_k];
-				target_k++;
-			}
-			remaining_k = target_k;
-			rank = fw;
-			for (i = 0; i < glimit; i++) {
-				int C = g_count[i];
-				int vmax = (remaining_k < (uint)(C - 1)) ? (int)remaining_k : (C - 1);
-				int vv;
+			if (j == 0) {
+				/* Full unrank: skip whole K-layers, then unrank within the
+				 * target layer in descending-lexicographic order (matches
+				 * simplex_next_state). */
+				ulong g = gbase + gl;
+				ulong fw = g, rank;
+				uint remaining_k;
 
-				for (vv = vmax; vv >= 0; vv--) {
-					ulong cnt = suf[(i + 1) * gksize + (remaining_k - vv)];
-					if (rank < cnt)
-						break;
-					rank -= cnt;
+				cur_k = 0;
+				while (cur_k <= gmax_k && fw >= suf[cur_k]) {
+					fw -= suf[cur_k];
+					cur_k++;
 				}
-				iter[i] = (uchar)vv;
-				remaining_k -= vv;
+				remaining_k = cur_k;
+				rank = fw;
+				for (i = 0; i < glimit; i++) {
+					int C = g_count[i];
+					int vmax = (remaining_k < (uint)(C - 1)) ? (int)remaining_k : (C - 1);
+					int vv;
+
+					for (vv = vmax; vv >= 0; vv--) {
+						ulong cnt = suf[(i + 1) * gksize + (remaining_k - vv)];
+						if (rank < cnt)
+							break;
+						rank -= cnt;
+					}
+					iter[i] = (uchar)vv;
+					remaining_k -= vv;
+				}
+				mfrom = 0;
+			} else {
+				/* Incremental advance (mirror of simplex_next_state): scan
+				 * right-to-left for a wheel that can shift one unit of rank
+				 * weight to its right neighbour, keeping sum K constant; pour the
+				 * residual right-side weight back as far left as possible. When
+				 * no shift is possible the layer is exhausted, so bump cur_k and
+				 * reset to the first point of the next layer. */
+				int p, q, advanced = 0;
+
+				for (p = (int)glimit - 2; p >= 0; p--) {
+					if (iter[p] > 0 && iter[p + 1] < g_count[p + 1] - 1) {
+						int w = 0;
+
+						iter[p]--;
+						iter[p + 1]++;
+						for (q = p + 2; q < (int)glimit; q++) {
+							w += iter[q];
+							iter[q] = 0;
+						}
+						q = p + 1;
+						while (w > 0 && q < (int)glimit) {
+							int max_allowed = g_count[q] - 1 - iter[q];
+							int add = (w > max_allowed) ? max_allowed : w;
+
+							iter[q] += add;
+							w -= add;
+							q++;
+						}
+						mfrom = (uint)p;
+						advanced = 1;
+						break;
+					}
+				}
+				if (!advanced) {
+					int rem;
+
+					cur_k++;
+					rem = (int)cur_k;
+					for (p = 0; p < (int)glimit; p++) {
+						int mx = g_count[p] - 1;
+
+						if (rem <= mx) {
+							iter[p] = (uchar)rem;
+							rem = 0;
+						} else {
+							iter[p] = (uchar)mx;
+							rem -= mx;
+						}
+					}
+					mfrom = 0;
+				}
 			}
 
-			/* Materialize left-to-right through the Markov tables. */
-			for (i = 0; i < glimit; i++) {
+			/* Materialize key[mfrom..glimit) through the Markov tables. Positions
+			 * left of mfrom are unchanged, so key[kp-1] feeding mfrom is valid. */
+			for (i = mfrom; i < glimit; i++) {
 				int kp = g_keypos[i];
 				uchar cs = g_cstart[i];
 
@@ -493,10 +585,13 @@ __kernel void md5_gen(__global uint *keys_unused,
 				}
 			}
 
-			for (i = 0; i < len; i++)
-				PUTCHAR(W, i, key[i]);
-			PUTCHAR(W, len, 0x80);
-			W[14] = len << 3;
+			/* Word-wise pack (key[] is padded so the last word carries the
+			 * 0x80); linear W[i] writes keep W register-resident. */
+			for (i = 0; i < ndw; i++)
+				W[i] = (uint)key[4 * i] |
+				       ((uint)key[4 * i + 1] << 8) |
+				       ((uint)key[4 * i + 2] << 16) |
+				       ((uint)key[4 * i + 3] << 24);
 
 			md5_encrypt(hash, W, len);
 			cmp(gid, j, hash,

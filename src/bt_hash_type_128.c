@@ -445,25 +445,33 @@ unsigned int remove_duplicates_128(unsigned int num_loaded_hashes, unsigned int 
 
 	}
 #endif
-	num_unique_hashes = 0;
-	for (i = num_loaded_hashes - 1; (int)i >= 0; i--)
-		if (check_non_zero(i)) {
-			num_unique_hashes = i;
-			break;
-		}
+	/* Compact unique (non-zero) hashes to the front, swapping the current top
+	 * unique hash into any zero slot. 'top' is the highest index still holding a
+	 * non-zero hash, or -1 once none remain. It must be signed: when the whole
+	 * set is zero (e.g. the degenerate all-zero hash, which aliases the empty
+	 * sentinel) an unsigned counter underflows to UINT_MAX and the outer loop
+	 * walks off the end of bt_loaded_hashes_128. */
+	{
+		int top = -1, k, j;
 
-	for (i = 0; i <= num_unique_hashes; i++)
-		if (check_zero(i)) {
-			unsigned int j;
-			bt_loaded_hashes_128[i] = bt_loaded_hashes_128[num_unique_hashes];
-			set_zero(num_unique_hashes);
-			num_unique_hashes--;
-			for (j = num_unique_hashes; (int)j >= 0; j--)
-				if (check_non_zero(j)) {
-					num_unique_hashes = j;
-					break;
-				}
-		}
+		for (k = (int)num_loaded_hashes - 1; k >= 0; k--)
+			if (check_non_zero(k)) {
+				top = k;
+				break;
+			}
+
+		for (k = 0; k <= top; k++)
+			if (check_zero(k)) {
+				bt_loaded_hashes_128[k] = bt_loaded_hashes_128[top];
+				set_zero(top);
+				for (j = top - 1; j >= 0; j--)
+					if (check_non_zero(j))
+						break;
+				top = j;
+			}
+
+		num_unique_hashes = (unsigned int)(top + 1);   /* count, 0 if none */
+	}
 #undef COLLISION_DTYPE
 	bt_free((void **)&collisions);
 	bt_free((void **)&hash_table);
@@ -471,7 +479,7 @@ unsigned int remove_duplicates_128(unsigned int num_loaded_hashes, unsigned int 
 	if (verbosity > 1)
 		fprintf(stdout, "Done\n");
 
-	return (num_unique_hashes + 1);
+	return num_unique_hashes;
 }
 
 #endif

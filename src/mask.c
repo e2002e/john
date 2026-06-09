@@ -2271,10 +2271,11 @@ unsigned mask_gpu_serial = 0;
 /* Cursor the format reads to know which block to generate. */
 int mask_gpu_cur_loop = 0;
 uint64_t mask_gpu_cur_base = 0;
-/* When set (MASK_GPU_CPU env), generate on the CPU via mask_gpu_unrank_key and
- * push through crk_process_key - used to validate the unrank/ordering against a
- * CPU format before the kernel exists. */
-static int mask_gpu_cpu_validate = -1;
+/* When set (MASK_GPU_CPU env), generate on the host via mask_gpu_unrank_key and
+ * push through crk_process_key - validates the unrank/ordering against the
+ * format's normal crypt path. Resolved eagerly in mask_init() (which runs before
+ * the format's reset()), so the format can read it to disable its gen path. */
+int mask_gpu_cpu_validate = 0;
 static mask_gpu_tables gpu_tabs;
 static mask_gpu_loop gpu_loops[MASK_MAX_INC_LEN];
 
@@ -2745,8 +2746,10 @@ void mask_init(struct db_main *db, char *unprocessed_mask)
 	 * do_mask_crack() drives mask_gpu_unrank_key() on the host (the format need
 	 * not support GPU generation). Lets us prove the unrank against a CPU format
 	 * before the kernel path is wired up. */
-	if (getenv("MASK_GPU_CPU"))
+	if (getenv("MASK_GPU_CPU")) {
 		mask_gpu_gen = 1;
+		mask_gpu_cpu_validate = 1;
+	}
 
 	/* These formats are too weird for magnum to get working */
 #if defined(HAVE_OPENCL) || defined(HAVE_ZTEX)
@@ -3254,8 +3257,7 @@ static int mask_gpu_do_crack(const char *extern_key, int extern_key_len)
 	int loop, block_max;
 	uint64_t tot = 0;
 
-	if (mask_gpu_cpu_validate < 0)
-		mask_gpu_cpu_validate = getenv("MASK_GPU_CPU") ? 1 : 0;
+	/* mask_gpu_cpu_validate resolved eagerly in mask_init(). */
 
 	/* Length-0 (empty) candidate is enumerated outside the simplex. */
 	if (min == 0 && john_main_process)
