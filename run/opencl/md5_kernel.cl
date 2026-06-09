@@ -399,9 +399,10 @@ __kernel void md5_gen(__global uint *keys_unused,
 		  uint gmax_k,
 		  uint gksize,
 		  ulong gbase,
-		  uint gcount)
+		  uint gcount,
+		  uint gR)
 {
-	uint i;
+	uint i, j;
 	uint gid = get_global_id(0);
 
 #if USE_LOCAL_BITMAPS
@@ -415,81 +416,97 @@ __kernel void md5_gen(__global uint *keys_unused,
 	barrier(CLK_LOCAL_MEM_FENCE);
 #endif
 
-	if (gid < gcount) {
-		ulong g = gbase + gid;
+	{
 		uint len = glen;
 		uint W[16] = { 0 };
 		uint hash[4];
 		uchar key[GEN_MAX_POS];
 		uchar iter[GEN_MAX_POS];
-		ulong fw, rank;
-		uint target_k, remaining_k;
+		ulong gl0 = (ulong)gid * gR;
 
 		for (i = 0; i < len; i++)
 			key[i] = g_littmpl[i];
 
-		/* Skip whole K-layers, then unrank within the target layer in
-		 * descending-lexicographic order (matches simplex_next_state). */
-		fw = g;
-		target_k = 0;
-		while (target_k <= gmax_k && fw >= suf[target_k]) {
-			fw -= suf[target_k];
-			target_k++;
-		}
-		remaining_k = target_k;
-		rank = fw;
-		for (i = 0; i < glimit; i++) {
-			int C = g_count[i];
-			int vmax = (remaining_k < (uint)(C - 1)) ? (int)remaining_k : (C - 1);
-			int vv;
+		/*
+		 * Each work-item handles gR contiguous candidates gl = gid*gR + j
+		 * (j = 0..gR-1), global index g = gbase + gl. Contiguous layout plus
+		 * the stable gid sort in ocl_hc keeps reported cracks in exact
+		 * increasing-K order; the sub-index j is carried in cmp's int_index
+		 * slot so get_key can reconstruct g. len is constant across the loop,
+		 * so W's padding stays valid and only the data bytes are rewritten.
+		 */
+		for (j = 0; j < gR; j++) {
+			ulong gl = gl0 + j;
+			ulong g, fw, rank;
+			uint target_k, remaining_k;
 
-			for (vv = vmax; vv >= 0; vv--) {
-				ulong cnt = suf[(i + 1) * gksize + (remaining_k - vv)];
-				if (rank < cnt)
-					break;
-				rank -= cnt;
+			if (gl >= gcount)
+				break;
+			g = gbase + gl;
+
+			/* Skip whole K-layers, then unrank within the target layer in
+			 * descending-lexicographic order (matches simplex_next_state). */
+			fw = g;
+			target_k = 0;
+			while (target_k <= gmax_k && fw >= suf[target_k]) {
+				fw -= suf[target_k];
+				target_k++;
 			}
-			iter[i] = (uchar)vv;
-			remaining_k -= vv;
-		}
+			remaining_k = target_k;
+			rank = fw;
+			for (i = 0; i < glimit; i++) {
+				int C = g_count[i];
+				int vmax = (remaining_k < (uint)(C - 1)) ? (int)remaining_k : (C - 1);
+				int vv;
 
-		/* Materialize left-to-right through the Markov tables. */
-		for (i = 0; i < glimit; i++) {
-			int kp = g_keypos[i];
-			uchar cs = g_cstart[i];
+				for (vv = vmax; vv >= 0; vv--) {
+					ulong cnt = suf[(i + 1) * gksize + (remaining_k - vv)];
+					if (rank < cnt)
+						break;
+					rank -= cnt;
+				}
+				iter[i] = (uchar)vv;
+				remaining_k -= vv;
+			}
 
-			if (cs) {
-				key[kp] = cs + iter[i];
-			} else if (i == 0) {
-				key[kp] = g_startv[iter[0]];
-			} else {
-				uchar prev = key[kp - 1];
-				int avail = g_rowcnt[i * 256 + prev];
-				int ti = iter[i];
+			/* Materialize left-to-right through the Markov tables. */
+			for (i = 0; i < glimit; i++) {
+				int kp = g_keypos[i];
+				uchar cs = g_cstart[i];
 
-				if (avail > 0) {
-					if (ti >= avail)
-						ti = avail - 1;
-					key[kp] = g_table[(i * 256 + prev) * 256 + ti];
+				if (cs) {
+					key[kp] = cs + iter[i];
+				} else if (i == 0) {
+					key[kp] = g_startv[iter[0]];
 				} else {
-					key[kp] = g_chars0[i];
+					uchar prev = key[kp - 1];
+					int avail = g_rowcnt[i * 256 + prev];
+					int ti = iter[i];
+
+					if (avail > 0) {
+						if (ti >= avail)
+							ti = avail - 1;
+						key[kp] = g_table[(i * 256 + prev) * 256 + ti];
+					} else {
+						key[kp] = g_chars0[i];
+					}
 				}
 			}
-		}
 
-		for (i = 0; i < len; i++)
-			PUTCHAR(W, i, key[i]);
-		PUTCHAR(W, len, 0x80);
-		W[14] = len << 3;
+			for (i = 0; i < len; i++)
+				PUTCHAR(W, i, key[i]);
+			PUTCHAR(W, len, 0x80);
+			W[14] = len << 3;
 
-		md5_encrypt(hash, W, len);
-		cmp(gid, 0, hash,
+			md5_encrypt(hash, W, len);
+			cmp(gid, j, hash,
 #if USE_LOCAL_BITMAPS
-		    s_bitmaps
+			    s_bitmaps
 #else
-		    bitmaps
+			    bitmaps
 #endif
-		    , offset_table, hash_table, return_hashes, out_hash_ids, bitmap_dupe);
+			    , offset_table, hash_table, return_hashes, out_hash_ids, bitmap_dupe);
+		}
 	}
 }
 #endif /* GPU_GEN */

@@ -62,6 +62,12 @@ static cl_mem g_buf_suf, g_buf_table, g_buf_startv, g_buf_rowcnt, g_buf_littmpl,
               g_buf_keypos, g_buf_count, g_buf_cstart, g_buf_chars0;
 static unsigned g_uploaded_serial;   /* mask_gpu_serial last uploaded (0 = none) */
 static int g_uploaded_loop = -1;     /* loop whose suf is currently on the device */
+/* Candidates generated per work-item in the gen kernel. Each launch covers
+ * global_work_size * gen_R candidates, restoring the work-per-launch the old
+ * internal-mask kernel got from its NUM_INT_KEYS inner loop (without this every
+ * work-item did a single hash, so a fast GPU was starved by launch overhead).
+ * Tunable via JOHN_GEN_R for a given device. */
+static cl_uint gen_R = 256;
 static void gen_release_all(void);
 
 static unsigned int shift64_ht_sz, shift64_ot_sz;
@@ -391,17 +397,22 @@ static char *get_key(int index)
 	char *key;
 
 	if (mask_gpu_gen) {
-		int kl, gt;
+		int kl;
+		uint64_t off;
 
+		/* Each work-item gid produced gen_R contiguous candidates; the kernel
+		 * stored gid in the id slot and the sub-index j in the int_index slot,
+		 * so the candidate's offset within the block is gid*gen_R + j. */
 		if (ocl_hc_hash_ids == NULL || ocl_hc_hash_ids[0] == 0 ||
 		    index >= ocl_hc_hash_ids[0] ||
 		    ocl_hc_hash_ids[0] > ocl_hc_num_loaded_hashes)
-			gt = index;
+			off = (uint64_t)index;
 		else
-			gt = ocl_hc_hash_ids[1 + 3 * index];
+			off = (uint64_t)ocl_hc_hash_ids[1 + 3 * index] * gen_R +
+			      ocl_hc_hash_ids[2 + 3 * index];
 
 		mask_gpu_unrank_key(mask_gpu_cur_loop,
-		                    mask_gpu_cur_base + (uint64_t)gt, out, &kl);
+		                    mask_gpu_cur_base + off, out, &kl);
 		return out;
 	}
 
@@ -553,8 +564,13 @@ static int gen_crypt(int *pcount, struct db_salt *salt)
 	set_kernel_args_gen(gl);
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 23, sizeof(cl_ulong), &gbase), "arg23");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 24, sizeof(cl_uint), &gcount), "arg24");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 25, sizeof(cl_uint), &gen_R), "arg25");
 
-	global_work_size = GET_NEXT_MULTIPLE(count, local_work_size);
+	/* gcount candidates spread gen_R per work-item -> ceil(count/gen_R) threads. */
+	{
+		size_t threads = ((size_t)count + gen_R - 1) / gen_R;
+		global_work_size = GET_NEXT_MULTIPLE(threads, local_work_size);
+	}
 
 	return ocl_hc_128_extract_info(salt, set_kernel_args, set_kernel_args_kpc,
 	                               init_kernel, global_work_size, lws, pcount);
@@ -603,18 +619,28 @@ static void auto_tune(struct db_main *db, long double kernel_run_ms)
 	 * buffers so the arg-0..2 contract is still satisfied. */
 	if (mask_gpu_gen) {
 		size_t maxlws;
+		const char *renv = getenv("JOHN_GEN_R");
+		const char *genv = getenv("JOHN_GEN_GWS");
 
+		if (renv && atoi(renv) > 0)
+			gen_R = atoi(renv);
 		if (!local_work_size)
 			local_work_size = 8;
 		maxlws = get_kernel_max_lws(gpu_id, crypt_kernel);
 		if (local_work_size > maxlws)
 			local_work_size = maxlws;
-		global_work_size = GET_NEXT_MULTIPLE(1 << 16, local_work_size);
+		global_work_size = GET_NEXT_MULTIPLE(
+		    (genv && atoi(genv) > 0) ? (size_t)atoi(genv) : (1 << 16),
+		    local_work_size);
 
 		release_clobj_kpc();
 		create_clobj_kpc(global_work_size);
 		set_kernel_args_kpc();
-		self->params.max_keys_per_crypt = global_work_size;
+		/* Each of the global_work_size work-items emits gen_R candidates, so a
+		 * block (and thus mask mode's per-launch candidate count) is that wide.
+		 * The kpc key buffers stay sized to global_work_size - the gen kernel
+		 * never reads them, and the NDRange only launches ceil(count/gen_R). */
+		self->params.max_keys_per_crypt = global_work_size * gen_R;
 		clear_keys();
 		return;
 	}
