@@ -57,6 +57,15 @@ extern int (*crk_process_key)(char *key);
 extern int crk_process_buffer(void);
 
 /*
+ * Run a GPU-generated batch of 'count' candidates: the format generates the
+ * candidates itself (mask GPU generation) rather than them being pushed via
+ * crk_process_key()/set_key(). Just sets the batch size and runs the salt loop,
+ * so the normal crypt + guess-reporting path applies. Return value is the same
+ * as for crk_process_key().
+ */
+extern int crk_process_gen_block(int count);
+
+/*
  * Resets the guessed keys buffer and processes all the buffered keys for
  * this salt. The return value is the same as for crk_process_key().
  */

@@ -57,6 +57,13 @@ static cl_mem buffer_keys, buffer_idx, buffer_int_keys, buffer_int_key_loc;
 static cl_uint *saved_plain, *saved_idx, *saved_int_key_loc;
 static int static_gpu_locations[MASK_FMT_INT_PLHDR];
 
+/* GPU K-ordered generation state */
+static cl_mem g_buf_suf, g_buf_table, g_buf_startv, g_buf_rowcnt, g_buf_littmpl,
+              g_buf_keypos, g_buf_count, g_buf_cstart, g_buf_chars0;
+static unsigned g_uploaded_serial;   /* mask_gpu_serial last uploaded (0 = none) */
+static int g_uploaded_loop = -1;     /* loop whose suf is currently on the device */
+static void gen_release_all(void);
+
 static unsigned int shift64_ht_sz, shift64_ot_sz;
 
 static unsigned int key_idx = 0;
@@ -183,6 +190,7 @@ static void release_clobj(void)
 
 static void done(void)
 {
+	gen_release_all();
 	release_clobj_kpc();
 	release_clobj();
 
@@ -246,8 +254,12 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 #endif
 	);
 
+	if (mask_gpu_gen)
+		strcat(build_opts, " -D GPU_GEN");
+
 	opencl_build_kernel("$JOHN/opencl/md5_kernel.cl", gpu_id, build_opts, 0);
-	crypt_kernel = clCreateKernel(program[gpu_id], "md5", &ret_code);
+	crypt_kernel = clCreateKernel(program[gpu_id],
+	                              mask_gpu_gen ? "md5_gen" : "md5", &ret_code);
 	HANDLE_CLERROR(ret_code, "Error creating kernel. Double-check kernel name?");
 }
 
@@ -378,6 +390,21 @@ static char *get_key(int index)
 	int i, len, int_index, t;
 	char *key;
 
+	if (mask_gpu_gen) {
+		int kl, gt;
+
+		if (ocl_hc_hash_ids == NULL || ocl_hc_hash_ids[0] == 0 ||
+		    index >= ocl_hc_hash_ids[0] ||
+		    ocl_hc_hash_ids[0] > ocl_hc_num_loaded_hashes)
+			gt = index;
+		else
+			gt = ocl_hc_hash_ids[1 + 3 * index];
+
+		mask_gpu_unrank_key(mask_gpu_cur_loop,
+		                    mask_gpu_cur_base + (uint64_t)gt, out, &kl);
+		return out;
+	}
+
 	if (ocl_hc_hash_ids == NULL || ocl_hc_hash_ids[0] == 0 ||
 	    index >= ocl_hc_hash_ids[0] || ocl_hc_hash_ids[0] > ocl_hc_num_loaded_hashes) {
 		t = index;
@@ -413,11 +440,134 @@ static char *get_key(int index)
 	return out;
 }
 
+static cl_mem gen_copy_buf(size_t sz, const void *host)
+{
+	cl_mem m = clCreateBuffer(context[gpu_id],
+	    CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sz ? sz : 1,
+	    (void *)host, &ret_code);
+	HANDLE_CLERROR(ret_code, "Error creating GPU-gen buffer.");
+	return m;
+}
+
+static void gen_release_buf(cl_mem *m)
+{
+	if (*m) {
+		HANDLE_CLERROR(clReleaseMemObject(*m), "Error releasing GPU-gen buffer.");
+		*m = 0;
+	}
+}
+
+static void gen_release_all(void)
+{
+	gen_release_buf(&g_buf_suf);
+	gen_release_buf(&g_buf_table);
+	gen_release_buf(&g_buf_startv);
+	gen_release_buf(&g_buf_rowcnt);
+	gen_release_buf(&g_buf_littmpl);
+	gen_release_buf(&g_buf_keypos);
+	gen_release_buf(&g_buf_count);
+	gen_release_buf(&g_buf_cstart);
+	gen_release_buf(&g_buf_chars0);
+	g_uploaded_serial = 0;
+	g_uploaded_loop = -1;
+}
+
+/* Upload the per-mask Markov tables once per mask config (tracked by serial). */
+static void gen_upload_tables(void)
+{
+	const mask_gpu_tables *t = mask_gpu_get_tables();
+	size_t npos = t->npos;
+
+	if (g_buf_table && g_uploaded_serial == mask_gpu_serial)
+		return;
+
+	gen_release_buf(&g_buf_table);
+	gen_release_buf(&g_buf_startv);
+	gen_release_buf(&g_buf_rowcnt);
+	gen_release_buf(&g_buf_littmpl);
+	gen_release_buf(&g_buf_keypos);
+	gen_release_buf(&g_buf_count);
+	gen_release_buf(&g_buf_cstart);
+	gen_release_buf(&g_buf_chars0);
+
+	g_buf_table   = gen_copy_buf(npos * 256 * 256, t->table);
+	g_buf_startv  = gen_copy_buf(npos * 256, t->startv);
+	g_buf_rowcnt  = gen_copy_buf(npos * 256, t->rowcnt);
+	g_buf_littmpl = gen_copy_buf(t->littmpl_len, t->littmpl);
+	g_buf_keypos  = gen_copy_buf(npos * sizeof(cl_int), t->keypos);
+	g_buf_count   = gen_copy_buf(npos * sizeof(cl_int), t->count);
+	g_buf_cstart  = gen_copy_buf(npos, t->cstart);
+	g_buf_chars0  = gen_copy_buf(npos, t->chars0);
+
+	g_uploaded_serial = mask_gpu_serial;
+	g_uploaded_loop = -1;
+}
+
+/* Upload the suffix-DP table for the current length-loop (changes per length). */
+static void gen_upload_suf(const mask_gpu_loop *gl, int loop)
+{
+	if (g_buf_suf && g_uploaded_loop == loop)
+		return;
+	gen_release_buf(&g_buf_suf);
+	g_buf_suf = gen_copy_buf((size_t)(gl->limit + 1) * gl->ksize *
+	                         sizeof(cl_ulong), gl->suf);
+	g_uploaded_loop = loop;
+}
+
+static void set_kernel_args_gen(const mask_gpu_loop *gl)
+{
+	cl_uint glimit = gl->limit, glen = gl->len, gmax_k = gl->max_k,
+	        gksize = gl->ksize;
+
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 10, sizeof(g_buf_suf), &g_buf_suf), "arg10");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 11, sizeof(g_buf_table), &g_buf_table), "arg11");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 12, sizeof(g_buf_startv), &g_buf_startv), "arg12");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 13, sizeof(g_buf_rowcnt), &g_buf_rowcnt), "arg13");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 14, sizeof(g_buf_littmpl), &g_buf_littmpl), "arg14");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 15, sizeof(g_buf_keypos), &g_buf_keypos), "arg15");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 16, sizeof(g_buf_count), &g_buf_count), "arg16");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 17, sizeof(g_buf_cstart), &g_buf_cstart), "arg17");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 18, sizeof(g_buf_chars0), &g_buf_chars0), "arg18");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 19, sizeof(cl_uint), &glimit), "arg19");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 20, sizeof(cl_uint), &glen), "arg20");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 21, sizeof(cl_uint), &gmax_k), "arg21");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 22, sizeof(cl_uint), &gksize), "arg22");
+}
+
+static int gen_crypt(int *pcount, struct db_salt *salt)
+{
+	const int count = *pcount;
+	int loop = mask_gpu_cur_loop;
+	const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
+	size_t *lws = local_work_size ? &local_work_size : NULL;
+	cl_ulong gbase = mask_gpu_cur_base;
+	cl_uint gcount = count;
+
+	if (!gl || count <= 0) {
+		*pcount = 0;
+		return 0;
+	}
+
+	gen_upload_tables();
+	gen_upload_suf(gl, loop);
+	set_kernel_args_gen(gl);
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 23, sizeof(cl_ulong), &gbase), "arg23");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 24, sizeof(cl_uint), &gcount), "arg24");
+
+	global_work_size = GET_NEXT_MULTIPLE(count, local_work_size);
+
+	return ocl_hc_128_extract_info(salt, set_kernel_args, set_kernel_args_kpc,
+	                               init_kernel, global_work_size, lws, pcount);
+}
+
 static int crypt_all(int *pcount, struct db_salt *salt)
 {
 	const int count = *pcount;
 
 	size_t *lws = local_work_size ? &local_work_size : NULL;
+
+	if (mask_gpu_gen)
+		return gen_crypt(pcount, salt);
 
 	global_work_size = GET_NEXT_MULTIPLE(count, local_work_size);
 
@@ -447,6 +597,27 @@ static void auto_tune(struct db_main *db, long double kernel_run_ms)
 	int tune_gws = 1, tune_lws = 1;
 
 	char key[PLAINTEXT_LENGTH + 1];
+
+	/* GPU generation pushes no host keys, so the key-streaming tuner doesn't
+	 * apply. Pick a fixed work size and prepare the (otherwise unused) kpc
+	 * buffers so the arg-0..2 contract is still satisfied. */
+	if (mask_gpu_gen) {
+		size_t maxlws;
+
+		if (!local_work_size)
+			local_work_size = 8;
+		maxlws = get_kernel_max_lws(gpu_id, crypt_kernel);
+		if (local_work_size > maxlws)
+			local_work_size = maxlws;
+		global_work_size = GET_NEXT_MULTIPLE(1 << 16, local_work_size);
+
+		release_clobj_kpc();
+		create_clobj_kpc(global_work_size);
+		set_kernel_args_kpc();
+		self->params.max_keys_per_crypt = global_work_size;
+		clear_keys();
+		return;
+	}
 
 	memset(key, 0xF5, PLAINTEXT_LENGTH);
 	key[PLAINTEXT_LENGTH] = 0;
@@ -621,6 +792,11 @@ static void reset(struct db_main *db)
 {
 	release_clobj();
 	release_clobj_kpc();
+
+	/* Use the K-ordered GPU generator for native (non-stacked) mask mode. */
+	mask_gpu_gen = !self_test_running &&
+	               (options.flags & FLG_MASK_CHK) &&
+	               !(options.flags & FLG_MASK_STACKED);
 
 	ocl_hc_num_loaded_hashes = db->salts->count;
 	ocl_hc_128_prepare_table(db->salts);

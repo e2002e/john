@@ -429,6 +429,38 @@ int ocl_hc_128_extract_info(struct db_salt *salt, void (*set_kernel_args)(void),
 		BENCH_CLERROR(clEnqueueReadBuffer(queue[gpu_id], buffer_hash_ids, CL_TRUE, 0, (3 * ocl_hc_hash_ids[0] + 1) * sizeof(cl_uint), ocl_hc_hash_ids, 0, NULL, NULL), "failed in reading data back ocl_hc_hash_ids.");
 		BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], buffer_bitmap_dupe, CL_FALSE, 0, (ocl_hc_hash_table_size/32 + 1) * sizeof(cl_uint), zero_buffer, 0, NULL, NULL), "failed in clEnqueueWriteBuffer buffer_bitmap_dupe.");
 		BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], buffer_hash_ids, CL_TRUE, 0, sizeof(cl_uint), zero_buffer, 0, NULL, NULL), "failed in clEnqueueWriteBuffer buffer_hash_ids.");
+
+		/* GPU mask generation tries candidates in K (Markov) order, but the
+		 * device reports cracks within a batch in arbitrary atomic-fire order.
+		 * Sort this batch's cracks by work-item id (== ascending global index ==
+		 * ascending K) so they are reported in exact K order, permuting the
+		 * id triples and the parallel return-hash pairs together. */
+		if (mask_gpu_gen && ocl_hc_hash_ids[0] > 1) {
+			cl_uint a, n = ocl_hc_hash_ids[0];
+
+			for (a = 1; a < n; a++) {
+				cl_uint g0 = ocl_hc_hash_ids[1 + 3 * a];
+				cl_uint g1 = ocl_hc_hash_ids[2 + 3 * a];
+				cl_uint g2 = ocl_hc_hash_ids[3 + 3 * a];
+				cl_uint h0 = loaded_hashes[2 * a];
+				cl_uint h1 = loaded_hashes[2 * a + 1];
+				int b = (int)a - 1;
+
+				while (b >= 0 && ocl_hc_hash_ids[1 + 3 * b] > g0) {
+					ocl_hc_hash_ids[1 + 3 * (b + 1)] = ocl_hc_hash_ids[1 + 3 * b];
+					ocl_hc_hash_ids[2 + 3 * (b + 1)] = ocl_hc_hash_ids[2 + 3 * b];
+					ocl_hc_hash_ids[3 + 3 * (b + 1)] = ocl_hc_hash_ids[3 + 3 * b];
+					loaded_hashes[2 * (b + 1)]     = loaded_hashes[2 * b];
+					loaded_hashes[2 * (b + 1) + 1] = loaded_hashes[2 * b + 1];
+					b--;
+				}
+				ocl_hc_hash_ids[1 + 3 * (b + 1)] = g0;
+				ocl_hc_hash_ids[2 + 3 * (b + 1)] = g1;
+				ocl_hc_hash_ids[3 + 3 * (b + 1)] = g2;
+				loaded_hashes[2 * (b + 1)]     = h0;
+				loaded_hashes[2 * (b + 1) + 1] = h1;
+			}
+		}
 	}
 
 	*pcount *= mask_int_cand.num_int_cand;

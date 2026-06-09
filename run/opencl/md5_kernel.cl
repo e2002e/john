@@ -358,3 +358,138 @@ __kernel void md5(__global uint *keys,
 		    , offset_table, hash_table, return_hashes, out_hash_ids, bitmap_dupe);
 	}
 }
+
+#ifdef GPU_GEN
+/*
+ * K-ordered GPU password generator.
+ *
+ * Instead of receiving host-materialized keys, each work-item is given a global
+ * candidate index g = gbase + gid and unranks it into a simplex point
+ * (rank-sum K, per-position ranks iter[]) using the suffix-DP table 'suf', then
+ * materializes the password left-to-right through the Markov tables - the exact
+ * mirror of mask.c:mask_gpu_unrank_key(). Candidates within a length come out in
+ * increasing K (Markov probability) order.
+ *
+ * Args 0..9 match the layout opencl_hash_check_128 hardcodes (0..3 set by the
+ * format, 4..9 the hash-check buffers); the generator inputs start at arg 10.
+ */
+#define GEN_MAX_POS 64
+
+__kernel void md5_gen(__global uint *keys_unused,
+		  __global uint *index_unused,
+		  __global uint *int_key_loc_unused,
+		  __global uint *int_keys_unused,
+		  __global uint *bitmaps,
+		  __global uint *offset_table,
+		  __global uint *hash_table,
+		  __global uint *return_hashes,
+		  volatile __global uint *out_hash_ids,
+		  volatile __global uint *bitmap_dupe,
+		  __global ulong *suf,
+		  __global uchar *g_table,
+		  __global uchar *g_startv,
+		  __global uchar *g_rowcnt,
+		  __global uchar *g_littmpl,
+		  __global int   *g_keypos,
+		  __global int   *g_count,
+		  __global uchar *g_cstart,
+		  __global uchar *g_chars0,
+		  uint glimit,
+		  uint glen,
+		  uint gmax_k,
+		  uint gksize,
+		  ulong gbase,
+		  uint gcount)
+{
+	uint i;
+	uint gid = get_global_id(0);
+
+#if USE_LOCAL_BITMAPS
+	uint lid = get_local_id(0);
+	uint lws = get_local_size(0);
+	__local uint s_bitmaps[BITMAP_SHIFT * SELECT_CMP_STEPS];
+
+	for (i = lid; i < BITMAP_SHIFT * SELECT_CMP_STEPS; i += lws)
+		s_bitmaps[i] = bitmaps[i];
+
+	barrier(CLK_LOCAL_MEM_FENCE);
+#endif
+
+	if (gid < gcount) {
+		ulong g = gbase + gid;
+		uint len = glen;
+		uint W[16] = { 0 };
+		uint hash[4];
+		uchar key[GEN_MAX_POS];
+		uchar iter[GEN_MAX_POS];
+		ulong fw, rank;
+		uint target_k, remaining_k;
+
+		for (i = 0; i < len; i++)
+			key[i] = g_littmpl[i];
+
+		/* Skip whole K-layers, then unrank within the target layer in
+		 * descending-lexicographic order (matches simplex_next_state). */
+		fw = g;
+		target_k = 0;
+		while (target_k <= gmax_k && fw >= suf[target_k]) {
+			fw -= suf[target_k];
+			target_k++;
+		}
+		remaining_k = target_k;
+		rank = fw;
+		for (i = 0; i < glimit; i++) {
+			int C = g_count[i];
+			int vmax = (remaining_k < (uint)(C - 1)) ? (int)remaining_k : (C - 1);
+			int vv;
+
+			for (vv = vmax; vv >= 0; vv--) {
+				ulong cnt = suf[(i + 1) * gksize + (remaining_k - vv)];
+				if (rank < cnt)
+					break;
+				rank -= cnt;
+			}
+			iter[i] = (uchar)vv;
+			remaining_k -= vv;
+		}
+
+		/* Materialize left-to-right through the Markov tables. */
+		for (i = 0; i < glimit; i++) {
+			int kp = g_keypos[i];
+			uchar cs = g_cstart[i];
+
+			if (cs) {
+				key[kp] = cs + iter[i];
+			} else if (i == 0) {
+				key[kp] = g_startv[iter[0]];
+			} else {
+				uchar prev = key[kp - 1];
+				int avail = g_rowcnt[i * 256 + prev];
+				int ti = iter[i];
+
+				if (avail > 0) {
+					if (ti >= avail)
+						ti = avail - 1;
+					key[kp] = g_table[(i * 256 + prev) * 256 + ti];
+				} else {
+					key[kp] = g_chars0[i];
+				}
+			}
+		}
+
+		for (i = 0; i < len; i++)
+			PUTCHAR(W, i, key[i]);
+		PUTCHAR(W, len, 0x80);
+		W[14] = len << 3;
+
+		md5_encrypt(hash, W, len);
+		cmp(gid, 0, hash,
+#if USE_LOCAL_BITMAPS
+		    s_bitmaps
+#else
+		    bitmaps
+#endif
+		    , offset_table, hash_table, return_hashes, out_hash_ids, bitmap_dupe);
+	}
+}
+#endif /* GPU_GEN */

@@ -2255,6 +2255,218 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
 	return my_candidates;
 }
 
+/* ----------------------------------------------------------------------------
+ *  GPU K-ordered password generation (host side)
+ * ----------------------------------------------------------------------------
+ * Builds the upload-ready Markov tables (once per mask config) and the per-
+ * length-loop suffix-DP (the same combinatorial unrank divide_work() uses), and
+ * provides mask_gpu_unrank_key() - the exact host mirror of the kernel
+ * generator, used by the format's get_key() to reconstruct cracked plaintext.
+ */
+int mask_gpu_gen = 0;
+int mask_gpu_max_loop = -1;
+/* Bumped whenever the upload-ready tables are rebuilt; the format re-uploads
+ * when it sees a new value. */
+unsigned mask_gpu_serial = 0;
+/* Cursor the format reads to know which block to generate. */
+int mask_gpu_cur_loop = 0;
+uint64_t mask_gpu_cur_base = 0;
+/* When set (MASK_GPU_CPU env), generate on the CPU via mask_gpu_unrank_key and
+ * push through crk_process_key - used to validate the unrank/ordering against a
+ * CPU format before the kernel exists. */
+static int mask_gpu_cpu_validate = -1;
+static mask_gpu_tables gpu_tabs;
+static mask_gpu_loop gpu_loops[MASK_MAX_INC_LEN];
+
+const mask_gpu_tables *mask_gpu_get_tables(void) { return &gpu_tabs; }
+
+const mask_gpu_loop *mask_gpu_get_loop(int loop)
+{
+	if (loop < 0 || loop > mask_gpu_max_loop || !gpu_loops[loop].valid)
+		return NULL;
+	return &gpu_loops[loop];
+}
+
+/* Compact the per-position Markov tables of the current mask into flat,
+ * upload-ready arrays indexed by generated-position (left-to-right key order).
+ * template_key must already hold the finalized max-length template (literals in
+ * place) when this is called. */
+static void mask_gpu_build_tables(mask_cpu_context *ctx)
+{
+	int npos = ctx->active_count;
+	int i, p, maxL = options.eff_maxlength;
+
+	MEM_FREE(gpu_tabs.table);
+	MEM_FREE(gpu_tabs.startv);
+	MEM_FREE(gpu_tabs.rowcnt);
+	MEM_FREE(gpu_tabs.littmpl);
+	memset(&gpu_tabs, 0, sizeof(gpu_tabs));
+
+	gpu_tabs.npos = npos;
+	gpu_tabs.table  = mem_alloc((size_t)npos * 256 * 256);
+	gpu_tabs.startv = mem_alloc((size_t)npos * 256);
+	gpu_tabs.rowcnt = mem_alloc((size_t)npos * 256);
+
+	for (i = 0; i < npos; i++) {
+		int ri = ctx->active_idx[i];
+		mask_range *r = &ctx->ranges[ri];
+
+		gpu_tabs.keypos[i] = r->pos + r->offset;
+		gpu_tabs.count[i]  = r->count;
+		gpu_tabs.cstart[i] = r->start;
+		gpu_tabs.chars0[i] = r->chars[0];
+		memcpy(gpu_tabs.table  + (size_t)i * 256 * 256,
+		       pos_markov_table[ri], 256 * 256);
+		memcpy(gpu_tabs.startv + (size_t)i * 256,
+		       pos_markov_start[ri], 256);
+		memcpy(gpu_tabs.rowcnt + (size_t)i * 256,
+		       pos_markov_row_counts[ri], 256);
+	}
+
+	gpu_tabs.littmpl_len = maxL;
+	gpu_tabs.littmpl = mem_calloc(maxL > 0 ? maxL : 1, 1);
+	for (p = 0; p < maxL; p++)
+		gpu_tabs.littmpl[p] = (unsigned char)template_key[p];
+
+	mask_gpu_serial++;
+}
+
+/* Build the suffix-DP unrank table for every length-loop of the current run. */
+static void mask_gpu_build_loops(mask_cpu_context *ctx)
+{
+	int max_loop = options.eff_maxlength - mask_cur_len;
+	int loop, i, s, v;
+
+	if (max_loop < 0)
+		max_loop = 0;
+	mask_gpu_max_loop = max_loop;
+
+	for (loop = 0; loop <= max_loop; loop++) {
+		mask_gpu_loop *gl = &gpu_loops[loop];
+		int len = mask_cur_len + loop;
+		int limit = 0, max_k = 0, ksize;
+		uint64_t *suf, total = 0;
+
+		MEM_FREE(gl->suf);
+		memset(gl, 0, sizeof(*gl));
+		gl->len = len;
+
+		while (limit < ctx->active_count &&
+		       ctx->ranges[ctx->active_idx[limit]].pos < len)
+			limit++;
+		gl->limit = limit;
+
+		if (limit == 0) {
+			/* No generated positions: a literal-only key (1 candidate) if the
+			 * length is non-zero, else empty. */
+			gl->ksize = 1;
+			gl->suf = mem_calloc(1, sizeof(uint64_t));
+			gl->suf[0] = 1;
+			gl->total = (len > 0) ? 1 : 0;
+			gl->valid = 1;
+			continue;
+		}
+
+		for (i = 0; i < limit; i++)
+			max_k += ctx->ranges[ctx->active_idx[i]].count - 1;
+		ksize = max_k + 1;
+
+		suf = mem_calloc((size_t)(limit + 1) * ksize, sizeof(uint64_t));
+		suf[limit * ksize + 0] = 1;
+		for (i = limit - 1; i >= 0; i--) {
+			int C = ctx->ranges[ctx->active_idx[i]].count;
+			for (s = 0; s <= max_k; s++) {
+				uint64_t acc = 0;
+				for (v = 0; v < C && v <= s; v++)
+					acc += suf[(i + 1) * ksize + (s - v)];
+				suf[i * ksize + s] = acc;
+			}
+		}
+		for (s = 0; s <= max_k; s++)
+			total += suf[0 * ksize + s];
+
+		gl->max_k = max_k;
+		gl->ksize = ksize;
+		gl->suf = suf;
+		gl->total = total;
+		gl->valid = 1;
+	}
+}
+
+/* Rebuild all GPU generation state for the current finalized mask. Called from
+ * do_mask_crack() once the max-length template is materialized. */
+static void mask_gpu_build(mask_cpu_context *ctx)
+{
+	mask_gpu_build_tables(ctx);
+	mask_gpu_build_loops(ctx);
+}
+
+void mask_gpu_unrank_key(int loop, uint64_t g, char *out, int *out_len)
+{
+	const mask_gpu_loop *gl = &gpu_loops[loop];
+	int len = gl->len, limit = gl->limit, ksize = gl->ksize;
+	const uint64_t *suf = gl->suf;
+	int iter[MAX_NUM_MASK_PLHDR];
+	int i, target_k, remaining_k;
+	uint64_t fw, rank;
+
+	for (i = 0; i < len; i++)
+		out[i] = (char)gpu_tabs.littmpl[i];
+	out[len] = 0;
+	if (out_len)
+		*out_len = len;
+	if (limit == 0)
+		return;
+
+	/* Skip whole K-layers, then unrank within the target layer (descending-
+	 * lexicographic, matching simplex_next_state). */
+	fw = g;
+	target_k = 0;
+	while (target_k <= gl->max_k && fw >= suf[target_k]) {
+		fw -= suf[target_k];
+		target_k++;
+	}
+	remaining_k = target_k;
+	rank = fw;
+	for (i = 0; i < limit; i++) {
+		int C = gpu_tabs.count[i];
+		int vmax = remaining_k < (C - 1) ? remaining_k : (C - 1);
+		int vv;
+		for (vv = vmax; vv >= 0; vv--) {
+			uint64_t cnt = suf[(i + 1) * ksize + (remaining_k - vv)];
+			if (rank < cnt)
+				break;
+			rank -= cnt;
+		}
+		iter[i] = vv;
+		remaining_k -= vv;
+	}
+
+	/* Materialize left-to-right through the Markov tables. */
+	for (i = 0; i < limit; i++) {
+		int kp = gpu_tabs.keypos[i];
+		unsigned char cs = gpu_tabs.cstart[i];
+
+		if (cs) {
+			out[kp] = (char)(cs + iter[i]);
+		} else if (i == 0) {
+			out[kp] = (char)gpu_tabs.startv[iter[i]];
+		} else {
+			unsigned char prev = (unsigned char)out[kp - 1];
+			int avail = gpu_tabs.rowcnt[(size_t)i * 256 + prev];
+			int ti = iter[i];
+
+			if (avail > 0) {
+				if (ti >= avail)
+					ti = avail - 1;
+				out[kp] = (char)gpu_tabs.table[((size_t)i * 256 + prev) * 256 + ti];
+			} else {
+				out[kp] = (char)gpu_tabs.chars0[i];
+			}
+		}
+	}
+}
+
 static double get_progress(void)
 {
 	double total;
@@ -2528,6 +2740,13 @@ void mask_init(struct db_main *db, char *unprocessed_mask)
 	mask_db = db;
 	mask_fmt = db->format;
 	mask_bench_index = 0;
+
+	/* CPU validation of the GPU K-ordered generator: force gen mode on so
+	 * do_mask_crack() drives mask_gpu_unrank_key() on the host (the format need
+	 * not support GPU generation). Lets us prove the unrank against a CPU format
+	 * before the kernel path is wired up. */
+	if (getenv("MASK_GPU_CPU"))
+		mask_gpu_gen = 1;
 
 	/* These formats are too weird for magnum to get working */
 #if defined(HAVE_OPENCL) || defined(HAVE_ZTEX)
@@ -2890,6 +3109,12 @@ static void finalize_mask(int len)
 #endif
 	init_cpu_mask(mask, &parsed_mask, &cpu_mask_ctx, max_keylen);
 
+	/* GPU K-ordered generation generates *every* position on the device, so the
+	 * internal-mask split must be off: keep all placeholders host-active and
+	 * num_int_cand == 1. */
+	if (mask_gpu_gen)
+		mask_int_cand_target = 0;
+
 	/* On a GPU (FMT_MASK) format iterating over length, the internal-mask
 	 * placeholder is written at a fixed key position by the kernel; for any
 	 * length shorter than that position the write corrupts the MD5 padding and
@@ -2999,10 +3224,116 @@ void mask_destroy()
 	mask_int_cand_target = 0;
 }
 
+/* Emit one block [base, base+count) of length-loop 'loop'. On a real GPU gen
+ * format this hands the format the cursor and runs a GPU-generated crypt batch;
+ * in CPU-validation mode it materializes each candidate on the host. */
+static int mask_gpu_emit_block(int loop, uint64_t base, int count)
+{
+	if (mask_gpu_cpu_validate) {
+		char key[PLAINTEXT_BUFFER_SIZE];
+		int i, kl;
+
+		for (i = 0; i < count; i++) {
+			mask_gpu_unrank_key(loop, base + i, key, &kl);
+			if (crk_process_key(key))
+				return 1;
+		}
+		return 0;
+	}
+
+	mask_gpu_cur_loop = loop;
+	mask_gpu_cur_base = base;
+	return crk_process_gen_block(count);
+}
+
+/* GPU K-ordered generation driver: for each length-loop hand the format (or the
+ * CPU validator) contiguous index ranges in exact rank-sum order. */
+static int mask_gpu_do_crack(const char *extern_key, int extern_key_len)
+{
+	int min = options.eff_minlength, max = options.eff_maxlength;
+	int loop, block_max;
+	uint64_t tot = 0;
+
+	if (mask_gpu_cpu_validate < 0)
+		mask_gpu_cpu_validate = getenv("MASK_GPU_CPU") ? 1 : 0;
+
+	/* Length-0 (empty) candidate is enumerated outside the simplex. */
+	if (min == 0 && john_main_process)
+		if (crk_process_key(fmt_null_key))
+			return 1;
+
+	mask_cur_len = (min > 0) ? min : 1;
+	finalize_mask(max);
+	generate_template_key(mask, extern_key, extern_key_len, &parsed_mask,
+	                      &cpu_mask_ctx, max);
+	mask_gpu_build(&cpu_mask_ctx);
+
+	block_max = mask_fmt->params.max_keys_per_crypt;
+	if (block_max < 1)
+		block_max = 1;
+	if (mask_gpu_cpu_validate && block_max > 4096)
+		block_max = 4096;
+
+	/* Per-node, per-loop index ranges (block distribution, same split as
+	 * divide_work). */
+	for (loop = 0; loop <= mask_gpu_max_loop; loop++) {
+		const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
+		uint64_t start = 0, end;
+
+		if (!gl || gl->total == 0)
+			continue;
+		end = gl->total;
+		if (options.node_count && !(options.flags & FLG_MASK_STACKED)) {
+			uint64_t share = gl->total / options.node_count;
+			uint64_t rem   = gl->total % options.node_count;
+			uint64_t nmin1 = options.node_min - 1;
+			start = share * nmin1 + (nmin1 < rem ? nmin1 : rem);
+			end   = share * options.node_max +
+			        ((uint64_t)options.node_max < rem ? options.node_max : rem);
+		}
+		tot += end - start;
+	}
+	if (!restored) {
+		mask_tot_cand = tot;
+		cand = tot;
+	}
+
+	for (loop = 0; loop <= mask_gpu_max_loop; loop++) {
+		const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
+		uint64_t base, start = 0, end;
+
+		if (!gl || gl->total == 0)
+			continue;
+		end = gl->total;
+		if (options.node_count && !(options.flags & FLG_MASK_STACKED)) {
+			uint64_t share = gl->total / options.node_count;
+			uint64_t rem   = gl->total % options.node_count;
+			uint64_t nmin1 = options.node_min - 1;
+			start = share * nmin1 + (nmin1 < rem ? nmin1 : rem);
+			end   = share * options.node_max +
+			        ((uint64_t)options.node_max < rem ? options.node_max : rem);
+		}
+
+		for (base = start; base < end; ) {
+			uint64_t left = end - base;
+			int cnt = left > (uint64_t)block_max ? block_max : (int)left;
+
+			if (mask_gpu_emit_block(loop, base, cnt))
+				return 1;
+			base += cnt;
+		}
+	}
+
+	return event_abort;
+}
+
 int do_mask_crack(const char *extern_key)
 {
 	int extern_key_len = extern_key ? strlen(extern_key = mask_utf8_to_cp(extern_key)) : 0;
 	int i;
+
+	if (mask_gpu_gen)
+		return mask_gpu_do_crack(extern_key, extern_key_len);
 
 #ifdef MASK_DEBUG
 	fprintf(stderr, "%s(\"%s\") (format %s internal mask)\n", __FUNCTION__, extern_key, mask_fmt->params.flags & FMT_MASK ? "has" : "doesn't have");

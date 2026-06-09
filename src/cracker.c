@@ -1149,6 +1149,23 @@ static int crk_salt_loop(void)
 }
 
 /*
+ * Run a GPU-generated batch: the format generates 'count' candidates itself
+ * (mask GPU K-ordered generation), so we just set the batch size and run the
+ * normal salt loop, reusing its crypt + guess-reporting path.
+ */
+int crk_process_gen_block(int count)
+{
+	if (!crk_db->loaded || count <= 0)
+		return 0;
+
+	if (event_pending && crk_process_event())
+		return 1;
+
+	crk_key_index = count;
+	return crk_salt_loop();
+}
+
+/*
  * Process an incomplete batch; This is used by mask mode before
  * resetting the format with a changed internal mask.
  */
