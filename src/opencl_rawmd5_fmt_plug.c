@@ -82,6 +82,10 @@ typedef struct {
  * work-item did a single hash, so a fast GPU was starved by launch overhead).
  * Tunable via JOHN_GEN_R for a given device. */
 static cl_uint gen_R = 256;
+/* >0 builds the register-resident gen kernel (-D GEN_REGS) with this unroll width
+ * (compile-time GEN_REG_MAX). Set from JOHN_GEN_REGS in reset(). The host then
+ * refuses any length-loop whose position count exceeds it (gen_upload_plan). */
+static cl_uint gen_reg_max = 0;
 static void gen_release_all(void);
 
 /* Parameters of the gen launch currently in flight. Stored so set_kernel_args()
@@ -300,6 +304,13 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 
 	if (gen_active)
 		strcat(build_opts, " -D GPU_GEN");
+
+	if (gen_active && gen_reg_max) {
+		char ro[64];
+
+		snprintf(ro, sizeof(ro), " -D GEN_REGS -D GEN_REG_MAX=%u", gen_reg_max);
+		strcat(build_opts, ro);
+	}
 
 	opencl_build_kernel("$JOHN/opencl/md5_kernel.cl", gpu_id, build_opts, 0);
 	crypt_kernel = clCreateKernel(program[gpu_id],
@@ -600,6 +611,16 @@ static void gen_upload_plan(void)
 	memset(seen, 0, sizeof(seen));
 	for (s = 0; s < plan->nseg; s++) {
 		const mask_gpu_seg *sg = &plan->seg[s];
+
+		/* The register-resident kernel unrolls position loops to GEN_REG_MAX; a
+		 * longer length-loop would silently truncate, so refuse it outright. */
+		if (gen_reg_max && (cl_uint)sg->limit > gen_reg_max) {
+			fprintf(stderr, "Error: JOHN_GEN_REGS width %u too small for a "
+			    "mask length-loop with %d generated positions; rebuild with "
+			    "JOHN_GEN_REGS=%d or larger.\n",
+			    gen_reg_max, sg->limit, sg->limit);
+			error();
+		}
 
 		if (!seen[sg->loop]) {
 			const mask_gpu_loop *gl = mask_gpu_get_loop(sg->loop);
@@ -932,6 +953,15 @@ static void reset(struct db_main *db)
 	 * crypt path, so keep mask_gpu_gen set (mask.c drives the host unrank) but run
 	 * the format as non-gen: normal md5 kernel, crypt and get_key. */
 	gen_active = mask_gpu_gen && !mask_gpu_cpu_validate;
+
+	/* JOHN_GEN_REGS[=width] selects the register-resident gen kernel. A width >= 2
+	 * sets the unrolled position bound GEN_REG_MAX; anything else defaults to 16. */
+	{
+		const char *e = getenv("JOHN_GEN_REGS");
+		int v = e ? atoi(e) : 0;
+
+		gen_reg_max = e ? (cl_uint)(v >= 2 ? v : 16) : 0;
+	}
 
 	ocl_hc_num_loaded_hashes = db->salts->count;
 	ocl_hc_128_prepare_table(db->salts);

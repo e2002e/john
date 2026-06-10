@@ -375,6 +375,20 @@ __kernel void md5(__global uint *keys,
  */
 #define GEN_MAX_POS 64
 
+/*
+ * Register-resident generator variant (build with -D GEN_REGS). The per-candidate
+ * state machine (full-unrank, simplex advance, materialize) is rewritten as
+ * fully-unrolled, compile-time-indexed sweeps of width GEN_REG_MAX, so iter[]
+ * carries only literal indices and the compiler can promote it to registers (no
+ * local-memory spill). The order is a bit-exact mirror of the runtime-indexed
+ * path below (and of mask.c:simplex_next_state). The host guarantees every
+ * length-loop's position count (glimit) is <= GEN_REG_MAX. key[] stays in local
+ * memory regardless (it is indexed by the runtime g_keypos[] indirection).
+ */
+#ifndef GEN_REG_MAX
+#define GEN_REG_MAX 16
+#endif
+
 /* Device mirror of one mask_gpu_plan segment (must match gen_seg in the format).
  * Four ulongs then four uints = 48 bytes, naturally 8-aligned. */
 typedef struct {
@@ -439,7 +453,11 @@ __kernel void md5_gen(__global uint *keys_unused,
 		uint W[16] = { 0 };
 		uint hash[4];
 		uchar key[GEN_MAX_POS];
+#ifdef GEN_REGS
+		uchar iter[GEN_REG_MAX];
+#else
 		uchar iter[GEN_MAX_POS];
+#endif
 		ulong gl0 = (ulong)gid * gR;
 
 		/*
@@ -528,6 +546,141 @@ __kernel void md5_gen(__global uint *keys_unused,
 
 			g = seg_lstart + (V - seg_vbase);   /* loop-local candidate index */
 
+#ifdef GEN_REGS
+			/*
+			 * Register-resident state machine. Every iter[] index is a literal
+			 * (the position loops are fully unrolled to the compile-time bound
+			 * GEN_REG_MAX and masked by i<glimit), so iter[] lives in registers.
+			 * Each block below is the exact order-equivalent of the runtime path
+			 * in the #else branch.
+			 */
+			if (full) {
+				/* Full unrank (mirror of #else full path): outer position loop
+				 * unrolled with literal i; the inner descending-rank search is a
+				 * scalar loop that never indexes iter[]. */
+				ulong fw = g, rank;
+				uint remaining_k;
+
+				cur_k = 0;
+				while (cur_k <= gmax_k && fw >= suf[seg_suf_off + cur_k]) {
+					fw -= suf[seg_suf_off + cur_k];
+					cur_k++;
+				}
+				remaining_k = cur_k;
+				rank = fw;
+#pragma unroll
+				for (i = 0; i < GEN_REG_MAX; i++) {
+					if (i < glimit) {
+						int C = g_count[i];
+						int vmax = (remaining_k < (uint)(C - 1)) ? (int)remaining_k : (C - 1);
+						int vv;
+
+						for (vv = vmax; vv >= 0; vv--) {
+							ulong cnt = suf[seg_suf_off + (i + 1) * gksize + (remaining_k - vv)];
+							if (rank < cnt)
+								break;
+							rank -= cnt;
+						}
+						iter[i] = (uchar)vv;
+						remaining_k -= vv;
+					}
+				}
+				mfrom = 0;
+			} else {
+				/*
+				 * Incremental advance, branchless fixed sweeps (mirror of
+				 * simplex_next_state). 1) forward sweep keeps the RIGHTMOST
+				 * shiftable wheel as pivot (== the C scan's first hit from the
+				 * right). 2) if found, a left-to-right sweep carrying the residual
+				 * weight w applies the shift+pour. 3) else bump K and repack from
+				 * the left.
+				 */
+				int pivot = -1;
+
+#pragma unroll
+				for (i = 0; i < GEN_REG_MAX; i++)
+					if ((int)i + 1 < (int)glimit &&
+					    iter[i] > 0 && iter[i + 1] < g_count[i + 1] - 1)
+						pivot = (int)i;
+
+				if (pivot >= 0) {
+					int w = 0;
+
+					/* collect residual weight from wheels right of pivot+1 */
+#pragma unroll
+					for (i = 0; i < GEN_REG_MAX; i++)
+						if (i < glimit && (int)i >= pivot + 2)
+							w += iter[i];
+
+					/* shift one unit pivot->pivot+1, then pour w back left-to-right
+					 * from pivot+1 up to each wheel's capacity */
+#pragma unroll
+					for (i = 0; i < GEN_REG_MAX; i++) {
+						if (i < glimit) {
+							if ((int)i == pivot) {
+								iter[i] = (uchar)(iter[i] - 1);
+							} else if ((int)i >= pivot + 1) {
+								int base = ((int)i == pivot + 1) ? (iter[i] + 1) : 0;
+								int cap = g_count[i] - 1 - base;
+								int add = (w > cap) ? cap : w;
+
+								iter[i] = (uchar)(base + add);
+								w -= add;
+							}
+						}
+					}
+					mfrom = (uint)pivot;
+				} else {
+					int rem;
+
+					cur_k++;
+					rem = (int)cur_k;
+#pragma unroll
+					for (i = 0; i < GEN_REG_MAX; i++) {
+						if (i < glimit) {
+							int mx = g_count[i] - 1;
+
+							if (rem <= mx) {
+								iter[i] = (uchar)rem;
+								rem = 0;
+							} else {
+								iter[i] = (uchar)mx;
+								rem -= mx;
+							}
+						}
+					}
+					mfrom = 0;
+				}
+			}
+
+			/* Materialize key[mfrom..glimit) - literal-indexed sweep, processed in
+			 * increasing position order so the Markov key[kp-1] dependency holds. */
+#pragma unroll
+			for (i = 0; i < GEN_REG_MAX; i++) {
+				if (i >= mfrom && i < glimit) {
+					int kp = g_keypos[i];
+					uchar cs = g_cstart[i];
+
+					if (cs) {
+						key[kp] = cs + iter[i];
+					} else if (i == 0) {
+						key[kp] = g_startv[iter[0]];
+					} else {
+						uchar prev = key[kp - 1];
+						int avail = g_rowcnt[i * 256 + prev];
+						int ti = iter[i];
+
+						if (avail > 0) {
+							if (ti >= avail)
+								ti = avail - 1;
+							key[kp] = g_table[(i * 256 + prev) * 256 + ti];
+						} else {
+							key[kp] = g_chars0[i];
+						}
+					}
+				}
+			}
+#else
 			if (full) {
 				/* Full unrank: skip whole K-layers, then unrank within the
 				 * target layer in descending-lexicographic order (matches
@@ -634,6 +787,7 @@ __kernel void md5_gen(__global uint *keys_unused,
 					}
 				}
 			}
+#endif /* GEN_REGS */
 
 			/* Pack the message words with COMPILE-TIME indices so W[0..15] stay
 			 * in registers across md5_encrypt. (A dynamic W[] index, e.g. a
