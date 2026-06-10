@@ -59,9 +59,23 @@ static int static_gpu_locations[MASK_FMT_INT_PLHDR];
 
 /* GPU K-ordered generation state */
 static cl_mem g_buf_suf, g_buf_table, g_buf_startv, g_buf_rowcnt, g_buf_littmpl,
-              g_buf_keypos, g_buf_count, g_buf_cstart, g_buf_chars0;
-static unsigned g_uploaded_serial;   /* mask_gpu_serial last uploaded (0 = none) */
-static int g_uploaded_loop = -1;     /* loop whose suf is currently on the device */
+              g_buf_keypos, g_buf_count, g_buf_cstart, g_buf_chars0, g_buf_segs;
+static unsigned g_uploaded_serial;       /* mask_gpu_serial of last table upload  */
+static unsigned g_uploaded_plan_serial;  /* mask_gpu_serial of last plan upload    */
+static cl_uint g_nseg;                    /* segments in the uploaded plan          */
+
+/* Device mirror of one mask_gpu_plan segment (must match gen_seg in the kernel).
+ * Layout: four ulongs then four uints = 48 bytes, naturally 8-aligned. */
+typedef struct {
+	cl_ulong vbase;
+	cl_ulong vcnt;
+	cl_ulong lstart;
+	cl_ulong suf_off;
+	cl_uint  limit;
+	cl_uint  len;
+	cl_uint  max_k;
+	cl_uint  ksize;
+} gen_seg;
 /* Candidates generated per work-item in the gen kernel. Each launch covers
  * global_work_size * gen_R candidates, restoring the work-per-launch the old
  * internal-mask kernel got from its NUM_INT_KEYS inner loop (without this every
@@ -71,13 +85,13 @@ static cl_uint gen_R = 256;
 static void gen_release_all(void);
 
 /* Parameters of the gen launch currently in flight. Stored so set_kernel_args()
- * can re-bind the gen-kernel args (10-25) if ocl_hc_128_extract_info rebuilds
+ * can re-bind the gen-kernel args (10-23) if ocl_hc_128_extract_info rebuilds
  * (releases+recreates) crypt_kernel mid-launch when the hash table shrinks -
  * a rebuild wipes all kernel args and the generic re-bind only covers 0-9. */
-static const mask_gpu_loop *g_cur_gl = NULL;
+static int      g_cur_gen = 0;       /* a gen launch is in flight */
 static cl_ulong g_cur_gbase;
 static cl_uint  g_cur_gcount;
-static void set_kernel_args_gen(const mask_gpu_loop *gl);
+static void set_kernel_args_gen(void);
 
 /* True when the GPU actually generates candidates. This is mask_gpu_gen EXCEPT in
  * MASK_GPU_CPU validation, where mask mode streams host-materialized candidates
@@ -125,12 +139,12 @@ static void set_kernel_args()
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 3, sizeof(buffer_int_keys), (void *) &buffer_int_keys), "Error setting argument 4.");
 
 	/* If a gen launch is in flight and the kernel was just rebuilt by
-	 * ocl_hc_128_extract_info, re-bind the gen args (10-25) too. */
-	if (gen_active && g_cur_gl) {
-		set_kernel_args_gen(g_cur_gl);
-		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 23, sizeof(cl_ulong), &g_cur_gbase), "arg23");
-		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 24, sizeof(cl_uint), &g_cur_gcount), "arg24");
-		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 25, sizeof(cl_uint), &gen_R), "arg25");
+	 * ocl_hc_128_extract_info, re-bind the gen args (10-23) too. */
+	if (gen_active && g_cur_gen) {
+		set_kernel_args_gen();
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 21, sizeof(cl_ulong), &g_cur_gbase), "arg21");
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 22, sizeof(cl_uint), &g_cur_gcount), "arg22");
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 23, sizeof(cl_uint), &gen_R), "arg23");
 	}
 }
 
@@ -421,12 +435,14 @@ static char *get_key(int index)
 	char *key;
 
 	if (gen_active) {
-		int kl;
-		uint64_t off;
+		int kl, loop;
+		uint64_t off, g;
 
 		/* Each work-item gid produced gen_R contiguous candidates; the kernel
 		 * stored gid in the id slot and the sub-index j in the int_index slot,
-		 * so the candidate's offset within the block is gid*gen_R + j. */
+		 * so the candidate's offset within the block is gid*gen_R + j. The block
+		 * covers virtual indices [mask_gpu_cur_base, +count) of the multi-length
+		 * plan, so map the virtual index to its length-loop before unranking. */
 		if (ocl_hc_hash_ids == NULL || ocl_hc_hash_ids[0] == 0 ||
 		    index >= ocl_hc_hash_ids[0] ||
 		    ocl_hc_hash_ids[0] > ocl_hc_num_loaded_hashes)
@@ -435,8 +451,8 @@ static char *get_key(int index)
 			off = (uint64_t)ocl_hc_hash_ids[1 + 3 * index] * gen_R +
 			      ocl_hc_hash_ids[2 + 3 * index];
 
-		mask_gpu_unrank_key(mask_gpu_cur_loop,
-		                    mask_gpu_cur_base + off, out, &kl);
+		mask_gpu_virt_to_loop(mask_gpu_cur_base + off, &loop, &g);
+		mask_gpu_unrank_key(loop, g, out, &kl);
 		return out;
 	}
 
@@ -503,8 +519,9 @@ static void gen_release_all(void)
 	gen_release_buf(&g_buf_count);
 	gen_release_buf(&g_buf_cstart);
 	gen_release_buf(&g_buf_chars0);
+	gen_release_buf(&g_buf_segs);
 	g_uploaded_serial = 0;
-	g_uploaded_loop = -1;
+	g_uploaded_plan_serial = 0;
 }
 
 /* Upload the per-mask Markov tables once per mask config (tracked by serial). */
@@ -535,25 +552,55 @@ static void gen_upload_tables(void)
 	g_buf_chars0  = gen_copy_buf(npos, t->chars0);
 
 	g_uploaded_serial = mask_gpu_serial;
-	g_uploaded_loop = -1;
 }
 
-/* Upload the suffix-DP table for the current length-loop (changes per length). */
-static void gen_upload_suf(const mask_gpu_loop *gl, int loop)
+/* Upload the multi-length plan: the per-segment metadata array and the
+ * concatenated suffix-DP tables (all active length-loops). Changes per mask
+ * config, tracked by serial. */
+static void gen_upload_plan(void)
 {
-	if (g_buf_suf && g_uploaded_loop == loop)
+	const mask_gpu_plan *plan = mask_gpu_get_plan();
+	gen_seg *segs;
+	cl_ulong *suf;
+	int s;
+
+	if (g_buf_segs && g_uploaded_plan_serial == mask_gpu_serial)
 		return;
+
+	gen_release_buf(&g_buf_segs);
 	gen_release_buf(&g_buf_suf);
-	g_buf_suf = gen_copy_buf((size_t)(gl->limit + 1) * gl->ksize *
-	                         sizeof(cl_ulong), gl->suf);
-	g_uploaded_loop = loop;
+
+	/* Concatenated suf: each loop's (limit+1)*ksize ulongs at suf_off[s]. */
+	suf = mem_alloc((plan->suf_total ? plan->suf_total : 1) * sizeof(cl_ulong));
+	segs = mem_alloc((plan->nseg ? plan->nseg : 1) * sizeof(gen_seg));
+	for (s = 0; s < plan->nseg; s++) {
+		const mask_gpu_loop *gl = mask_gpu_get_loop(plan->loop[s]);
+
+		memcpy(suf + plan->suf_off[s], gl->suf,
+		       (size_t)(gl->limit + 1) * gl->ksize * sizeof(cl_ulong));
+		segs[s].vbase   = plan->vbase[s];
+		segs[s].vcnt    = plan->vcnt[s];
+		segs[s].lstart  = plan->lstart[s];
+		segs[s].suf_off = plan->suf_off[s];
+		segs[s].limit   = plan->limit[s];
+		segs[s].len     = plan->len[s];
+		segs[s].max_k   = plan->max_k[s];
+		segs[s].ksize   = plan->ksize[s];
+	}
+
+	g_buf_suf  = gen_copy_buf((plan->suf_total ? plan->suf_total : 1) *
+	                          sizeof(cl_ulong), suf);
+	g_buf_segs = gen_copy_buf((plan->nseg ? plan->nseg : 1) * sizeof(gen_seg),
+	                          segs);
+	g_nseg = plan->nseg;
+
+	MEM_FREE(suf);
+	MEM_FREE(segs);
+	g_uploaded_plan_serial = mask_gpu_serial;
 }
 
-static void set_kernel_args_gen(const mask_gpu_loop *gl)
+static void set_kernel_args_gen(void)
 {
-	cl_uint glimit = gl->limit, glen = gl->len, gmax_k = gl->max_k,
-	        gksize = gl->ksize;
-
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 10, sizeof(g_buf_suf), &g_buf_suf), "arg10");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 11, sizeof(g_buf_table), &g_buf_table), "arg11");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 12, sizeof(g_buf_startv), &g_buf_startv), "arg12");
@@ -563,37 +610,33 @@ static void set_kernel_args_gen(const mask_gpu_loop *gl)
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 16, sizeof(g_buf_count), &g_buf_count), "arg16");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 17, sizeof(g_buf_cstart), &g_buf_cstart), "arg17");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 18, sizeof(g_buf_chars0), &g_buf_chars0), "arg18");
-	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 19, sizeof(cl_uint), &glimit), "arg19");
-	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 20, sizeof(cl_uint), &glen), "arg20");
-	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 21, sizeof(cl_uint), &gmax_k), "arg21");
-	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 22, sizeof(cl_uint), &gksize), "arg22");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 19, sizeof(g_buf_segs), &g_buf_segs), "arg19");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 20, sizeof(cl_uint), &g_nseg), "arg20");
 }
 
 static int gen_crypt(int *pcount, struct db_salt *salt)
 {
 	const int count = *pcount;
-	int loop = mask_gpu_cur_loop;
-	const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
 	size_t *lws = local_work_size ? &local_work_size : NULL;
 	cl_ulong gbase = mask_gpu_cur_base;
 	cl_uint gcount = count;
 
-	if (!gl || count <= 0) {
+	if (count <= 0) {
 		*pcount = 0;
 		return 0;
 	}
 
 	gen_upload_tables();
-	gen_upload_suf(gl, loop);
+	gen_upload_plan();
 	/* Remember this launch so set_kernel_args() can re-bind the gen args if
 	 * extract_info rebuilds the kernel mid-launch. */
-	g_cur_gl = gl;
+	g_cur_gen = 1;
 	g_cur_gbase = gbase;
 	g_cur_gcount = gcount;
-	set_kernel_args_gen(gl);
-	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 23, sizeof(cl_ulong), &gbase), "arg23");
-	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 24, sizeof(cl_uint), &gcount), "arg24");
-	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 25, sizeof(cl_uint), &gen_R), "arg25");
+	set_kernel_args_gen();
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 21, sizeof(cl_ulong), &gbase), "arg21");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 22, sizeof(cl_uint), &gcount), "arg22");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 23, sizeof(cl_uint), &gen_R), "arg23");
 
 	/* gcount candidates spread gen_R per work-item -> ceil(count/gen_R) threads. */
 	{

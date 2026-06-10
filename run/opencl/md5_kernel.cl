@@ -375,6 +375,19 @@ __kernel void md5(__global uint *keys,
  */
 #define GEN_MAX_POS 64
 
+/* Device mirror of one mask_gpu_plan segment (must match gen_seg in the format).
+ * Four ulongs then four uints = 48 bytes, naturally 8-aligned. */
+typedef struct {
+	ulong vbase;
+	ulong vcnt;
+	ulong lstart;
+	ulong suf_off;
+	uint  limit;
+	uint  len;
+	uint  max_k;
+	uint  ksize;
+} gen_seg;
+
 __kernel void md5_gen(__global uint *keys_unused,
 		  __global uint *index_unused,
 		  __global uint *int_key_loc_unused,
@@ -402,10 +415,8 @@ __kernel void md5_gen(__global uint *keys_unused,
 		  __constant int   *g_count,
 		  __constant uchar *g_cstart,
 		  __constant uchar *g_chars0,
-		  uint glimit,
-		  uint glen,
-		  uint gmax_k,
-		  uint gksize,
+		  __global gen_seg *segs,
+		  uint nseg,
 		  ulong gbase,
 		  uint gcount,
 		  uint gR)
@@ -425,69 +436,96 @@ __kernel void md5_gen(__global uint *keys_unused,
 #endif
 
 	{
-		uint len = glen;
 		uint W[16] = { 0 };
 		uint hash[4];
 		uchar key[GEN_MAX_POS];
 		uchar iter[GEN_MAX_POS];
 		ulong gl0 = (ulong)gid * gR;
 
-		for (i = 0; i < len; i++)
-			key[i] = g_littmpl[i];
-
-		/*
-		 * Fold the MD5 padding into key[] once: the 0x80 terminator sits at the
-		 * constant position len, and the up-to-three tail bytes that share its
-		 * final word are zeroed. The per-candidate W build then packs key[]
-		 * word-wise (ndw words, padding included) with no dynamic byte index into
-		 * W, so W stays in registers and md5_encrypt runs register-resident -
-		 * the byte-wise PUTCHAR(W, i, ...) loop it replaces spilled W to local
-		 * memory, which the 64 md5 rounds then paid for on every candidate.
-		 */
-		key[len]     = 0x80;
-		key[len + 1] = 0;
-		key[len + 2] = 0;
-		key[len + 3] = 0;
-		W[14] = len << 3;
-		uint ndw = (len + 4) / 4;   /* data words incl. the 0x80 pad byte */
-
 		/*
 		 * Each work-item handles gR contiguous candidates gl = gid*gR + j
-		 * (j = 0..gR-1), global index g = gbase + gl. Contiguous layout plus
-		 * the stable gid sort in ocl_hc keeps reported cracks in exact
-		 * increasing-K order; the sub-index j is carried in cmp's int_index
-		 * slot so get_key can reconstruct g. len is constant across the loop,
-		 * so W's padding stays valid and only the data bytes are rewritten.
+		 * (j = 0..gR-1), virtual index V = gbase + gl. The virtual space
+		 * concatenates all active length-loops (segs[]) so a single launch spans
+		 * several lengths; the stable gid sort in ocl_hc keeps reported cracks in
+		 * exact increasing-virtual order, and the sub-index j is carried in cmp's
+		 * int_index slot so get_key can reconstruct V.
 		 *
-		 * Only the first candidate (j == 0) is unranked from scratch via the
-		 * suffix-DP - an O(glimit * charset) walk over global suf[]. The rest
-		 * advance the iter[] vector incrementally with the device mirror of
-		 * mask.c:simplex_next_state(), which only touches a few wheels and lets
-		 * us rebuild key[] from the leftmost changed position onward. This keeps
-		 * the heavy global-memory unrank off the per-candidate hot path (gR-1 of
-		 * every gR candidates), so md5_encrypt dominates again. cur_k carries the
-		 * current K-layer across the j loop for the layer-rollover reset.
+		 * Per candidate we first locate its segment. Segment index only grows
+		 * across the j loop (V increases, segs are ascending in length), so the
+		 * MD5 message length only grows - words written by a shorter length stay
+		 * valid padding for the longer one. On a segment change we rebuild the
+		 * length template + padding and full-unrank from the suffix-DP. Within a
+		 * segment the iter[] vector advances incrementally (mirror of
+		 * mask.c:simplex_next_state), rebuilding key[] from the leftmost changed
+		 * position so md5_encrypt dominates the per-candidate cost.
 		 */
-		uint cur_k = 0;
+		uint cur_seg = 0xffffffff;
+		ulong seg_vbase = 0, seg_vend = 0, seg_lstart = 0, seg_suf_off = 0;
+		uint glimit = 0, glen = 0, gmax_k = 0, gksize = 0;
+		uint len = 0, ndw = 0, cur_k = 0;
 
 		for (j = 0; j < gR; j++) {
 			ulong gl = gl0 + j;
+			ulong V, g;
 			uint mfrom;     /* leftmost iter[] position that changed */
+			int full;
 
 			if (gl >= gcount)
 				break;
+			V = gbase + gl;
 
-			if (j == 0) {
+			/* (Re)locate the segment when V leaves the cached one. */
+			if (cur_seg == 0xffffffff || V < seg_vbase || V >= seg_vend) {
+				uint s;
+
+				for (s = 0; s < nseg; s++)
+					if (V >= segs[s].vbase &&
+					    V < segs[s].vbase + segs[s].vcnt)
+						break;
+				if (s >= nseg)
+					break;          /* out of range (shouldn't happen) */
+
+				cur_seg     = s;
+				seg_vbase   = segs[s].vbase;
+				seg_vend    = seg_vbase + segs[s].vcnt;
+				seg_lstart  = segs[s].lstart;
+				seg_suf_off = segs[s].suf_off;
+				glimit      = segs[s].limit;
+				glen        = segs[s].len;
+				gmax_k      = segs[s].max_k;
+				gksize      = segs[s].ksize;
+
+				/* Rebuild key[] template + folded MD5 padding for this length.
+				 * The 0x80 terminator sits at the constant position len and the
+				 * tail bytes sharing its final word are zeroed; the per-candidate
+				 * W build then packs key[] word-wise so W stays register-resident
+				 * through md5_encrypt. */
+				len = glen;
+				for (i = 0; i < len; i++)
+					key[i] = g_littmpl[i];
+				key[len]     = 0x80;
+				key[len + 1] = 0;
+				key[len + 2] = 0;
+				key[len + 3] = 0;
+				W[14] = len << 3;
+				ndw = (len + 4) / 4;   /* data words incl. the 0x80 pad byte */
+				full = 1;              /* must full-unrank on a new segment */
+			} else {
+				full = 0;
+			}
+
+			g = seg_lstart + (V - seg_vbase);   /* loop-local candidate index */
+
+			if (full) {
 				/* Full unrank: skip whole K-layers, then unrank within the
 				 * target layer in descending-lexicographic order (matches
-				 * simplex_next_state). */
-				ulong g = gbase + gl;
+				 * simplex_next_state). suf is shared, offset by seg_suf_off. */
 				ulong fw = g, rank;
 				uint remaining_k;
 
 				cur_k = 0;
-				while (cur_k <= gmax_k && fw >= suf[cur_k]) {
-					fw -= suf[cur_k];
+				while (cur_k <= gmax_k && fw >= suf[seg_suf_off + cur_k]) {
+					fw -= suf[seg_suf_off + cur_k];
 					cur_k++;
 				}
 				remaining_k = cur_k;
@@ -498,7 +536,7 @@ __kernel void md5_gen(__global uint *keys_unused,
 					int vv;
 
 					for (vv = vmax; vv >= 0; vv--) {
-						ulong cnt = suf[(i + 1) * gksize + (remaining_k - vv)];
+						ulong cnt = suf[seg_suf_off + (i + 1) * gksize + (remaining_k - vv)];
 						if (rank < cnt)
 							break;
 						rank -= cnt;

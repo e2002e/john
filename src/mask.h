@@ -190,4 +190,35 @@ extern const mask_gpu_loop   *mask_gpu_get_loop(int loop);
  * mirror of the kernel generator, used by the format's get_key). */
 extern void mask_gpu_unrank_key(int loop, uint64_t g, char *out, int *out_len);
 
+/*
+ * Multi-length launch plan. The active length-loops are concatenated into one
+ * node-local virtual candidate index space [0, total) so a SINGLE GPU launch can
+ * span several lengths at once (restoring "all lengths tested together" that the
+ * old internal-mask path got by packing mixed-length keys into one buffer).
+ * Segment s covers virtual indices [vbase[s], vbase[s]+vcnt[s]) and maps to
+ * candidate indices [lstart[s], lstart[s]+vcnt[s]) of length-loop loop[s]. The
+ * format uploads a device mirror of this (plus the concatenated suf tables, with
+ * per-segment element offset suf_off[]) and launches block-sized chunks of the
+ * virtual space; each work-item locates its segment then unranks within it.
+ */
+typedef struct {
+	int nseg;
+	uint64_t total;                          /* node-local candidates, all lengths */
+	uint64_t suf_total;                      /* elements in the concatenated suf   */
+	int      loop[MASK_MAX_INC_LEN + 1];
+	uint64_t vbase[MASK_MAX_INC_LEN + 1];
+	uint64_t vcnt[MASK_MAX_INC_LEN + 1];
+	uint64_t lstart[MASK_MAX_INC_LEN + 1];
+	uint64_t suf_off[MASK_MAX_INC_LEN + 1];  /* element offset into concat suf      */
+	int      limit[MASK_MAX_INC_LEN + 1];
+	int      len[MASK_MAX_INC_LEN + 1];
+	int      max_k[MASK_MAX_INC_LEN + 1];
+	int      ksize[MASK_MAX_INC_LEN + 1];
+} mask_gpu_plan;
+
+extern const mask_gpu_plan *mask_gpu_get_plan(void);
+/* Map a virtual candidate index to its length-loop and the loop-local index g
+ * (host mirror of the kernel's segment search, used by the format's get_key). */
+extern void mask_gpu_virt_to_loop(uint64_t v, int *loop, uint64_t *g);
+
 #endif

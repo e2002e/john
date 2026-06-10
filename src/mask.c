@@ -2288,6 +2288,71 @@ const mask_gpu_loop *mask_gpu_get_loop(int loop)
 	return &gpu_loops[loop];
 }
 
+static mask_gpu_plan gpu_plan;
+
+const mask_gpu_plan *mask_gpu_get_plan(void) { return &gpu_plan; }
+
+/* Concatenate the active length-loops (with this node's share of each) into one
+ * virtual index space, recording per-segment loop params and the element offset
+ * of each loop's suf in the to-be-concatenated suf buffer. */
+static void mask_gpu_build_plan(void)
+{
+	int loop, nseg = 0;
+	uint64_t vbase = 0, soff = 0;
+
+	for (loop = 0; loop <= mask_gpu_max_loop; loop++) {
+		const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
+		uint64_t start = 0, end;
+
+		if (!gl || gl->total == 0)
+			continue;
+		end = gl->total;
+		if (options.node_count && !(options.flags & FLG_MASK_STACKED)) {
+			uint64_t share = gl->total / options.node_count;
+			uint64_t rem   = gl->total % options.node_count;
+			uint64_t nmin1 = options.node_min - 1;
+			start = share * nmin1 + (nmin1 < rem ? nmin1 : rem);
+			end   = share * options.node_max +
+			        ((uint64_t)options.node_max < rem ? options.node_max : rem);
+		}
+		if (end <= start)
+			continue;
+
+		gpu_plan.loop[nseg]    = loop;
+		gpu_plan.vbase[nseg]   = vbase;
+		gpu_plan.vcnt[nseg]    = end - start;
+		gpu_plan.lstart[nseg]  = start;
+		gpu_plan.suf_off[nseg] = soff;
+		gpu_plan.limit[nseg]   = gl->limit;
+		gpu_plan.len[nseg]     = gl->len;
+		gpu_plan.max_k[nseg]   = gl->max_k;
+		gpu_plan.ksize[nseg]   = gl->ksize;
+
+		vbase += end - start;
+		soff  += (uint64_t)(gl->limit + 1) * gl->ksize;
+		nseg++;
+	}
+	gpu_plan.nseg = nseg;
+	gpu_plan.total = vbase;
+	gpu_plan.suf_total = soff;
+}
+
+void mask_gpu_virt_to_loop(uint64_t v, int *loop, uint64_t *g)
+{
+	int s;
+
+	for (s = 0; s < gpu_plan.nseg; s++)
+		if (v >= gpu_plan.vbase[s] &&
+		    v <  gpu_plan.vbase[s] + gpu_plan.vcnt[s]) {
+			*loop = gpu_plan.loop[s];
+			*g = gpu_plan.lstart[s] + (v - gpu_plan.vbase[s]);
+			return;
+		}
+	/* Out of range (shouldn't happen): fall back to first loop. */
+	*loop = gpu_plan.nseg ? gpu_plan.loop[0] : 0;
+	*g = 0;
+}
+
 /* Compact the per-position Markov tables of the current mask into flat,
  * upload-ready arrays indexed by generated-position (left-to-right key order).
  * template_key must already hold the finalized max-length template (literals in
@@ -3230,32 +3295,37 @@ void mask_destroy()
 /* Emit one block [base, base+count) of length-loop 'loop'. On a real GPU gen
  * format this hands the format the cursor and runs a GPU-generated crypt batch;
  * in CPU-validation mode it materializes each candidate on the host. */
-static int mask_gpu_emit_block(int loop, uint64_t base, int count)
+static int mask_gpu_emit_block(uint64_t base, int count)
 {
 	if (mask_gpu_cpu_validate) {
 		char key[PLAINTEXT_BUFFER_SIZE];
-		int i, kl;
+		int i, kl, loop;
+		uint64_t g;
 
 		for (i = 0; i < count; i++) {
-			mask_gpu_unrank_key(loop, base + i, key, &kl);
+			mask_gpu_virt_to_loop(base + i, &loop, &g);
+			mask_gpu_unrank_key(loop, g, key, &kl);
 			if (crk_process_key(key))
 				return 1;
 		}
 		return 0;
 	}
 
-	mask_gpu_cur_loop = loop;
 	mask_gpu_cur_base = base;
 	return crk_process_gen_block(count);
 }
 
-/* GPU K-ordered generation driver: for each length-loop hand the format (or the
- * CPU validator) contiguous index ranges in exact rank-sum order. */
+/* GPU K-ordered generation driver: concatenate all active length-loops into one
+ * virtual index space (mask_gpu_build_plan) and hand the format (or the CPU
+ * validator) contiguous virtual ranges. A single GPU launch then spans whatever
+ * lengths its block covers, so all lengths are crunched together instead of one
+ * length fully draining before the next starts. */
 static int mask_gpu_do_crack(const char *extern_key, int extern_key_len)
 {
 	int min = options.eff_minlength, max = options.eff_maxlength;
-	int loop, block_max;
-	uint64_t tot = 0;
+	int block_max;
+	uint64_t base;
+	const mask_gpu_plan *plan;
 
 	/* mask_gpu_cpu_validate resolved eagerly in mask_init(). */
 
@@ -3269,6 +3339,8 @@ static int mask_gpu_do_crack(const char *extern_key, int extern_key_len)
 	generate_template_key(mask, extern_key, extern_key_len, &parsed_mask,
 	                      &cpu_mask_ctx, max);
 	mask_gpu_build(&cpu_mask_ctx);
+	mask_gpu_build_plan();
+	plan = mask_gpu_get_plan();
 
 	block_max = mask_fmt->params.max_keys_per_crypt;
 	if (block_max < 1)
@@ -3276,54 +3348,18 @@ static int mask_gpu_do_crack(const char *extern_key, int extern_key_len)
 	if (mask_gpu_cpu_validate && block_max > 4096)
 		block_max = 4096;
 
-	/* Per-node, per-loop index ranges (block distribution, same split as
-	 * divide_work). */
-	for (loop = 0; loop <= mask_gpu_max_loop; loop++) {
-		const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
-		uint64_t start = 0, end;
-
-		if (!gl || gl->total == 0)
-			continue;
-		end = gl->total;
-		if (options.node_count && !(options.flags & FLG_MASK_STACKED)) {
-			uint64_t share = gl->total / options.node_count;
-			uint64_t rem   = gl->total % options.node_count;
-			uint64_t nmin1 = options.node_min - 1;
-			start = share * nmin1 + (nmin1 < rem ? nmin1 : rem);
-			end   = share * options.node_max +
-			        ((uint64_t)options.node_max < rem ? options.node_max : rem);
-		}
-		tot += end - start;
-	}
 	if (!restored) {
-		mask_tot_cand = tot;
-		cand = tot;
+		mask_tot_cand = plan->total;
+		cand = plan->total;
 	}
 
-	for (loop = 0; loop <= mask_gpu_max_loop; loop++) {
-		const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
-		uint64_t base, start = 0, end;
+	for (base = 0; base < plan->total; ) {
+		uint64_t left = plan->total - base;
+		int cnt = left > (uint64_t)block_max ? block_max : (int)left;
 
-		if (!gl || gl->total == 0)
-			continue;
-		end = gl->total;
-		if (options.node_count && !(options.flags & FLG_MASK_STACKED)) {
-			uint64_t share = gl->total / options.node_count;
-			uint64_t rem   = gl->total % options.node_count;
-			uint64_t nmin1 = options.node_min - 1;
-			start = share * nmin1 + (nmin1 < rem ? nmin1 : rem);
-			end   = share * options.node_max +
-			        ((uint64_t)options.node_max < rem ? options.node_max : rem);
-		}
-
-		for (base = start; base < end; ) {
-			uint64_t left = end - base;
-			int cnt = left > (uint64_t)block_max ? block_max : (int)left;
-
-			if (mask_gpu_emit_block(loop, base, cnt))
-				return 1;
-			base += cnt;
-		}
+		if (mask_gpu_emit_block(base, cnt))
+			return 1;
+		base += cnt;
 	}
 
 	return event_abort;
