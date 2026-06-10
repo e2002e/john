@@ -70,6 +70,15 @@ static int g_uploaded_loop = -1;     /* loop whose suf is currently on the devic
 static cl_uint gen_R = 256;
 static void gen_release_all(void);
 
+/* Parameters of the gen launch currently in flight. Stored so set_kernel_args()
+ * can re-bind the gen-kernel args (10-25) if ocl_hc_128_extract_info rebuilds
+ * (releases+recreates) crypt_kernel mid-launch when the hash table shrinks -
+ * a rebuild wipes all kernel args and the generic re-bind only covers 0-9. */
+static const mask_gpu_loop *g_cur_gl = NULL;
+static cl_ulong g_cur_gbase;
+static cl_uint  g_cur_gcount;
+static void set_kernel_args_gen(const mask_gpu_loop *gl);
+
 /* True when the GPU actually generates candidates. This is mask_gpu_gen EXCEPT in
  * MASK_GPU_CPU validation, where mask mode streams host-materialized candidates
  * through the normal crypt path - so the gen kernel/crypt/get_key must stay off.
@@ -114,6 +123,15 @@ static void set_kernel_args_kpc()
 static void set_kernel_args()
 {
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 3, sizeof(buffer_int_keys), (void *) &buffer_int_keys), "Error setting argument 4.");
+
+	/* If a gen launch is in flight and the kernel was just rebuilt by
+	 * ocl_hc_128_extract_info, re-bind the gen args (10-25) too. */
+	if (gen_active && g_cur_gl) {
+		set_kernel_args_gen(g_cur_gl);
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 23, sizeof(cl_ulong), &g_cur_gbase), "arg23");
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 24, sizeof(cl_uint), &g_cur_gcount), "arg24");
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 25, sizeof(cl_uint), &gen_R), "arg25");
+	}
 }
 
 static void release_clobj_kpc(void);
@@ -567,6 +585,11 @@ static int gen_crypt(int *pcount, struct db_salt *salt)
 
 	gen_upload_tables();
 	gen_upload_suf(gl, loop);
+	/* Remember this launch so set_kernel_args() can re-bind the gen args if
+	 * extract_info rebuilds the kernel mid-launch. */
+	g_cur_gl = gl;
+	g_cur_gbase = gbase;
+	g_cur_gcount = gcount;
 	set_kernel_args_gen(gl);
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 23, sizeof(cl_ulong), &gbase), "arg23");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 24, sizeof(cl_uint), &gcount), "arg24");
