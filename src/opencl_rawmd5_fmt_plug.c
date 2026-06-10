@@ -305,6 +305,28 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 	crypt_kernel = clCreateKernel(program[gpu_id],
 	                              gen_active ? "md5_gen" : "md5", &ret_code);
 	HANDLE_CLERROR(ret_code, "Error creating kernel. Double-check kernel name?");
+
+	/*
+	 * GEN_KINFO=1 dumps the gen kernel's resource usage. CL_KERNEL_PRIVATE_MEM_SIZE
+	 * is the per-work-item local-memory spill (dynamically-indexed private arrays
+	 * that didn't fit in registers) - the same "local memory per thread" figure a
+	 * profiler would report. Nsight Compute (ncu) cannot profile OpenCL kernels
+	 * (it only intercepts the CUDA driver API), so this is how we measure spill on
+	 * NVIDIA: keeping the message words W[] register-resident drops it by 64 B/wi.
+	 */
+	if (gen_active && getenv("GEN_KINFO")) {
+		cl_ulong priv = 0, loc = 0;
+		size_t wgs = 0;
+		clGetKernelWorkGroupInfo(crypt_kernel, devices[gpu_id],
+		    CL_KERNEL_PRIVATE_MEM_SIZE, sizeof(priv), &priv, NULL);
+		clGetKernelWorkGroupInfo(crypt_kernel, devices[gpu_id],
+		    CL_KERNEL_LOCAL_MEM_SIZE, sizeof(loc), &loc, NULL);
+		clGetKernelWorkGroupInfo(crypt_kernel, devices[gpu_id],
+		    CL_KERNEL_WORK_GROUP_SIZE, sizeof(wgs), &wgs, NULL);
+		fprintf(stderr, "[GEN_KINFO] md5_gen private(spill)=%llu B/wi  "
+		    "local=%llu B  max_wgs=%zu\n",
+		    (unsigned long long)priv, (unsigned long long)loc, wgs);
+	}
 }
 
 static void init(struct fmt_main *_self)

@@ -462,7 +462,7 @@ __kernel void md5_gen(__global uint *keys_unused,
 		uint cur_seg = 0xffffffff;
 		ulong seg_vbase = 0, seg_vend = 0, seg_lstart = 0, seg_suf_off = 0;
 		uint glimit = 0, glen = 0, gmax_k = 0, gksize = 0;
-		uint len = 0, ndw = 0, cur_k = 0;
+		uint len = 0, cur_k = 0;
 
 		for (j = 0; j < gR; j++) {
 			ulong gl = gl0 + j;
@@ -506,24 +506,21 @@ __kernel void md5_gen(__global uint *keys_unused,
 				gksize      = segs[s].ksize;
 
 				/* Rebuild key[] template + folded MD5 padding for this length.
-				 * The 0x80 terminator sits at the constant position len and the
-				 * tail bytes sharing its final word are zeroed; the per-candidate
-				 * W build then packs key[] word-wise so W stays register-resident
-				 * through md5_encrypt. */
+				 * Zero the whole packed range first (constant bound so it can
+				 * unroll), lay down the literal template, then drop the single
+				 * 0x80 terminator at position len. Everything from len+1..55 is
+				 * already 0, so the per-candidate word pack below can use
+				 * compile-time indices for ALL of W[0..13] - no per-length
+				 * masking - which is what keeps W register-resident through
+				 * md5_encrypt. W[14] (bit length) and W[15] are set here once per
+				 * segment and never touched by the pack. */
 				len = glen;
-				for (i = 0; i < len; i++)
-					key[i] = g_littmpl[i];
-				key[len]     = 0x80;
-				key[len + 1] = 0;
-				key[len + 2] = 0;
-				key[len + 3] = 0;
-				ndw = (len + 4) / 4;   /* data words incl. the 0x80 pad byte */
-				/* Round-robin segments alternate lengths, so len can shrink
-				 * across a boundary; clear any stale high words a previous
-				 * longer length left in W before setting the bit-length word. */
-				for (i = ndw; i < 16; i++)
-					W[i] = 0;
+#pragma unroll
+				for (i = 0; i < 56; i++)
+					key[i] = (i < len) ? g_littmpl[i] : 0;
+				key[len] = 0x80;
 				W[14] = len << 3;
+				W[15] = 0;
 				full = 1;              /* must full-unrank on a new segment */
 			} else {
 				full = 0;
@@ -638,9 +635,15 @@ __kernel void md5_gen(__global uint *keys_unused,
 				}
 			}
 
-			/* Word-wise pack (key[] is padded so the last word carries the
-			 * 0x80); linear W[i] writes keep W register-resident. */
-			for (i = 0; i < ndw; i++)
+			/* Pack the message words with COMPILE-TIME indices so W[0..15] stay
+			 * in registers across md5_encrypt. (A dynamic W[] index, e.g. a
+			 * length-dependent loop bound, forces the whole array to local
+			 * memory and md5 then reloads each word from local every round.)
+			 * key[0..55] is fully defined - literals/Markov chars, the 0x80
+			 * terminator and zero padding - and W[14]/W[15] were set on the
+			 * segment change, so packing a fixed 14 words is always correct. */
+#pragma unroll
+			for (i = 0; i < 14; i++)
 				W[i] = (uint)key[4 * i] |
 				       ((uint)key[4 * i + 1] << 8) |
 				       ((uint)key[4 * i + 2] << 16) |
