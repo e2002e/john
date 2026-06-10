@@ -596,12 +596,11 @@ __kernel void md5_gen(__global uint *keys_unused,
 				 * the left.
 				 */
 				int pivot = -1;
-
-#pragma unroll
-				for (i = 0; i < GEN_REG_MAX; i++)
-					if ((int)i + 1 < (int)glimit &&
-					    iter[i] > 0 && iter[i + 1] < g_count[i + 1] - 1)
-						pivot = (int)i;
+				#pragma unroll
+				for (i = 0; i < GEN_REG_MAX; i++) {
+					int is_valid = ((int)i + 1 < (int)glimit) && (iter[i] > 0) && (iter[i + 1] < g_count[i + 1] - 1);
+					pivot = is_valid ? (int)i : pivot;
+				}
 
 				/* * --- START OF PURE BRANCHLESS SIMPLEX TRANSFORMATION ---
 				 * Instead of splitting the wavefront with if/else blocks, we use
