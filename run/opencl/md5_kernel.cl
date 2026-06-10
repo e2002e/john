@@ -608,40 +608,73 @@ __kernel void md5_gen(__global uint *keys_unused,
 				 * the left.
 				 */
 				int pivot = -1;
+				#pragma unroll
+				for (i = 0; i < GEN_REG_MAX; i++) {
+					int is_valid = ((int)i + 1 < (int)glimit) && (iter[i] > 0) && (iter[i + 1] < g_count[i + 1] - 1);
+					pivot = is_valid ? (int)i : pivot;
+				}
 
+				/* * --- START OF PURE BRANCHLESS SIMPLEX TRANSFORMATION ---
+				 * Instead of splitting the wavefront with if/else blocks, we use
+				 * state predicates (0 or 1) to execute both pathways arithmetically.
+				 */
+				int has_pivot    = (pivot >= 0);
+				int is_exhausted = !has_pivot;
+
+				// 1. Unconditional K-layer advance (bypasses the master branch)
+				cur_k += is_exhausted;
+
+				// 2. Branchless residual weight (w) collection for the shift phase
+				int w = 0;
 #pragma unroll
-				for (i = 0; i < GEN_REG_MAX; i++)
-					if ((int)i + 1 < (int)glimit &&
-					    iter[i] > 0 && iter[i + 1] < g_count[i + 1] - 1)
-						pivot = (int)i;
+				for (i = 0; i < GEN_REG_MAX; i++) {
+					int mask_w = (i < glimit) && ((int)i >= pivot + 2);
+					w += iter[i] * mask_w;
+				}
 
-				if (pivot >= 0) {
-					int w = 0;
+				// 3. Unified Weight Register: holds 'w' if shifting, or 'cur_k' if expanding a new K-layer
+				int r_weight = has_pivot ? w : (int)cur_k;
 
-					/* collect residual weight from wheels right of pivot+1 */
+				// 4. The Unified, Divergence-Free State Mutation Sweep
 #pragma unroll
-					for (i = 0; i < GEN_REG_MAX; i++)
-						if (i < glimit && (int)i >= pivot + 2)
-							w += iter[i];
+				for (i = 0; i < GEN_REG_MAX; i++) {
+					int cond_glimit = (i < glimit);
+					int lookup_idx  = cond_glimit ? i : 0; // Safeguard constant buffer reads
 
-					/* shift one unit pivot->pivot+1, then pour w back left-to-right
-					 * from pivot+1 up to each wheel's capacity */
-#pragma unroll
-					for (i = 0; i < GEN_REG_MAX; i++) {
-						if (i < glimit) {
-							if ((int)i == pivot) {
-								iter[i] = (uchar)(iter[i] - 1);
-							} else if ((int)i >= pivot + 1) {
-								int base = ((int)i == pivot + 1) ? (iter[i] + 1) : 0;
-								int cap = g_count[i] - 1 - base;
-								int add = (w > cap) ? cap : w;
+					// Compute positional relationships relative to the pivot matrix
+					int is_before_pivot = has_pivot && ((int)i < pivot);
+					int is_pivot        = has_pivot && ((int)i == pivot);
+					// If the layer is exhausted, every active wheel behaves as if it's "after the pivot"
+					int is_after_pivot  = is_exhausted || ((int)i > pivot);
 
-								iter[i] = (uchar)(base + add);
-								w -= add;
-							}
-						}
-					}
-					mfrom = (uint)pivot;
+					// Evaluate candidate modifications for all execution paths simultaneously
+					int val_before = iter[i];
+					int val_pivot  = iter[i] - 1;
+
+					// Path-A specific baseline character increment; evaluates to 0 during layer exhaustion
+					int base = (has_pivot && ((int)i == pivot + 1)) ? (iter[i] + 1) : 0;
+					int cap  = g_count[lookup_idx] - 1 - base;
+
+					// Pour weight evenly using OpenCL's native, hardware-level branchless min()
+					int add       = min(r_weight, cap);
+					int val_after = base + add;
+
+					// Apply loop-carried dependency to the weight pool using arithmetic subtraction
+					r_weight -= add * (cond_glimit && is_after_pivot);
+
+					// Combine distinct execution branches into a single arithmetic multiplexer
+					int next_val = (is_before_pivot * val_before) +
+					               (is_pivot        * val_pivot)  +
+					               (is_after_pivot  * val_after);
+
+					// Write back to private registers only if the loop index is valid for this segment
+					iter[i] = cond_glimit ? (uchar)next_val : iter[i];
+				}
+
+				// 5. Branchless tracking assignment for the leftmost altered wheel
+				mfrom = has_pivot ? (uint)pivot : 0;
+
+				/* --- END OF PURE BRANCHLESS SIMPLEX TRANSFORMATION --- */ {
 				} else {
 					int rem;
 
