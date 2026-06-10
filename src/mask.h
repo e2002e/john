@@ -201,19 +201,33 @@ extern void mask_gpu_unrank_key(int loop, uint64_t g, char *out, int *out_len);
  * per-segment element offset suf_off[]) and launches block-sized chunks of the
  * virtual space; each work-item locates its segment then unranks within it.
  */
+/*
+ * One virtual-space segment: a contiguous, K-ordered slice [lstart, lstart+vcnt)
+ * of length-loop loop's keyspace, placed at virtual [vbase, vbase+vcnt). To
+ * replicate the CPU's weighted round-robin over lengths, each length is sliced
+ * into many small segments (a chunk per round-robin visit, sized by the Markov
+ * length weight) and the segments are concatenated in round-robin order - so
+ * walking the virtual space interleaves lengths while each length still advances
+ * in increasing-K order. suf_off is this loop's element offset into the shared
+ * concatenated suf buffer (segments of the same loop share it).
+ */
+typedef struct {
+	uint64_t vbase;
+	uint64_t vcnt;
+	uint64_t lstart;
+	uint64_t suf_off;
+	int      loop;
+	int      limit;
+	int      len;
+	int      max_k;
+	int      ksize;
+} mask_gpu_seg;
+
 typedef struct {
 	int nseg;
-	uint64_t total;                          /* node-local candidates, all lengths */
-	uint64_t suf_total;                      /* elements in the concatenated suf   */
-	int      loop[MASK_MAX_INC_LEN + 1];
-	uint64_t vbase[MASK_MAX_INC_LEN + 1];
-	uint64_t vcnt[MASK_MAX_INC_LEN + 1];
-	uint64_t lstart[MASK_MAX_INC_LEN + 1];
-	uint64_t suf_off[MASK_MAX_INC_LEN + 1];  /* element offset into concat suf      */
-	int      limit[MASK_MAX_INC_LEN + 1];
-	int      len[MASK_MAX_INC_LEN + 1];
-	int      max_k[MASK_MAX_INC_LEN + 1];
-	int      ksize[MASK_MAX_INC_LEN + 1];
+	uint64_t total;            /* node-local candidates, all lengths */
+	uint64_t suf_total;        /* elements in the concatenated suf   */
+	const mask_gpu_seg *seg;   /* nseg segments in virtual order      */
 } mask_gpu_plan;
 
 extern const mask_gpu_plan *mask_gpu_get_plan(void);

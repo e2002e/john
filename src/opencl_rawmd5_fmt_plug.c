@@ -562,6 +562,7 @@ static void gen_upload_plan(void)
 	const mask_gpu_plan *plan = mask_gpu_get_plan();
 	gen_seg *segs;
 	cl_ulong *suf;
+	char seen[MASK_MAX_INC_LEN + 2];
 	int s;
 
 	if (g_buf_segs && g_uploaded_plan_serial == mask_gpu_serial)
@@ -570,22 +571,29 @@ static void gen_upload_plan(void)
 	gen_release_buf(&g_buf_segs);
 	gen_release_buf(&g_buf_suf);
 
-	/* Concatenated suf: each loop's (limit+1)*ksize ulongs at suf_off[s]. */
+	/* Concatenated suf holds one copy of each loop's (limit+1)*ksize ulongs at
+	 * its suf_off; the many round-robin segments of a loop share that copy. */
 	suf = mem_alloc((plan->suf_total ? plan->suf_total : 1) * sizeof(cl_ulong));
 	segs = mem_alloc((plan->nseg ? plan->nseg : 1) * sizeof(gen_seg));
+	memset(seen, 0, sizeof(seen));
 	for (s = 0; s < plan->nseg; s++) {
-		const mask_gpu_loop *gl = mask_gpu_get_loop(plan->loop[s]);
+		const mask_gpu_seg *sg = &plan->seg[s];
 
-		memcpy(suf + plan->suf_off[s], gl->suf,
-		       (size_t)(gl->limit + 1) * gl->ksize * sizeof(cl_ulong));
-		segs[s].vbase   = plan->vbase[s];
-		segs[s].vcnt    = plan->vcnt[s];
-		segs[s].lstart  = plan->lstart[s];
-		segs[s].suf_off = plan->suf_off[s];
-		segs[s].limit   = plan->limit[s];
-		segs[s].len     = plan->len[s];
-		segs[s].max_k   = plan->max_k[s];
-		segs[s].ksize   = plan->ksize[s];
+		if (!seen[sg->loop]) {
+			const mask_gpu_loop *gl = mask_gpu_get_loop(sg->loop);
+
+			memcpy(suf + sg->suf_off, gl->suf,
+			       (size_t)(gl->limit + 1) * gl->ksize * sizeof(cl_ulong));
+			seen[sg->loop] = 1;
+		}
+		segs[s].vbase   = sg->vbase;
+		segs[s].vcnt    = sg->vcnt;
+		segs[s].lstart  = sg->lstart;
+		segs[s].suf_off = sg->suf_off;
+		segs[s].limit   = sg->limit;
+		segs[s].len     = sg->len;
+		segs[s].max_k   = sg->max_k;
+		segs[s].ksize   = sg->ksize;
 	}
 
 	g_buf_suf  = gen_copy_buf((plan->suf_total ? plan->suf_total : 1) *

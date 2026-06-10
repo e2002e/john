@@ -474,16 +474,26 @@ __kernel void md5_gen(__global uint *keys_unused,
 				break;
 			V = gbase + gl;
 
-			/* (Re)locate the segment when V leaves the cached one. */
+			/* (Re)locate the segment when V leaves the cached one. Segments are
+			 * in ascending vbase order, so binary-search the largest vbase <= V
+			 * (the list is long under the round-robin interleave). The gR run is
+			 * contiguous and usually stays in one segment, so this is paid about
+			 * once per work-item. */
 			if (cur_seg == 0xffffffff || V < seg_vbase || V >= seg_vend) {
-				uint s;
+				uint lo = 0, hi = nseg - 1, s = 0;
 
-				for (s = 0; s < nseg; s++)
-					if (V >= segs[s].vbase &&
-					    V < segs[s].vbase + segs[s].vcnt)
-						break;
-				if (s >= nseg)
-					break;          /* out of range (shouldn't happen) */
+				while (lo <= hi) {
+					uint mid = (lo + hi) >> 1;
+
+					if (segs[mid].vbase <= V) {
+						s = mid;
+						lo = mid + 1;
+					} else {
+						if (mid == 0)
+							break;
+						hi = mid - 1;
+					}
+				}
 
 				cur_seg     = s;
 				seg_vbase   = segs[s].vbase;
@@ -507,8 +517,13 @@ __kernel void md5_gen(__global uint *keys_unused,
 				key[len + 1] = 0;
 				key[len + 2] = 0;
 				key[len + 3] = 0;
-				W[14] = len << 3;
 				ndw = (len + 4) / 4;   /* data words incl. the 0x80 pad byte */
+				/* Round-robin segments alternate lengths, so len can shrink
+				 * across a boundary; clear any stale high words a previous
+				 * longer length left in W before setting the bit-length word. */
+				for (i = ndw; i < 16; i++)
+					W[i] = 0;
+				W[14] = len << 3;
 				full = 1;              /* must full-unrank on a new segment */
 			} else {
 				full = 0;

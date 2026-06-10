@@ -2289,68 +2289,166 @@ const mask_gpu_loop *mask_gpu_get_loop(int loop)
 }
 
 static mask_gpu_plan gpu_plan;
+static mask_gpu_seg *gpu_segs;
+static int gpu_segs_cap;
+
+/* Cap on the number of round-robin segments, to bound the device segment buffer
+ * and the per-candidate binary search. When the natural segment count (keyspace
+ * / Markov stride) would exceed this, strides are scaled up so the interleave
+ * just gets coarser - it never stops interleaving. */
+#define MASK_GPU_NSEG_MAX (1 << 18)
 
 const mask_gpu_plan *mask_gpu_get_plan(void) { return &gpu_plan; }
 
-/* Concatenate the active length-loops (with this node's share of each) into one
- * virtual index space, recording per-segment loop params and the element offset
- * of each loop's suf in the to-be-concatenated suf buffer. */
+static mask_gpu_seg *plan_push(int *nseg)
+{
+	if (*nseg >= gpu_segs_cap) {
+		gpu_segs_cap = gpu_segs_cap ? gpu_segs_cap * 2 : 4096;
+		gpu_segs = mem_realloc(gpu_segs,
+		                       (size_t)gpu_segs_cap * sizeof(*gpu_segs));
+	}
+	return &gpu_segs[(*nseg)++];
+}
+
+/* Lay the active length-loops out in the CPU's weighted round-robin order: each
+ * length is sliced into Markov-weighted chunks (compute_loop_strides) and the
+ * chunks are concatenated round-robin, so the virtual space interleaves lengths
+ * while each length advances in K order. The last surviving length is emitted as
+ * one big segment (no point slicing it once nothing else competes). */
 static void mask_gpu_build_plan(void)
 {
-	int loop, nseg = 0;
-	uint64_t vbase = 0, soff = 0;
+	int max_loop = mask_gpu_max_loop, loop, nseg = 0, n_active = 0;
+	uint64_t cur[MASK_MAX_INC_LEN + 1], end[MASK_MAX_INC_LEN + 1];
+	uint64_t suf_off[MASK_MAX_INC_LEN + 1], stride[MASK_MAX_INC_LEN + 1];
+	int active[MASK_MAX_INC_LEN + 1], loop_stride[MASK_MAX_INC_LEN];
+	uint64_t vbase = 0, soff = 0, est = 0;
 
-	for (loop = 0; loop <= mask_gpu_max_loop; loop++) {
+	compute_loop_strides(max_loop, loop_stride);
+
+	for (loop = 0; loop <= max_loop; loop++) {
 		const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
-		uint64_t start = 0, end;
+		uint64_t start = 0, e = 0;
+
+		active[loop] = 0;
+		cur[loop] = end[loop] = 0;
+		suf_off[loop] = soff;
+		stride[loop] = 1;
 
 		if (!gl || gl->total == 0)
 			continue;
-		end = gl->total;
+		e = gl->total;
 		if (options.node_count && !(options.flags & FLG_MASK_STACKED)) {
 			uint64_t share = gl->total / options.node_count;
 			uint64_t rem   = gl->total % options.node_count;
 			uint64_t nmin1 = options.node_min - 1;
 			start = share * nmin1 + (nmin1 < rem ? nmin1 : rem);
-			end   = share * options.node_max +
+			e     = share * options.node_max +
 			        ((uint64_t)options.node_max < rem ? options.node_max : rem);
 		}
-		if (end <= start)
+		if (e <= start)
 			continue;
 
-		gpu_plan.loop[nseg]    = loop;
-		gpu_plan.vbase[nseg]   = vbase;
-		gpu_plan.vcnt[nseg]    = end - start;
-		gpu_plan.lstart[nseg]  = start;
-		gpu_plan.suf_off[nseg] = soff;
-		gpu_plan.limit[nseg]   = gl->limit;
-		gpu_plan.len[nseg]     = gl->len;
-		gpu_plan.max_k[nseg]   = gl->max_k;
-		gpu_plan.ksize[nseg]   = gl->ksize;
-
-		vbase += end - start;
-		soff  += (uint64_t)(gl->limit + 1) * gl->ksize;
-		nseg++;
+		cur[loop] = start;
+		end[loop] = e;
+		active[loop] = 1;
+		n_active++;
+		soff += (uint64_t)(gl->limit + 1) * gl->ksize;
+		stride[loop] = loop_stride[loop] < 1 ? 1 : (uint64_t)loop_stride[loop];
+		est += (e - start + stride[loop] - 1) / stride[loop];
 	}
+	gpu_plan.suf_total = soff;
+
+	/* Keep the segment count bounded by coarsening the interleave if needed. */
+	if (est > MASK_GPU_NSEG_MAX) {
+		uint64_t f = (est + MASK_GPU_NSEG_MAX - 1) / MASK_GPU_NSEG_MAX;
+
+		for (loop = 0; loop <= max_loop; loop++)
+			if (active[loop])
+				stride[loop] *= f;
+	}
+
+	while (n_active > 0) {
+		/* Once a single length remains, emit its whole tail as one segment. */
+		if (n_active == 1) {
+			const mask_gpu_loop *gl;
+			mask_gpu_seg *sg;
+
+			for (loop = 0; loop <= max_loop; loop++)
+				if (active[loop])
+					break;
+			gl = mask_gpu_get_loop(loop);
+			sg = plan_push(&nseg);
+			sg->vbase   = vbase;
+			sg->vcnt    = end[loop] - cur[loop];
+			sg->lstart  = cur[loop];
+			sg->suf_off = suf_off[loop];
+			sg->loop    = loop;
+			sg->limit   = gl->limit;
+			sg->len     = gl->len;
+			sg->max_k   = gl->max_k;
+			sg->ksize   = gl->ksize;
+			vbase += end[loop] - cur[loop];
+			break;
+		}
+
+		for (loop = 0; loop <= max_loop; loop++) {
+			const mask_gpu_loop *gl;
+			mask_gpu_seg *sg;
+			uint64_t chunk;
+
+			if (!active[loop])
+				continue;
+			chunk = end[loop] - cur[loop];
+			if (chunk > stride[loop])
+				chunk = stride[loop];
+
+			gl = mask_gpu_get_loop(loop);
+			sg = plan_push(&nseg);
+			sg->vbase   = vbase;
+			sg->vcnt    = chunk;
+			sg->lstart  = cur[loop];
+			sg->suf_off = suf_off[loop];
+			sg->loop    = loop;
+			sg->limit   = gl->limit;
+			sg->len     = gl->len;
+			sg->max_k   = gl->max_k;
+			sg->ksize   = gl->ksize;
+
+			vbase += chunk;
+			cur[loop] += chunk;
+			if (cur[loop] >= end[loop]) {
+				active[loop] = 0;
+				n_active--;
+			}
+		}
+	}
+
+	gpu_plan.seg = gpu_segs;
 	gpu_plan.nseg = nseg;
 	gpu_plan.total = vbase;
-	gpu_plan.suf_total = soff;
 }
 
 void mask_gpu_virt_to_loop(uint64_t v, int *loop, uint64_t *g)
 {
-	int s;
+	int lo = 0, hi = gpu_plan.nseg - 1, s = 0;
 
-	for (s = 0; s < gpu_plan.nseg; s++)
-		if (v >= gpu_plan.vbase[s] &&
-		    v <  gpu_plan.vbase[s] + gpu_plan.vcnt[s]) {
-			*loop = gpu_plan.loop[s];
-			*g = gpu_plan.lstart[s] + (v - gpu_plan.vbase[s]);
-			return;
-		}
-	/* Out of range (shouldn't happen): fall back to first loop. */
-	*loop = gpu_plan.nseg ? gpu_plan.loop[0] : 0;
-	*g = 0;
+	/* Largest segment with vbase <= v (segments are in ascending vbase order). */
+	while (lo <= hi) {
+		int mid = (lo + hi) >> 1;
+
+		if (gpu_plan.seg[mid].vbase <= v) {
+			s = mid;
+			lo = mid + 1;
+		} else
+			hi = mid - 1;
+	}
+	if (gpu_plan.nseg) {
+		*loop = gpu_plan.seg[s].loop;
+		*g = gpu_plan.seg[s].lstart + (v - gpu_plan.seg[s].vbase);
+	} else {
+		*loop = 0;
+		*g = 0;
+	}
 }
 
 /* Compact the per-position Markov tables of the current mask into flat,
