@@ -302,8 +302,28 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 #endif
 	);
 
-	if (gen_active)
-		strcat(build_opts, " -D GPU_GEN");
+	if (gen_active) {
+		/*
+		 * Size the gen kernel's per-work-item arrays and message-word pack to
+		 * this run's max candidate length instead of the full 55-byte plaintext.
+		 * GEN_NDW = words spanning [0, maxlen] (incl. the 0x80); GEN_MAX_POS =
+		 * GEN_NDW*4 >= maxlen+1 covers key[len] and the iter[] index range. A
+		 * ?d^7 run then packs 2 words (not 14) and spills ~16 B (not 128).
+		 */
+		int maxlen = options.eff_maxlength;
+		int gen_ndw, gen_max_pos;
+		char go[64];
+
+		if (maxlen < 1 || maxlen > PLAINTEXT_LENGTH)
+			maxlen = PLAINTEXT_LENGTH;
+		gen_ndw = (maxlen + 4) / 4;
+		if (gen_ndw > 14)
+			gen_ndw = 14;
+		gen_max_pos = gen_ndw * 4;
+		snprintf(go, sizeof(go), " -D GPU_GEN -D GEN_NDW=%d -D GEN_MAX_POS=%d",
+		         gen_ndw, gen_max_pos);
+		strcat(build_opts, go);
+	}
 
 	if (gen_active && gen_reg_max) {
 		char ro[64];

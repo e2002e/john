@@ -373,7 +373,19 @@ __kernel void md5(__global uint *keys,
  * Args 0..9 match the layout opencl_hash_check_128 hardcodes (0..3 set by the
  * format, 4..9 the hash-check buffers); the generator inputs start at arg 10.
  */
+/*
+ * GEN_MAX_POS sizes the per-work-item key[]/iter[] arrays and GEN_NDW is the
+ * number of 32-bit message words actually packed/hashed. The host overrides both
+ * from the run's max length (-D GEN_MAX_POS=, -D GEN_NDW=) so a short mask (e.g.
+ * ?d^7) packs 2 words instead of 14 and spills a handful of bytes instead of 128;
+ * the defaults below cover the full 55-byte plaintext when unset.
+ */
+#ifndef GEN_MAX_POS
 #define GEN_MAX_POS 64
+#endif
+#ifndef GEN_NDW
+#define GEN_NDW 14
+#endif
 
 /*
  * Register-resident generator variant (build with -D GEN_REGS). The per-candidate
@@ -534,7 +546,7 @@ __kernel void md5_gen(__global uint *keys_unused,
 				 * segment and never touched by the pack. */
 				len = glen;
 #pragma unroll
-				for (i = 0; i < 56; i++)
+				for (i = 0; i < GEN_MAX_POS; i++)
 					key[i] = (i < len) ? g_littmpl[i] : 0;
 				key[len] = 0x80;
 				W[14] = len << 3;
@@ -793,11 +805,12 @@ __kernel void md5_gen(__global uint *keys_unused,
 			 * in registers across md5_encrypt. (A dynamic W[] index, e.g. a
 			 * length-dependent loop bound, forces the whole array to local
 			 * memory and md5 then reloads each word from local every round.)
-			 * key[0..55] is fully defined - literals/Markov chars, the 0x80
-			 * terminator and zero padding - and W[14]/W[15] were set on the
-			 * segment change, so packing a fixed 14 words is always correct. */
+			 * key[0..GEN_NDW*4) is fully defined - literals/Markov chars, the
+			 * 0x80 terminator and zero padding; W[GEN_NDW..13] stay 0 from the
+			 * W initializer and W[14]/W[15] were set on the segment change, so
+			 * packing exactly GEN_NDW words covers every message of this run. */
 #pragma unroll
-			for (i = 0; i < 14; i++)
+			for (i = 0; i < GEN_NDW; i++)
 				W[i] = (uint)key[4 * i] |
 				       ((uint)key[4 * i + 1] << 8) |
 				       ((uint)key[4 * i + 2] << 16) |
