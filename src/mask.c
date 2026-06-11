@@ -2293,9 +2293,11 @@ static mask_gpu_seg *gpu_segs;
 static int gpu_segs_cap;
 
 /* Cap on the number of round-robin segments, to bound the device segment buffer
- * and the per-candidate binary search. When the natural segment count (keyspace
- * / Markov stride) would exceed this, strides are scaled up so the interleave
- * just gets coarser - it never stops interleaving. */
+ * and the per-candidate binary search. Once this many segments have been laid
+ * down, each remaining length's tail is emitted as one big segment instead of
+ * being sliced further: the finely interleaved front (tens of thousands of
+ * rounds = billions of candidates, far past any session) is what matters; the
+ * unreachable deep tail of the long lengths need not be interleaved. */
 #define MASK_GPU_NSEG_MAX (1 << 18)
 
 const mask_gpu_plan *mask_gpu_get_plan(void) { return &gpu_plan; }
@@ -2313,15 +2315,17 @@ static mask_gpu_seg *plan_push(int *nseg)
 /* Lay the active length-loops out in the CPU's weighted round-robin order: each
  * length is sliced into Markov-weighted chunks (compute_loop_strides) and the
  * chunks are concatenated round-robin, so the virtual space interleaves lengths
- * while each length advances in K order. The last surviving length is emitted as
- * one big segment (no point slicing it once nothing else competes). */
+ * while each length advances in K order. Remaining length tails are emitted as
+ * one big segment each once only a single length is left (nothing to interleave
+ * with) or the segment budget MASK_GPU_NSEG_MAX is reached (the deep tail beyond
+ * that point is unreachable in practice, so it need not be finely sliced). */
 static void mask_gpu_build_plan(void)
 {
 	int max_loop = mask_gpu_max_loop, loop, nseg = 0, n_active = 0;
 	uint64_t cur[MASK_MAX_INC_LEN + 1], end[MASK_MAX_INC_LEN + 1];
 	uint64_t suf_off[MASK_MAX_INC_LEN + 1], stride[MASK_MAX_INC_LEN + 1];
 	int active[MASK_MAX_INC_LEN + 1], loop_stride[MASK_MAX_INC_LEN];
-	uint64_t vbase = 0, soff = 0, est = 0;
+	uint64_t vbase = 0, soff = 0;
 
 	compute_loop_strides(max_loop, loop_stride);
 
@@ -2354,40 +2358,36 @@ static void mask_gpu_build_plan(void)
 		n_active++;
 		soff += (uint64_t)(gl->limit + 1) * gl->ksize;
 		stride[loop] = loop_stride[loop] < 1 ? 1 : (uint64_t)loop_stride[loop];
-		est += (e - start + stride[loop] - 1) / stride[loop];
 	}
 	gpu_plan.suf_total = soff;
 
-	/* Keep the segment count bounded by coarsening the interleave if needed. */
-	if (est > MASK_GPU_NSEG_MAX) {
-		uint64_t f = (est + MASK_GPU_NSEG_MAX - 1) / MASK_GPU_NSEG_MAX;
-
-		for (loop = 0; loop <= max_loop; loop++)
-			if (active[loop])
-				stride[loop] *= f;
-	}
-
 	while (n_active > 0) {
-		/* Once a single length remains, emit its whole tail as one segment. */
-		if (n_active == 1) {
-			const mask_gpu_loop *gl;
-			mask_gpu_seg *sg;
+		/* Flush each remaining length's whole tail as a single segment when
+		 * either only one length is left (nothing to interleave with) or the
+		 * next full round would exceed the segment budget. This bounds nseg at
+		 * MASK_GPU_NSEG_MAX without coarsening the reachable front: a giant tail
+		 * length is never sliced past the point we could plausibly reach. */
+		if (n_active == 1 || nseg + n_active > MASK_GPU_NSEG_MAX) {
+			for (loop = 0; loop <= max_loop; loop++) {
+				const mask_gpu_loop *gl;
+				mask_gpu_seg *sg;
 
-			for (loop = 0; loop <= max_loop; loop++)
-				if (active[loop])
-					break;
-			gl = mask_gpu_get_loop(loop);
-			sg = plan_push(&nseg);
-			sg->vbase   = vbase;
-			sg->vcnt    = end[loop] - cur[loop];
-			sg->lstart  = cur[loop];
-			sg->suf_off = suf_off[loop];
-			sg->loop    = loop;
-			sg->limit   = gl->limit;
-			sg->len     = gl->len;
-			sg->max_k   = gl->max_k;
-			sg->ksize   = gl->ksize;
-			vbase += end[loop] - cur[loop];
+				if (!active[loop])
+					continue;
+				gl = mask_gpu_get_loop(loop);
+				sg = plan_push(&nseg);
+				sg->vbase   = vbase;
+				sg->vcnt    = end[loop] - cur[loop];
+				sg->lstart  = cur[loop];
+				sg->suf_off = suf_off[loop];
+				sg->loop    = loop;
+				sg->limit   = gl->limit;
+				sg->len     = gl->len;
+				sg->max_k   = gl->max_k;
+				sg->ksize   = gl->ksize;
+				vbase += end[loop] - cur[loop];
+				cur[loop] = end[loop];
+			}
 			break;
 		}
 
