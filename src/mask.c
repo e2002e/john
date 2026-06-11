@@ -2461,6 +2461,7 @@ static void mask_gpu_build_tables(mask_cpu_context *ctx)
 	int i, p, maxL = options.eff_maxlength;
 
 	MEM_FREE(gpu_tabs.table);
+	MEM_FREE(gpu_tabs.uint_table);
 	MEM_FREE(gpu_tabs.startv);
 	MEM_FREE(gpu_tabs.rowcnt);
 	MEM_FREE(gpu_tabs.littmpl);
@@ -2468,6 +2469,7 @@ static void mask_gpu_build_tables(mask_cpu_context *ctx)
 
 	gpu_tabs.npos = npos;
 	gpu_tabs.table  = mem_alloc((size_t)npos * 256 * 256);
+	gpu_tabs.uint_table = mem_alloc((size_t)npos * 256 * 64 * sizeof(uint32_t));
 	gpu_tabs.startv = mem_alloc((size_t)npos * 256);
 	gpu_tabs.rowcnt = mem_alloc((size_t)npos * 256);
 
@@ -2485,6 +2487,24 @@ static void mask_gpu_build_tables(mask_cpu_context *ctx)
 		       pos_markov_start[ri], 256);
 		memcpy(gpu_tabs.rowcnt + (size_t)i * 256,
 		       pos_markov_row_counts[ri], 256);
+
+		/* Pack this position's [256][256] prev,rank->char table into
+		 * [256][64] uint32s (4 chars/word) for coalesced GPU reads. */
+		for (int prev = 0; prev < 256; prev++) {
+			for (int ti = 0; ti < 256; ti += 4) {
+				size_t src = ((size_t)i * 256 * 256) +
+				             ((size_t)prev * 256) + ti;
+				uint32_t packed =
+				    ((uint32_t)gpu_tabs.table[src + 0] <<  0) |
+				    ((uint32_t)gpu_tabs.table[src + 1] <<  8) |
+				    ((uint32_t)gpu_tabs.table[src + 2] << 16) |
+				    ((uint32_t)gpu_tabs.table[src + 3] << 24);
+
+				size_t dst = ((size_t)i * 256 * 64) +
+				             ((size_t)prev * 64) + (ti / 4);
+				gpu_tabs.uint_table[dst] = packed;
+			}
+		}
 	}
 
 	gpu_tabs.littmpl_len = maxL;

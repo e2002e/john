@@ -595,7 +595,8 @@ static void gen_upload_tables(void)
 	gen_release_buf(&g_buf_cstart);
 	gen_release_buf(&g_buf_chars0);
 
-	g_buf_table   = gen_copy_buf(npos * 256 * 256, t->table);
+	size_t table_bytes = npos * 256 * 64 * sizeof(cl_uint);
+	g_buf_table   = gen_copy_buf(table_bytes, t->uint_table);
 	g_buf_startv  = gen_copy_buf(npos * 256, t->startv);
 	g_buf_rowcnt  = gen_copy_buf(npos * 256, t->rowcnt);
 	g_buf_littmpl = gen_copy_buf(t->littmpl_len, t->littmpl);

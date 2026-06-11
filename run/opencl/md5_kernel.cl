@@ -425,7 +425,7 @@ __kernel void md5_gen(__global uint *keys_unused,
 		  volatile __global uint *out_hash_ids,
 		  volatile __global uint *bitmap_dupe,
 		  __global ulong *suf,
-		  __global uchar *g_table,
+		  __global uint *g_table_packed,
 		  /*
 		   * The small per-position tables are uniform across all work-items and
 		   * read every candidate (g_count in the odometer; keypos/cstart/chars0
@@ -826,7 +826,17 @@ __kernel void md5_gen(__global uint *keys_unused,
 					if (avail > 0) {
 						if (ti >= avail)
 							ti = avail - 1;
-						key[kp] = g_table[(i * 256 + prev) * 256 + ti];
+
+						// 1. Calculate the 32-bit block index (ti / 4)
+						int block_idx = (i * 256 + prev) * 64 + (ti >> 2);
+
+						// 2. Fetch the 32-bit block (hardware aligned, highly coalesced)
+						uint packed_chars = g_table_packed[block_idx];
+
+						// 3. Extract the specific 8-bit character (ti % 4 * 8)
+						uint shift_amount = (ti & 3) << 3;
+						key[kp] = (uchar)(packed_chars >> shift_amount);
+
 					} else {
 						key[kp] = g_chars0[i];
 					}

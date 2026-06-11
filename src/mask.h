@@ -165,6 +165,7 @@ typedef struct {
 	unsigned char cstart[MAX_NUM_MASK_PLHDR]; /* contiguous start char, 0=Markov */
 	unsigned char chars0[MAX_NUM_MASK_PLHDR]; /* fallback char (range's chars[0]) */
 	unsigned char *table;                  /* [npos][256][256] prev,rank->char */
+	uint32_t *uint_table;
 	unsigned char *startv;                 /* [npos][256] rank->char (pos 0)   */
 	unsigned char *rowcnt;                 /* [npos][256] prev->#valid          */
 	unsigned char *littmpl;                /* literal template (max length)     */
