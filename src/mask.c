@@ -2906,13 +2906,13 @@ static void brute_gpu_select_len(int flen, unsigned int *last_sum, int do_finali
  * lengths; the only per-length state is host-side (set_key derives the internal
  * position from the current finalized mask).
  *
- * We therefore round-robin lengths in batch-sized bursts: re-point the internal
- * config to a length, emit a burst from that length's generator (the user's
- * scattering loop over the outer placeholders; the GPU fills+multiplies the
- * internal ones), flush, move on. All lengths thus make progress together
- * instead of one length being fully exhausted before the next, while each burst
- * is a full-throughput launch (no perf impact vs the sequential path). For a
- * uniform mask the per-burst reset() is skipped, so switching is cheap.
+ * For a uniform mask the internal placeholder is the lowest position (present
+ * in every length) and a non-stacked GPU mask is static, so ONE config serves
+ * all lengths: we fine round-robin (one candidate per length per round) and let
+ * keys of different lengths land in the SAME launch - truly parallel lengths at
+ * full throughput. If some length needs a different internal config (e.g. a
+ * length too short to hold the internal placeholders), we fall back to
+ * per-length bursts (re-point config, emit a batch, flush, next length).
  */
 static int do_mask_brute_gpu(void)
 {
@@ -2920,6 +2920,8 @@ static int do_mask_brute_gpu(void)
 	const uint64_t burst = (uint64_t)1 << 22;	/* ~4M keys per length/round */
 	int set_size = -1;
 	int lo, hi, L, idx, nlen = 0, active, multi;
+	int int_consistent = 1, ref_num_int = 0;
+	int ref_loc[MASK_FMT_INT_PLHDR];
 	int lengths[MAX_NUM_MASK_PLHDR + 1];
 	struct brute_gen *plan;
 
@@ -2954,14 +2956,32 @@ static int do_mask_brute_gpu(void)
 	multi = (nlen > 1);
 	plan = mem_calloc(nlen, sizeof(struct brute_gen));
 
-	/* Build a generator per length (finalizing each to capture its config). */
+	/*
+	 * Build a generator per length (finalizing each to capture its config),
+	 * and check whether every length shares the SAME internal-mask config
+	 * (same NUM_INT_KEYS and same internal positions). For a uniform mask the
+	 * internal placeholder is the lowest position, which exists in every
+	 * length, so this normally holds.
+	 */
 	mask_tot_cand = 0;
 	for (idx = 0; idx < nlen; idx++) {
 		uint64_t c;
-		int flen = multi ? lengths[idx] : max_keylen;
+		int j, flen = multi ? lengths[idx] : max_keylen;
+		int loc[MASK_FMT_INT_PLHDR];
 
 		brute_gpu_select_len(flen, &last_mask_sum, multi);
 		brute_gen_init(&plan[idx], flen, &set_size);
+
+		for (j = 0; j < MASK_FMT_INT_PLHDR; j++)
+			loc[j] = (mask_skip_ranges && mask_skip_ranges[j] >= 0) ?
+				cpu_mask_ctx.ranges[mask_skip_ranges[j]].pos : -1;
+		if (idx == 0) {
+			ref_num_int = mask_int_cand.num_int_cand;
+			memcpy(ref_loc, loc, sizeof(loc));
+		} else if (mask_int_cand.num_int_cand != ref_num_int ||
+		           memcmp(loc, ref_loc, sizeof(loc)))
+			int_consistent = 0;
+
 		c = brute_gen_count(&plan[idx]) * mask_int_cand.num_int_cand;
 		mask_tot_cand = (mask_tot_cand > UINT64_MAX - c) ? UINT64_MAX :
 			mask_tot_cand + c;
@@ -2972,43 +2992,72 @@ static int do_mask_brute_gpu(void)
 		if (!plan[idx].done)
 			active++;
 
-	/* Round-robin lengths in bursts so all lengths advance together. */
-	while (active) {
-		for (idx = 0; idx < nlen; idx++) {
-			struct brute_gen *g = &plan[idx];
-			uint64_t n = 0;
+	if (int_consistent) {
+		/*
+		 * One config serves all lengths: the (static) kernel writes the
+		 * internal char(s) at a fixed position and hashes each key at its own
+		 * length, so keys of different lengths share each GPU launch - truly
+		 * parallel lengths. Fine round-robin, one candidate per length/round.
+		 */
+		while (active) {
+			for (idx = 0; idx < nlen; idx++) {
+				struct brute_gen *g = &plan[idx];
 
-			if (g->done)
-				continue;
-
-			/* Point set_key at this length's internal-mask config. */
-			if (multi)
-				brute_gpu_select_len(lengths[idx], &last_mask_sum, 1);
-
-			while (!g->done && n < burst) {
+				if (g->done)
+					continue;
 				if (brute_gen_emit(g)) {
 					MEM_FREE(plan);
 					return 1;
 				}
 				brute_gen_advance(g);
-				n++;
+				if (g->done)
+					active--;
 				if (event_abort) {
 					crk_process_buffer();
 					MEM_FREE(plan);
 					return 0;
 				}
 			}
+		}
+	} else {
+		/*
+		 * Lengths need different internal configs (e.g. a very short length
+		 * can't hold the same internal placeholders). Fall back to per-length
+		 * bursts: re-point the config, emit a batch, flush, next length.
+		 */
+		while (active) {
+			for (idx = 0; idx < nlen; idx++) {
+				struct brute_gen *g = &plan[idx];
+				uint64_t n = 0;
 
-			/* Flush before switching to another length's config. */
-			if (crk_process_buffer()) {
-				MEM_FREE(plan);
-				return 1;
+				if (g->done)
+					continue;
+				brute_gpu_select_len(lengths[idx], &last_mask_sum, multi);
+
+				while (!g->done && n < burst) {
+					if (brute_gen_emit(g)) {
+						MEM_FREE(plan);
+						return 1;
+					}
+					brute_gen_advance(g);
+					n++;
+					if (event_abort) {
+						crk_process_buffer();
+						MEM_FREE(plan);
+						return 0;
+					}
+				}
+				if (crk_process_buffer()) {
+					MEM_FREE(plan);
+					return 1;
+				}
+				if (g->done)
+					active--;
 			}
-			if (g->done)
-				active--;
 		}
 	}
 
+	crk_process_buffer();
 	MEM_FREE(plan);
 	return 0;
 }
