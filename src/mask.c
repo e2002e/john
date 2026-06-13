@@ -57,6 +57,13 @@ int mask_add_len, mask_num_qw, mask_cur_len, mask_iter_warn;
 int mask_increments_len;
 
 /*
+ * Brute-force mode (JOHN_MASK_BRUTE): enumerate all lengths "in parallel"
+ * (round-robin) using a complete single-cycle counter intended for random
+ * passwords. -1 = not yet probed, 0 = off, 1 = on.
+ */
+static int mask_brute = -1;
+
+/*
  * This keeps track of whether we have any 8-bit in our non-hybrid mask.
  * If we do not, we can skip expensive encoding conversions
  */
@@ -2573,10 +2580,457 @@ void mask_destroy()
 	mask_int_cand_target = 0;
 }
 
+/*
+ * Per-length generator for brute-force mode.
+ *
+ * We keep the user's scattering counter (increment a prefix, reset+stop at the
+ * first overflow) - a complete single cycle for a uniform set size - as the
+ * generator, because its spread-out visiting order is the whole point. The
+ * problem for multi-node work splitting is that this counter has no cheap
+ * unrank for set sizes > 2 (only S==2 is the clean countdown code(k) = -k), so
+ * a node cannot jump straight to its slice.
+ *
+ * Solution: split only the few most-significant placeholders ("split digits")
+ * among nodes - a node owns a contiguous block of those - and run the user's
+ * loop over all the remaining lower positions (a full cycle, ending when it
+ * returns to all-zeros). Each node thus does exactly its ~1/node_count share
+ * with no unrank, while the bulk of the positions keep the user's scatter. For
+ * a single node there are no split digits and the whole candidate follows the
+ * user's loop unchanged.
+ *
+ * We snapshot the template key (fixed chars in place) and, per active
+ * placeholder, its key position and own character set. All placeholders must
+ * share one set size.
+ */
+struct brute_gen {
+	int npos;				/* outer placeholders we drive    */
+	int set_size;
+	int low;				/* npos - d: positions on the loop */
+	int d;					/* # most-signif. digits split    */
+	int pos[MAX_NUM_MASK_PLHDR];		/* their key positions            */
+	unsigned char ch[MAX_NUM_MASK_PLHDR][0x100]; /* charset per placeholder  */
+	unsigned char dig[MAX_NUM_MASK_PLHDR];	/* current digits, dig[0] == LSB  */
+	uint64_t tval, thi;			/* this node's MS-block range     */
+	uint64_t cycle;				/* set_size^low, 0 == > 2^64      */
+	uint64_t emitted;			/* candidates done in this block  */
+	char key[PLAINTEXT_BUFFER_SIZE];	/* persistent working key         */
+	int done;
+};
+
+/* Write the d most-significant (split) digits from block value t, into key. */
+static MAYBE_INLINE void brute_set_top(struct brute_gen *g, uint64_t t)
+{
+	int j;
+
+	for (j = 0; j < g->d; j++) {
+		int p = g->low + j;
+
+		g->dig[p] = t % g->set_size;
+		g->key[g->pos[p]] = g->ch[p][g->dig[p]];
+		t /= g->set_size;
+	}
+}
+
+/*
+ * Prepare a generator for one length (the mask must already be finalized for
+ * it): collect the outer placeholders, validate one uniform set size (carried
+ * in *set_size across lengths), pick this node's contiguous block of the high
+ * digits, and lay down the initial key in place.
+ */
+static void brute_gen_init(struct brute_gen *g, int flen, int *set_size)
+{
+	unsigned int nc = options.node_count ? options.node_count : 1;
+	unsigned int nmin = options.node_count ? options.node_min : 1;
+	unsigned int nmax = options.node_count ? options.node_max : 1;
+	uint64_t Sd = 1, c;
+	int i, d = 0;
+
+	g->npos = 0;
+	for (i = 0; i < cpu_mask_ctx.count; i++) {
+		mask_range *r = &cpu_mask_ctx.ranges[i];
+
+		if (r->pos >= flen)
+			continue;
+		if (*set_size < 0)
+			*set_size = r->count;
+		else if (r->count != *set_size) {
+			if (john_main_process)
+				fprintf(stderr, "Error: JOHN_MASK_BRUTE requires every "
+				        "placeholder to have the same set size "
+				        "(found %d and %d).\n", *set_size, r->count);
+			error();
+		}
+		/* Internal (GPU) placeholders are enumerated by the device. */
+		if (!cpu_mask_ctx.active_positions[i])
+			continue;
+		g->pos[g->npos] = r->pos + r->offset;
+		memcpy(g->ch[g->npos], r->chars, r->count);
+		g->npos++;
+	}
+	g->set_size = (*set_size < 0) ? 1 : *set_size;
+
+	/*
+	 * Split enough high digits to give each node many small blocks
+	 * (S^d >= node_count * 64) so the per-node load is well balanced. The
+	 * remaining lower positions still follow the user's scattering loop, so
+	 * for any non-trivial length most positions keep the scatter.
+	 */
+	if (nc > 1) {
+		uint64_t target = (uint64_t)nc * 64;
+
+		while (d < g->npos && Sd < target) {
+			Sd *= (unsigned)g->set_size;
+			d++;
+		}
+	}
+	g->d = d;
+	g->low = g->npos - d;
+
+	g->tval = Sd * (nmin - 1) / nc;
+	g->thi  = Sd * nmax / nc;
+
+	/* cycle = set_size^low (0 means it exceeds 2^64 -> effectively endless) */
+	c = 1;
+	for (i = 0; i < g->low; i++) {
+		if (c > UINT64_MAX / (unsigned)g->set_size) {
+			c = 0;
+			break;
+		}
+		c *= (unsigned)g->set_size;
+	}
+	g->cycle = c;
+	g->emitted = 0;
+
+	/* Lay down the initial key once: template, then every placeholder at 0. */
+	strnzcpyn(g->key, template_key, sizeof(g->key));
+	memset(g->dig, 0, sizeof(g->dig));
+	for (i = 0; i < g->npos; i++)
+		g->key[g->pos[i]] = g->ch[i][0];
+	brute_set_top(g, g->tval);
+	g->done = (g->tval >= g->thi);
+}
+
+/* Emit the current candidate (key is maintained in place). Nonzero == abort. */
+static MAYBE_INLINE int brute_gen_emit(struct brute_gen *g)
+{
+	if (f_filter) {
+		char key_e[PLAINTEXT_BUFFER_SIZE];
+
+		if (!ext_filter_body(g->key, key_e))
+			return 0;
+		return crk_process_key(mask_cp_to_utf8(key_e));
+	}
+	return crk_process_key(mask_cp_to_utf8(g->key));
+}
+
+/*
+ * Advance, updating the key in place (only the digits that change). The lower
+ * (non-split) positions are driven by the user's scattering counter - increment
+ * a prefix, reset+stop at the first overflow - a complete single cycle for a
+ * uniform set size. Completion of the block is detected by a step counter (the
+ * cycle returns to all-zeros after set_size^low steps). Only the few high
+ * split-digits are sequential, and only when node_count > 1; for a single node
+ * d == 0 and the whole candidate follows the user's loop.
+ */
+static MAYBE_INLINE void brute_gen_advance(struct brute_gen *g)
+{
+	int i;
+
+	for (i = 0; i < g->low; i++) {
+		if (++g->dig[i] >= g->set_size) {
+			g->dig[i] = 0;
+			g->key[g->pos[i]] = g->ch[i][0];
+			break;
+		}
+		/* No break: the user's loop keeps incrementing the next position. */
+		g->key[g->pos[i]] = g->ch[i][g->dig[i]];
+	}
+
+	/* Endless block (low huge): never roll over to the next high block. */
+	if (!g->cycle)
+		return;
+
+	if (++g->emitted >= g->cycle) {
+		/* Block done: low digits are back at all-zero; pick next block. */
+		g->emitted = 0;
+		if (++g->tval >= g->thi) {
+			g->done = 1;
+			return;
+		}
+		brute_set_top(g, g->tval);
+	}
+}
+
+/* Per-node candidate count for one length (capped), for progress display. */
+static uint64_t brute_gen_count(struct brute_gen *g)
+{
+	uint64_t share = g->thi - g->tval;
+
+	if (!g->cycle)
+		return UINT64_MAX;
+	if (share && g->cycle > UINT64_MAX / share)
+		return UINT64_MAX;
+	return share * g->cycle;
+}
+
+/*
+ * Brute-force mode generator for plain CPU formats. Enumerates lengths
+ * round-robin (one candidate per length per round) so all lengths advance "in
+ * parallel"; each length is driven by its own base-S counter over this node's
+ * slice. Returns nonzero to abort the whole session.
+ */
+static int do_mask_brute(void)
+{
+	int set_size = -1;
+	int L, active, idx, nlen = 0;
+	int lengths[MAX_NUM_MASK_PLHDR + 1];
+	struct brute_gen *plan;
+
+	/*
+	 * Decide which lengths to enumerate. We only iterate lengths when the
+	 * mask asked for it (--mask alone, or a min/max range); otherwise the
+	 * mask has a single natural length.
+	 */
+	if (mask_increments_len) {
+		int lo = options.eff_minlength;
+		int hi = options.eff_maxlength;
+
+		/* Length 0 (empty candidate) handled once, by main node only. */
+		if (lo <= 0) {
+			if (john_main_process && crk_process_key(fmt_null_key))
+				return 1;
+			lo = 1;
+		}
+		if (hi < lo)
+			hi = lo;
+		if (hi > MAX_NUM_MASK_PLHDR) {
+			if (john_main_process)
+				fprintf(stderr, "Error: JOHN_MASK_BRUTE supports lengths "
+				        "up to %d\n", MAX_NUM_MASK_PLHDR);
+			error();
+		}
+		for (L = lo; L <= hi; L++)
+			lengths[nlen++] = L;
+	} else
+		lengths[nlen++] = max_keylen; /* single natural mask length */
+
+	plan = mem_calloc(nlen, sizeof(struct brute_gen));
+
+	/* Build the per-length generators, validating a single uniform set size. */
+	mask_tot_cand = 0;
+	for (idx = 0; idx < nlen; idx++) {
+		uint64_t c;
+
+		L = lengths[idx];
+		/*
+		 * When iterating lengths we (re)finalize per length, exactly like
+		 * the normal length loop. For a single fixed-length mask the context
+		 * is already set up by mask_init(), so we must not re-finalize (that
+		 * would stretch the mask).
+		 */
+		if (mask_increments_len) {
+			mask_cur_len = L;
+			finalize_mask(L);
+		}
+		generate_template_key(mask, NULL, 0, &parsed_mask, &cpu_mask_ctx, L);
+
+		if (mask_int_cand.num_int_cand > 1) {
+			if (john_main_process)
+				fprintf(stderr, "Error: JOHN_MASK_BRUTE does not support this "
+				        "format's internal (GPU) mask. Use a CPU format.\n");
+			error();
+		}
+
+		brute_gen_init(&plan[idx], (L < 0) ? max_keylen : L, &set_size);
+		c = brute_gen_count(&plan[idx]);
+		mask_tot_cand = (mask_tot_cand > UINT64_MAX - c) ?
+			UINT64_MAX : mask_tot_cand + c;
+	}
+
+	active = 0;
+	for (idx = 0; idx < nlen; idx++)
+		if (!plan[idx].done)
+			active++;
+
+	/* Round-robin over lengths until every length's slice is exhausted. */
+	while (active) {
+		for (idx = 0; idx < nlen; idx++) {
+			struct brute_gen *g = &plan[idx];
+
+			if (g->done)
+				continue;
+
+			if (brute_gen_emit(g)) {
+				MEM_FREE(plan);
+				return 1;
+			}
+			brute_gen_advance(g);
+			if (g->done)
+				active--;
+
+			if (event_abort) {
+				MEM_FREE(plan);
+				return 0;
+			}
+		}
+	}
+
+	MEM_FREE(plan);
+	return 0;
+}
+
+/*
+ * Re-establish the on-device internal-mask config for length flen, so that the
+ * format's set_key() records each key's internal-placeholder position(s) for
+ * THIS length. Cheap for a uniform mask: int_mask_sum is the same across
+ * lengths, so reset() (and its autotune) is skipped - only the placeholder
+ * positions are re-pointed. *last_sum carries int_mask_sum across calls.
+ */
+static void brute_gpu_select_len(int flen, unsigned int *last_sum, int do_finalize)
+{
+	if (do_finalize) {
+		mask_cur_len = flen;
+		finalize_mask(flen);
+	}
+	generate_template_key(mask, NULL, 0, &parsed_mask, &cpu_mask_ctx, flen);
+	if ((mask_fmt->params.flags & FMT_MASK) && *last_sum != int_mask_sum) {
+		mask_fmt->methods.reset(mask_db);
+		*last_sum = int_mask_sum;
+	}
+}
+
+/*
+ * Brute-force generator for GPU-style formats (FMT_MASK), which multiply each
+ * host key by an on-device internal mask. The kernel reads each key's own
+ * length (base & 63) and internal-placeholder position(s), so a launch may mix
+ * lengths; the only per-length state is host-side (set_key derives the internal
+ * position from the current finalized mask).
+ *
+ * We therefore round-robin lengths in batch-sized bursts: re-point the internal
+ * config to a length, emit a burst from that length's generator (the user's
+ * scattering loop over the outer placeholders; the GPU fills+multiplies the
+ * internal ones), flush, move on. All lengths thus make progress together
+ * instead of one length being fully exhausted before the next, while each burst
+ * is a full-throughput launch (no perf impact vs the sequential path). For a
+ * uniform mask the per-burst reset() is skipped, so switching is cheap.
+ */
+static int do_mask_brute_gpu(void)
+{
+	unsigned int last_mask_sum = int_mask_sum;
+	const uint64_t burst = (uint64_t)1 << 22;	/* ~4M keys per length/round */
+	int set_size = -1;
+	int lo, hi, L, idx, nlen = 0, active, multi;
+	int lengths[MAX_NUM_MASK_PLHDR + 1];
+	struct brute_gen *plan;
+
+	if (format_cannot_reset) {
+		if (john_main_process)
+			fprintf(stderr, "Error: JOHN_MASK_BRUTE does not support the "
+			        "%s format.\n", mask_fmt->params.label);
+		error();
+	}
+
+	if (mask_increments_len) {
+		lo = options.eff_minlength;
+		hi = options.eff_maxlength;
+		if (lo <= 0) {
+			if (john_main_process && crk_process_key(fmt_null_key))
+				return 1;
+			lo = 1;
+		}
+		if (hi < lo)
+			hi = lo;
+		if (hi > MAX_NUM_MASK_PLHDR) {
+			if (john_main_process)
+				fprintf(stderr, "Error: JOHN_MASK_BRUTE supports lengths "
+				        "up to %d\n", MAX_NUM_MASK_PLHDR);
+			error();
+		}
+		for (L = lo; L <= hi; L++)
+			lengths[nlen++] = L;
+	} else
+		lengths[nlen++] = max_keylen;		/* single natural mask length */
+
+	multi = (nlen > 1);
+	plan = mem_calloc(nlen, sizeof(struct brute_gen));
+
+	/* Build a generator per length (finalizing each to capture its config). */
+	mask_tot_cand = 0;
+	for (idx = 0; idx < nlen; idx++) {
+		uint64_t c;
+		int flen = multi ? lengths[idx] : max_keylen;
+
+		brute_gpu_select_len(flen, &last_mask_sum, multi);
+		brute_gen_init(&plan[idx], flen, &set_size);
+		c = brute_gen_count(&plan[idx]) * mask_int_cand.num_int_cand;
+		mask_tot_cand = (mask_tot_cand > UINT64_MAX - c) ? UINT64_MAX :
+			mask_tot_cand + c;
+	}
+
+	active = 0;
+	for (idx = 0; idx < nlen; idx++)
+		if (!plan[idx].done)
+			active++;
+
+	/* Round-robin lengths in bursts so all lengths advance together. */
+	while (active) {
+		for (idx = 0; idx < nlen; idx++) {
+			struct brute_gen *g = &plan[idx];
+			uint64_t n = 0;
+
+			if (g->done)
+				continue;
+
+			/* Point set_key at this length's internal-mask config. */
+			if (multi)
+				brute_gpu_select_len(lengths[idx], &last_mask_sum, 1);
+
+			while (!g->done && n < burst) {
+				if (brute_gen_emit(g)) {
+					MEM_FREE(plan);
+					return 1;
+				}
+				brute_gen_advance(g);
+				n++;
+				if (event_abort) {
+					crk_process_buffer();
+					MEM_FREE(plan);
+					return 0;
+				}
+			}
+
+			/* Flush before switching to another length's config. */
+			if (crk_process_buffer()) {
+				MEM_FREE(plan);
+				return 1;
+			}
+			if (g->done)
+				active--;
+		}
+	}
+
+	MEM_FREE(plan);
+	return 0;
+}
+
 int do_mask_crack(const char *extern_key)
 {
 	int extern_key_len = extern_key ? strlen(extern_key = mask_utf8_to_cp(extern_key)) : 0;
 	int i;
+
+	if (mask_brute == -1)
+		mask_brute = (getenv("JOHN_MASK_BRUTE") != NULL);
+
+	/*
+	 * Brute-force mode: pure (non-stacked) mask only. Runs the whole
+	 * enumeration here and returns. Bench uses the normal path. GPU-style
+	 * formats (internal mask) use the sequential-length variant; plain CPU
+	 * formats use the round-robin (parallel lengths) variant.
+	 */
+	if (mask_brute && !(options.flags & FLG_MASK_STACKED) &&
+	    !(options.flags & FLG_TEST_CHK))
+		return (mask_fmt->params.flags & FMT_MASK) ?
+			do_mask_brute_gpu() : do_mask_brute();
 
 #ifdef MASK_DEBUG
 	fprintf(stderr, "%s(\"%s\") (format %s internal mask)\n", __FUNCTION__, extern_key, mask_fmt->params.flags & FMT_MASK ? "has" : "doesn't have");
