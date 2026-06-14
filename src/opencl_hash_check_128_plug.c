@@ -460,6 +460,16 @@ int ocl_hc_128_extract_info(struct db_salt *salt, void (*set_kernel_args)(void),
 				loaded_hashes[2 * (b + 1)]     = h0;
 				loaded_hashes[2 * (b + 1) + 1] = h1;
 			}
+
+			if (getenv("GEN_MATCH_DBG")) {
+				cl_uint a2, lim = n < 40 ? n : 40;
+				fprintf(stderr, "[MATCH] base=%"PRIu64" nmatch=%u gids:",
+					mask_gpu_cur_base, n);
+				for (a2 = 0; a2 < lim; a2++)
+					fprintf(stderr, " %u/%u", ocl_hc_hash_ids[1 + 3 * a2],
+						ocl_hc_hash_ids[2 + 3 * a2]);
+				fprintf(stderr, "\n");
+			}
 		}
 	}
 

@@ -975,6 +975,14 @@ static void reset(struct db_main *db)
 	 * the format as non-gen: normal md5 kernel, crypt and get_key. */
 	gen_active = mask_gpu_gen && !mask_gpu_cpu_validate;
 
+	if (getenv("MASK_GPU_PLAN"))
+		fprintf(stderr, "[RESET] self_test=%d flags=%x MASK_CHK=%d STACKED=%d "
+			"-> mask_gpu_gen=%d gen_active=%d cpu_validate=%d\n",
+			self_test_running, (unsigned)options.flags,
+			!!(options.flags & FLG_MASK_CHK),
+			!!(options.flags & FLG_MASK_STACKED),
+			mask_gpu_gen, gen_active, mask_gpu_cpu_validate);
+
 	/* JOHN_GEN_REGS[=width] selects the register-resident gen kernel. A width >= 2
 	 * sets the unrolled position bound GEN_REG_MAX; anything else defaults to 16. */
 	{

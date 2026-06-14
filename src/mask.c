@@ -39,7 +39,23 @@ extern void inc_hybrid_fix_state(void);
 extern void pp_hybrid_fix_state(void);
 extern void ext_hybrid_fix_state(void);
 
-#define INTERLEAVE_STRIDE 1024 * 64
+#define INTERLEAVE_STRIDE_DEFAULT (1024 * 64)
+/* Round-robin chunk granularity: the most-frequent active length advances this
+ * many candidates per round (rarer lengths proportionally less). Smaller = the
+ * crack stream alternates lengths more finely (more rounds/segments); larger =
+ * coarser length runs but a deeper interleaved front before the NSEG_MAX tail.
+ * Tunable via JOHN_INTERLEAVE for sweeping (0/unset = default). */
+static int interleave_stride_cached = -1;
+static int get_interleave_stride(void)
+{
+	if (interleave_stride_cached < 0) {
+		const char *e = getenv("JOHN_INTERLEAVE");
+		int v = e ? atoi(e) : 0;
+		interleave_stride_cached = (v > 0) ? v : INTERLEAVE_STRIDE_DEFAULT;
+	}
+	return interleave_stride_cached;
+}
+#define INTERLEAVE_STRIDE get_interleave_stride()
 
 // Filtered tables for O(1) lookup in the hot loop
 static unsigned char pos_markov_table[MAX_NUM_MASK_PLHDR][256][256];
@@ -2361,13 +2377,22 @@ static void mask_gpu_build_plan(void)
 	}
 	gpu_plan.suf_total = soff;
 
+	{
+		int coarsen = 0;
+		/* Geometric tail growth factor per round, applied once the segment budget
+		 * is near. Tunable via JOHN_TAIL_GROW (default 2, min 2). */
+		const char *ge = getenv("JOHN_TAIL_GROW");
+		uint64_t grow = (ge && atoi(ge) >= 2) ? (uint64_t)atoi(ge) : 2;
+		/* Geometric tail on by default; JOHN_GEOTAIL=0 restores the old behavior
+		 * (flush each remaining length's whole tail as one single-length segment
+		 * at the budget) for A/B comparison. */
+		const char *gt = getenv("JOHN_GEOTAIL");
+		int geotail = !(gt && atoi(gt) == 0);
+
 	while (n_active > 0) {
-		/* Flush each remaining length's whole tail as a single segment when
-		 * either only one length is left (nothing to interleave with) or the
-		 * next full round would exceed the segment budget. This bounds nseg at
-		 * MASK_GPU_NSEG_MAX without coarsening the reachable front: a giant tail
-		 * length is never sliced past the point we could plausibly reach. */
-		if (n_active == 1 || nseg + n_active > MASK_GPU_NSEG_MAX) {
+		/* Only one length left (or geotail disabled and the segment budget is
+		 * reached): emit each remaining length's whole tail as a single segment. */
+		if (n_active == 1 || (!geotail && nseg + n_active > MASK_GPU_NSEG_MAX)) {
 			for (loop = 0; loop <= max_loop; loop++) {
 				const mask_gpu_loop *gl;
 				mask_gpu_seg *sg;
@@ -2390,6 +2415,17 @@ static void mask_gpu_build_plan(void)
 			}
 			break;
 		}
+
+		/* Approaching the segment budget: switch the still-multi-length tail to
+		 * geometric (exponentially growing) chunks instead of flushing each
+		 * length as one giant single-length segment. This keeps every active
+		 * length interleaved all the way down - long-length, high-probability
+		 * candidates are no longer stranded behind a shorter length's entire
+		 * tail - while covering each remaining keyspace in O(log) rounds, so
+		 * nseg stays around MASK_GPU_NSEG_MAX. */
+		if (geotail && !coarsen &&
+		    nseg + n_active > MASK_GPU_NSEG_MAX - MASK_GPU_NSEG_MAX / 8)
+			coarsen = 1;
 
 		for (loop = 0; loop <= max_loop; loop++) {
 			const mask_gpu_loop *gl;
@@ -2421,11 +2457,48 @@ static void mask_gpu_build_plan(void)
 				n_active--;
 			}
 		}
+
+		/* Grow strides geometrically once coarsening so the deep tail is covered
+		 * in logarithmically many still-interleaved rounds. */
+		if (coarsen) {
+			for (loop = 0; loop <= max_loop; loop++)
+				if (active[loop] && stride[loop] <= UINT64_MAX / grow)
+					stride[loop] *= grow;
+		}
+	}
 	}
 
 	gpu_plan.seg = gpu_segs;
 	gpu_plan.nseg = nseg;
 	gpu_plan.total = vbase;
+
+	if (getenv("MASK_GPU_PLAN")) {
+		int l, s, segcnt[MASK_MAX_INC_LEN + 1] = {0};
+		uint64_t segspan[MASK_MAX_INC_LEN + 1] = {0};
+
+		fprintf(stderr, "[PLAN] nseg=%d total=%"PRIu64" max_loop=%d strides:",
+			nseg, gpu_plan.total, max_loop);
+		for (l = 0; l <= max_loop; l++)
+			fprintf(stderr, " L%d=%d", mask_cur_len + l, loop_stride[l]);
+		fprintf(stderr, "\n[PLAN] first segs (loop:len vbase vcnt): ");
+		for (s = 0; s < nseg && s < 24; s++)
+			fprintf(stderr, "[%d:%d @%"PRIu64" x%"PRIu64"] ",
+				gpu_segs[s].loop, gpu_segs[s].len,
+				gpu_segs[s].vbase, gpu_segs[s].vcnt);
+		for (s = 0; s < nseg; s++) {
+			segcnt[gpu_segs[s].loop]++;
+			segspan[gpu_segs[s].loop] += gpu_segs[s].vcnt;
+		}
+		fprintf(stderr, "\n[PLAN] per-length (len: nseg span):");
+		for (l = 0; l <= max_loop; l++)
+			fprintf(stderr, " %d:%d/%"PRIu64, mask_cur_len + l,
+				segcnt[l], segspan[l]);
+		fprintf(stderr, "\n[PLAN] last segs (loop:len vcnt): ");
+		for (s = (nseg > 18 ? nseg - 18 : 0); s < nseg; s++)
+			fprintf(stderr, "[%d:%d x%"PRIu64"] ",
+				gpu_segs[s].loop, gpu_segs[s].len, gpu_segs[s].vcnt);
+		fprintf(stderr, "\n");
+	}
 }
 
 void mask_gpu_virt_to_loop(uint64_t v, int *loop, uint64_t *g)
@@ -3465,6 +3538,20 @@ static int mask_gpu_do_crack(const char *extern_key, int extern_key_len)
 		block_max = 1;
 	if (mask_gpu_cpu_validate && block_max > 4096)
 		block_max = 4096;
+
+	if (getenv("MASK_GPU_PLAN")) {
+		uint64_t round0 = 0;
+		int l;
+		for (l = 0; l < plan->nseg && plan->seg[l].vbase < plan->seg[0].vbase + 1; l++)
+			;
+		/* round size = vbase of the seg where loop 0 repeats */
+		for (l = 1; l < plan->nseg; l++)
+			if (plan->seg[l].loop == plan->seg[0].loop) { round0 = plan->seg[l].vbase; break; }
+		fprintf(stderr, "[EMIT] block_max=%d round0_size=%"PRIu64" -> rounds/launch=%.1f "
+			"(blocks to exhaust=%.1f)\n", block_max, round0,
+			round0 ? (double)block_max / round0 : 0,
+			(double)plan->total / block_max);
+	}
 
 	if (!restored) {
 		mask_tot_cand = plan->total;
