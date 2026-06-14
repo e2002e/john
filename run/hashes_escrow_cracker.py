@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-hashes.com escrow auto-cracker (streaming founds + round-robin resume)
+hashes.com escrow auto-cracker (streaming founds + newest-first sweep)
 ======================================================================
 
 Polls the hashes.com escrow board for MD5 "left" (unfound) lists and works them
@@ -11,16 +11,19 @@ Behaviour
   * STREAMING     - recovered hash:plaintext pairs are read straight from the
                     per-job pot and uploaded back to the escrow job as they are
                     cracked (on a short interval), not after the whole run ends.
-  * ROUND-ROBIN   - each list gets a time slice (--slice). If the slice expires
-                    before the keyspace is exhausted, the list is left "open" and
-                    resumed (john --restore) later. Among open lists the
-                    least-recently-served one is picked next, so no single hard
-                    list hogs the GPU.
-  * NEW-FIRST     - a list that has never been started is always preferred over
-                    open ones, newest first. If a list newer than anything known
-                    when the current slice began appears mid-crack, the running
-                    John is aborted (saving its session) so the newcomer is
-                    attacked straight away.
+  * SWEEP         - the board is swept newest -> oldest, one --slice time-slice
+                    per list. If the slice expires before the keyspace is
+                    exhausted the list is left "open" (resumed via john --restore
+                    on a later pass). After a list's slice the next-older list is
+                    picked, so no single hard list hogs the GPU; once every list
+                    has had a slice the sweep restarts from the most recent. The
+                    serve order is in-memory, so every startup begins a fresh
+                    sweep at the newest list rather than resurfacing old backlog.
+  * NEW-FIRST     - a brand-new list (never served this run) sorts to the front,
+                    so it is picked on the next slice boundary. If a list newer
+                    than anything known when the current slice began appears
+                    mid-crack, the running John is aborted (saving its session)
+                    so the newcomer is attacked straight away.
 
 A list is retired (recorded in state, never revisited) only when John actually
 finishes its keyspace. Detection: John keeps a <session>.rec restore file while a
@@ -44,6 +47,11 @@ Usage
   ./hashes_escrow_cracker.py --once --slice 600
   ./hashes_escrow_cracker.py --format raw-md5-opencl \
       --attack "--mask=?a --min-length=5 --max-length=16" --min-hashes 2000
+
+  # Single-job override: crack ONLY one job by id and exit (no sweep/scheduling)
+  ./hashes_escrow_cracker.py --job-id 123456
+  ./hashes_escrow_cracker.py --job-id 123456 --format raw-md5-opencl \
+      --attack "--mask=?a --min-length=5 --max-length=16"
 """
 
 from __future__ import annotations
@@ -166,7 +174,11 @@ class State:
 
     def mark(self, job_id: int) -> None:
         self.done.add(job_id)
-        self.path.write_text(json.dumps(sorted(self.done)))
+        # Atomic: write a temp file then rename, so a crash mid-write can't
+        # corrupt (and thereby lose) the whole retired-jobs set.
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(sorted(self.done)))
+        os.replace(tmp, self.path)
 
     def __contains__(self, job_id: int) -> bool:
         return job_id in self.done
@@ -189,6 +201,14 @@ def fetch_jobs(session: requests.Session, api_key: str) -> list[dict]:
     if not data.get("success"):
         raise RuntimeError(f"/api/jobs returned failure: {data}")
     return data.get("list", [])
+
+
+def fetch_job(session: requests.Session, api_key: str, job_id: int) -> dict | None:
+    """Find a single escrow job by id in the public board listing."""
+    for j in fetch_jobs(session, api_key):
+        if j.get("id") == job_id:
+            return j
+    return None
 
 
 def download_left_list(session: requests.Session, left_path: str, dest: Path) -> int:
@@ -260,40 +280,48 @@ def flush_new_founds(session, api_key: str, algo_id: int, lines: list[str],
 
 
 # --------------------------------------------------------------------------- #
-# Scheduling: new-first, then round-robin over open lists
+# Scheduling: sweep newest -> oldest, one slice each, repeating; new lists jump in
 # --------------------------------------------------------------------------- #
 
 def _job_dir(workdir: Path, job_id) -> Path:
     return (workdir / str(job_id)).resolve()
 
 
-def _served_time(job_dir: Path) -> float:
-    """mtime of the serve stamp; 0.0 if never served (=> highest RR priority)."""
-    try:
-        return (job_dir / "served").stat().st_mtime
-    except FileNotFoundError:
-        return 0.0
+def _created_key(job: dict) -> str:
+    """A comparable, sortable representation of a job's createdAt that tolerates
+    str (ISO-8601) or numeric (epoch) values and missing/empty ones (sort
+    oldest). Numerics are zero-padded so they order correctly as strings, and
+    everything is returned as a single str so heterogeneous values never raise
+    TypeError when compared (mixed types from one API response shouldn't happen,
+    but a stray null must not crash scheduling)."""
+    v = job.get("createdAt")
+    if v is None or v == "":
+        return ""
+    if isinstance(v, (int, float)):
+        return f"{int(v):020d}"
+    return str(v)
 
 
-def _stamp_served(job_dir: Path) -> None:
-    (job_dir / "served").touch()
+def choose_next(candidates: list[dict], served: dict) -> dict | None:
+    """Pick the next list so the daemon sweeps newest -> oldest, one slice each,
+    then repeats from the top.
 
+    Among the lists waiting longest (least-recently-served *this run*; a
+    never-served list counts as 0.0, so on startup every list is "waiting") take
+    the newest-created. After a list gets its slice it is stamped served=now, so
+    the next pick is the next-older still-waiting list; once every list has had a
+    slice the least-recently-served one is again the most recent, so the sweep
+    restarts from the top.
 
-def choose_next(candidates: list[dict], workdir: Path) -> dict | None:
-    """Selection priority:
-       1. never-started lists (no job dir) -> newest first
-       2. otherwise open lists -> least-recently-served (round-robin),
-          ties broken oldest-created-first to clear backlog.
+    `served` is in-memory (reset every daemon run), so each startup/resume begins
+    a fresh sweep at the most recent list instead of resurfacing old backlog from
+    a persisted stamp. New arrivals (served=0.0) naturally jump to the front.
     """
     if not candidates:
         return None
-    fresh = [j for j in candidates if not _job_dir(workdir, j["id"]).exists()]
-    if fresh:
-        pool = [j for j in fresh if j.get("createdAt")] or fresh
-        return max(pool, key=lambda j: j.get("createdAt", ""))
-    return min(candidates,
-               key=lambda j: (_served_time(_job_dir(workdir, j["id"])),
-                              j.get("createdAt", "")))
+    least = min(served.get(j["id"], 0.0) for j in candidates)
+    waiting = [j for j in candidates if served.get(j["id"], 0.0) <= least + 1e-6]
+    return max(waiting, key=_created_key)
 
 
 def check_newer_job(session, api_key: str, watermark_created: str,
@@ -302,7 +330,7 @@ def check_newer_job(session, api_key: str, watermark_created: str,
     """Return the newest eligible job whose createdAt is strictly greater than
     the watermark (= newest list known when the current slice began), i.e. a
     list that *appeared after* we started. Only such a genuinely-new list
-    preempts; already-known open lists are left for the round-robin."""
+    preempts; already-known open lists are left for the normal sweep."""
     try:
         jobs = fetch_jobs(session, api_key)
     except Exception as exc:
@@ -315,9 +343,9 @@ def check_newer_job(session, api_key: str, watermark_created: str,
         and j["id"] not in state
         and j["id"] != current_job_id
         and j.get("createdAt")
-        and j["createdAt"] > watermark_created
+        and _created_key(j) > watermark_created
     ]
-    return max(newer, key=lambda j: j["createdAt"]) if newer else None
+    return max(newer, key=_created_key) if newer else None
 
 
 # --------------------------------------------------------------------------- #
@@ -378,10 +406,12 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
                f"--session={sess}", *attack, str(hash_file)]
     log.info("job %s: %s", job_id, " ".join(cmd))
 
-    _stamp_served(job_dir)            # round-robin: mark served at slice start
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE, text=True)
+    # John's stderr goes to a per-job logfile, NOT a pipe: an undrained PIPE
+    # (we never read it mid-run) fills its ~64 KB buffer over a long slice and
+    # deadlocks John on write. A file never blocks and is handy for debugging.
+    john_log = job_dir / "john.log"
+    errlog = john_log.open("w")
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=errlog)
     _current_john = proc                   # allow signal handler to manage this John
     # Store PID for future orphan checks (even if we crash).
     pidfile = job_dir / "john.pid"
@@ -391,9 +421,17 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
     last_check = time.time()
 
     def flush():
-        got = flush_new_founds(session, api_key, algo_id,
-                               read_founds_from_pot(pot_file),
-                               uploaded, delta_file, uploaded_file, dry_run)
+        # Never let a transient upload error (5xx/timeout/connection blip) abort
+        # the crack: founds that fail to POST stay out of `uploaded` and are
+        # retried on the next flush, so swallowing here is safe and resilient.
+        try:
+            got = flush_new_founds(session, api_key, algo_id,
+                                   read_founds_from_pot(pot_file),
+                                   uploaded, delta_file, uploaded_file, dry_run)
+        except Exception as exc:
+            log.warning("job %s: founds upload failed (will retry next flush): %s",
+                        job_id, exc)
+            return
         if got:
             verb = "would upload" if dry_run else "uploaded"
             log.info("job %s: %s +%d (uploaded %d/%d)", job_id, verb,
@@ -419,10 +457,7 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
                         log.warning("job %s: John ignored SIGINT, killing", job_id)
                         proc.kill()
                         proc.wait()
-                    flush()   # final upload before leaving
-                    _current_john = None
-                    pidfile.unlink(missing_ok=True)
-                    return False   # not completed; resume later
+                    return False   # not completed; resume later (finally cleans up)
 
             if deadline and time.time() > deadline:
                 log.warning("job %s: time slice up, SIGINT (John saves session)", job_id)
@@ -435,13 +470,19 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
                 break
         proc.wait()
     finally:
-        flush()   # final sweep
+        # Clear our handles FIRST so a raising final flush can't leave a dangling
+        # _current_john / stale john.pid / open logfile.
         _current_john = None
         pidfile.unlink(missing_ok=True)
+        errlog.close()
+        flush()   # final sweep (guarded internally)
 
-    err = (proc.stderr.read() if proc.stderr else "")[-1000:]
+    try:
+        err = john_log.read_text(errors="replace")[-1000:]
+    except Exception:
+        err = ""
     if proc.returncode not in (0, None) and err.strip():
-        log.warning("job %s: John rc=%s stderr: %s", job_id, proc.returncode, err)
+        log.warning("job %s: John rc=%s stderr tail: %s", job_id, proc.returncode, err)
 
     completed = not rec_file.exists()
     log.info("job %s: %s, uploaded %d/%d this run", job_id,
@@ -459,9 +500,20 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
               upload_interval: int, preempt_interval: int, idle_interval: int,
               once: bool, dry_run: bool) -> None:
     """Work one list at a time. After every slice (or early abort) re-poll the
-    board and pick the next list: a never-started one (newest first) if any,
-    otherwise the least-recently-served open one."""
+    board and pick the next list per choose_next: a newest-first sweep that
+    advances to the next-older list each slice and restarts at the top once all
+    have been served (new arrivals jump to the front)."""
     global _shutdown
+
+    # Crash backoff: a job that returns without completing AND without leaving a
+    # resumable .rec made no progress; after a few such passes quarantine it for
+    # this run so it can't hot-loop (re-pick, re-fail) and starve real work.
+    QUARANTINE_AFTER = 3
+    failures: dict[int, int] = {}
+    quarantined: set[int] = set()
+    # In-memory serve stamps (job_id -> last slice-start time). Reset every run so
+    # each startup sweeps newest -> oldest from the top; see choose_next.
+    served: dict[int, float] = {}
 
     while not _shutdown:
         try:
@@ -478,6 +530,7 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
             if j.get("algorithmId") == MD5_ALGO_ID
             and j.get("leftHashes", 0) >= min_hashes
             and j["id"] not in state
+            and j["id"] not in quarantined
         ]
         if not candidates:
             if _shutdown:
@@ -488,8 +541,10 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
             time.sleep(idle_interval)
             continue
 
-        watermark = max((c.get("createdAt", "") for c in candidates), default="")
-        job = choose_next(candidates, workdir)
+        watermark = max((_created_key(c) for c in candidates), default="")
+        job = choose_next(candidates, served)
+        served[job["id"]] = time.time()   # slice start: so the next pick advances
+                                          # to the next-older list, not this one
         is_resume = _job_dir(workdir, job["id"]).is_dir()
         log.info("picking job %s (created %s) -> %s  [%d candidate(s)]",
                  job["id"], job.get("createdAt", "?"),
@@ -499,8 +554,20 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
                                     attack, fmt, slice_seconds, upload_interval,
                                     preempt_interval, dry_run, state, min_hashes,
                                     watermark=watermark)
-            if completed and not dry_run:
-                state.mark(job["id"])
+            jid = job["id"]
+            resumable = (_job_dir(workdir, jid) / "sess.rec").exists()
+            if completed:
+                if not dry_run:
+                    state.mark(jid)
+                failures.pop(jid, None)
+            elif resumable:
+                failures.pop(jid, None)   # slice/preempt interrupt = real progress
+            else:
+                failures[jid] = failures.get(jid, 0) + 1
+                if failures[jid] >= QUARANTINE_AFTER:
+                    quarantined.add(jid)
+                    log.error("job %s failed %d× with no resumable progress; "
+                              "quarantining for this run", jid, failures[jid])
         except requests.HTTPError as exc:
             log.error("job %s HTTP error: %s", job.get("id"), exc)
         except Exception as exc:
@@ -515,7 +582,7 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="hashes.com escrow MD5 auto-cracker "
-                    "(streaming founds + round-robin resume, new-first)")
+                    "(streaming founds + newest-first sweep, resumable)")
 
     # --- credentials / binaries ---------------------------------------- #
     p.add_argument("--api-key", default=os.environ.get("HASHES_COM_API_KEY", ""),
@@ -537,8 +604,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # --- timing: three distinct knobs ----------------------------------- #
     p.add_argument("--slice", dest="slice_seconds", type=int, default=900,
-                   help="per-list time slice in seconds before yielding to the "
-                        "round-robin (0 = run each list to completion; "
+                   help="per-list time slice in seconds before advancing to the "
+                        "next list in the sweep (0 = run each list to completion; "
                         "default: 900)")
     p.add_argument("--upload-interval", type=int, default=15,
                    help="seconds between founds uploads while John runs "
@@ -552,6 +619,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "board is re-polled after every slice (default: 300)")
 
     # --- modes ----------------------------------------------------------- #
+    p.add_argument("--job-id", type=int, default=None,
+                   help="crack ONLY this one escrow job (fetched by id) and exit; "
+                        "overrides the default newest-first board sweep (no "
+                        "scheduling, no preemption)")
     p.add_argument("--once", action="store_true",
                    help="work available lists until the board is empty, then exit")
     p.add_argument("--dry-run", action="store_true",
@@ -576,14 +647,48 @@ def main(argv=None) -> int:
         return 2
 
     args.workdir.mkdir(parents=True, exist_ok=True)
-    state = State(args.workdir / "uploaded.json")
+    # This file holds retired (keyspace-exhausted) job IDs, not uploaded hashes
+    # (those live per-job in uploaded_hashes.txt). Migrate the old misleading name.
+    retired_path = args.workdir / "retired.json"
+    legacy_path = args.workdir / "uploaded.json"
+    if legacy_path.exists() and not retired_path.exists():
+        legacy_path.rename(retired_path)
+    state = State(retired_path)
     session = get_session()
     attack = args.attack.split()
 
     _install_signal_handlers()
 
+    # Single-job override: fetch one job by id, crack it, exit. No sweep,
+    # no preemption, no retire-state. Streaming founds reporting is unchanged.
+    if args.job_id is not None:
+        try:
+            job = fetch_job(session, args.api_key, args.job_id)
+        except Exception as exc:
+            log.error("could not fetch job %s: %s", args.job_id, exc)
+            return 1
+        if job is None:
+            log.error("job %s not found on the escrow board", args.job_id)
+            return 1
+        log.info("single-job mode: job %s (created %s, %s left)",
+                 job["id"], job.get("createdAt", "?"), job.get("leftHashes", "?"))
+        try:
+            completed = process_job(
+                job, session, args.api_key, args.workdir, args.john, attack,
+                args.fmt, args.slice_seconds, args.upload_interval,
+                preempt_interval=0, dry_run=args.dry_run, state=state,
+                min_hashes=args.min_hashes)
+            if completed and not args.dry_run:
+                state.mark(job["id"])
+        except KeyboardInterrupt:
+            log.info("bye")
+        except Exception as exc:
+            log.exception("job %s failed: %s", args.job_id, exc)
+            return 1
+        return 0
+
     if not args.once:
-        log.info("daemon: new-first then round-robin, re-pick after each slice "
+        log.info("daemon: newest-first sweep, re-pick after each slice "
                  "(idle re-poll every %ds, ctrl-c to stop)", args.idle_interval)
     try:
         scheduler(session, args.api_key, state, args.workdir, args.john, attack,
