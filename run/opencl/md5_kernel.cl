@@ -671,31 +671,14 @@ __kernel void md5_gen(__global uint *keys_unused,
 					iter[i] = cond_glimit ? (uchar)next_val : iter[i];
 				}
 
-				// 5. Branchless tracking assignment for the leftmost altered wheel
+				// 5. Branchless tracking assignment for the leftmost altered wheel.
+				// The exhausted (no-pivot) layer advance is already folded into the
+				// sweep above: cur_k was bumped (is_exhausted), r_weight seeded with
+				// cur_k, and every wheel took the is_after_pivot fill path - the exact
+				// left-to-right repack of the old else block. So mfrom is 0 there.
 				mfrom = has_pivot ? (uint)pivot : 0;
 
-				/* --- END OF PURE BRANCHLESS SIMPLEX TRANSFORMATION --- */ {
-				} else {
-					int rem;
-
-					cur_k++;
-					rem = (int)cur_k;
-#pragma unroll
-					for (i = 0; i < GEN_REG_MAX; i++) {
-						if (i < glimit) {
-							int mx = g_count[i] - 1;
-
-							if (rem <= mx) {
-								iter[i] = (uchar)rem;
-								rem = 0;
-							} else {
-								iter[i] = (uchar)mx;
-								rem -= mx;
-							}
-						}
-					}
-					mfrom = 0;
-				}
+				/* --- END OF PURE BRANCHLESS SIMPLEX TRANSFORMATION --- */
 			}
 
 			/* Materialize key[mfrom..glimit) - literal-indexed sweep, processed in
@@ -718,7 +701,13 @@ __kernel void md5_gen(__global uint *keys_unused,
 						if (avail > 0) {
 							if (ti >= avail)
 								ti = avail - 1;
-							key[kp] = g_table[(i * 256 + prev) * 256 + ti];
+							/* Same coalesced packed-table read as the runtime
+							 * path: fetch the uint32 holding 4 chars, extract
+							 * the ti%4 byte. */
+							int block_idx = (i * 256 + prev) * 64 + (ti >> 2);
+							uint packed_chars = g_table_packed[block_idx];
+							uint shift_amount = (ti & 3) << 3;
+							key[kp] = (uchar)(packed_chars >> shift_amount);
 						} else {
 							key[kp] = g_chars0[i];
 						}
