@@ -302,6 +302,19 @@ def _created_key(job: dict) -> str:
     return str(v)
 
 
+def _newest_key(job: dict):
+    """Unambiguous 'newest-first' sort key: primary createdAt (_created_key),
+    tie-broken by numeric job id (higher id == newer on hashes.com). The id
+    tiebreak matters because createdAt can be coarse (date- or second-grained);
+    without it max() would return an arbitrary one of several same-timestamp
+    jobs, so 'the very newest' would not be guaranteed on a (re)start."""
+    try:
+        jid = int(job.get("id", 0))
+    except (TypeError, ValueError):
+        jid = 0
+    return (_created_key(job), jid)
+
+
 def choose_next(candidates: list[dict], served: dict) -> dict | None:
     """Pick the next list so the daemon sweeps newest -> oldest, one slice each,
     then repeats from the top.
@@ -321,13 +334,13 @@ def choose_next(candidates: list[dict], served: dict) -> dict | None:
         return None
     least = min(served.get(j["id"], 0.0) for j in candidates)
     waiting = [j for j in candidates if served.get(j["id"], 0.0) <= least + 1e-6]
-    return max(waiting, key=_created_key)
+    return max(waiting, key=_newest_key)
 
 
-def check_newer_job(session, api_key: str, watermark_created: str,
+def check_newer_job(session, api_key: str, watermark,
                     state: State, min_hashes: int,
                     current_job_id: int) -> dict | None:
-    """Return the newest eligible job whose createdAt is strictly greater than
+    """Return the newest eligible job whose newest-key is strictly greater than
     the watermark (= newest list known when the current slice began), i.e. a
     list that *appeared after* we started. Only such a genuinely-new list
     preempts; already-known open lists are left for the normal sweep."""
@@ -343,9 +356,9 @@ def check_newer_job(session, api_key: str, watermark_created: str,
         and j["id"] not in state
         and j["id"] != current_job_id
         and j.get("createdAt")
-        and _created_key(j) > watermark_created
+        and _newest_key(j) > watermark
     ]
-    return max(newer, key=_created_key) if newer else None
+    return max(newer, key=_newest_key) if newer else None
 
 
 # --------------------------------------------------------------------------- #
@@ -355,7 +368,7 @@ def check_newer_job(session, api_key: str, watermark_created: str,
 def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
                 attack: list[str], fmt: str, slice_seconds: int,
                 upload_interval: int, preempt_interval: int, dry_run: bool,
-                state: State, min_hashes: int, watermark: str = "") -> bool:
+                state: State, min_hashes: int, watermark=("", 0)) -> bool:
     """Work one list for up to `slice_seconds` seconds.
     Returns True  if John exhausted its keyspace (retire the job),
             False if the slice expired mid-attack or a newer job appeared."""
@@ -541,7 +554,7 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
             time.sleep(idle_interval)
             continue
 
-        watermark = max((_created_key(c) for c in candidates), default="")
+        watermark = max((_newest_key(c) for c in candidates), default=("", 0))
         job = choose_next(candidates, served)
         served[job["id"]] = time.time()   # slice start: so the next pick advances
                                           # to the next-older list, not this one
