@@ -3,8 +3,10 @@
 hashes.com escrow auto-cracker (streaming founds + newest-first sweep)
 ======================================================================
 
-Polls the hashes.com escrow board for MD5 "left" (unfound) lists and works them
-with John the Ripper.
+Polls the hashes.com escrow board for MD5 and/or NTLM "left" (unfound) lists and
+works them with John the Ripper on the GPU. The hash type(s) to work are chosen
+with --hash-type, the per-list crack order with --order, and the John OpenCL
+format is selected automatically per job from its hash type.
 
 Behaviour
 ---------
@@ -45,13 +47,20 @@ Usage
   export HASHES_COM_API_KEY=xxxxxxxx
   ./hashes_escrow_cracker.py --slice 900 --preempt-interval 60
   ./hashes_escrow_cracker.py --once --slice 600
-  ./hashes_escrow_cracker.py --format raw-md5-opencl \
+
+  # Work only NTLM lists, picking the list with the most hashes still left
+  ./hashes_escrow_cracker.py --hash-type ntlm --order left \
       --attack "--mask=?a --min-length=5 --max-length=16" --min-hashes 2000
 
-  # Single-job override: crack ONLY one job by id and exit (no sweep/scheduling)
+  # Both MD5 and NTLM, favouring lists we've already cracked the most of
+  ./hashes_escrow_cracker.py --hash-type both --order cracked
+
+  # Single-job override: crack ONLY one job by id and exit (no sweep/scheduling).
+  # The OpenCL format is auto-selected from the job's hash type.
   ./hashes_escrow_cracker.py --job-id 123456
-  ./hashes_escrow_cracker.py --job-id 123456 --format raw-md5-opencl \
-      --attack "--mask=?a --min-length=5 --max-length=16"
+
+The John OpenCL format is always chosen automatically from each job's hash type
+(md5 -> raw-md5-opencl, ntlm -> NT-opencl); there is no --format option.
 """
 
 from __future__ import annotations
@@ -78,12 +87,55 @@ BASE_URL = "https://hashes.com"
 JOBS_URL = f"{BASE_URL}/en/api/jobs"
 FOUNDS_URL = f"{BASE_URL}/en/api/founds"
 
-MD5_ALGO_ID = 0
-DEFAULT_JOHN_FORMAT = "raw-md5"
 KILL_GRACE_SECONDS = 30        # wait after SIGINT before SIGKILL backstop
 
-# raw-MD5 pot lines are '<hash>:<pw>' or '$dynamic_0$<hash>:<pw>'.
-POT_LINE_RE = re.compile(r"^(?:\$dynamic_0\$)?([0-9a-fA-F]{32}):(.*)$")
+# --------------------------------------------------------------------------- #
+# Supported hash types
+#
+# Each entry maps a hash-type key (used by --hash-type) to:
+#   ids       - hashes.com algorithmId value(s) for this type
+#   names     - lowercased algorithmName aliases (a robust fallback in case the
+#               numeric id ever drifts or is unknown for a board entry)
+#   john_base - the John CPU format label; "-opencl" is appended automatically
+#               when the crack command is built (so md5 -> raw-md5-opencl,
+#               ntlm -> NT-opencl)
+#   pot_re    - matches this format's pot lines and captures (hash, plaintext).
+#               Both raw-MD5 and NT escrow lists are bare 32-hex, but John's pot
+#               stores the format-tagged ciphertext ($dynamic_0$.. / $NT$..),
+#               which we strip back to the bare lowercase hash the board wants.
+# --------------------------------------------------------------------------- #
+_HEX32 = r"([0-9a-fA-F]{32})"
+ALGOS: dict[str, dict] = {
+    "md5": {
+        "ids": {0},
+        "names": {"md5"},
+        "john_base": "raw-md5",
+        "pot_re": re.compile(r"^(?:\$dynamic_0\$)?" + _HEX32 + r":(.*)$"),
+    },
+    "ntlm": {
+        "ids": {1000},
+        "names": {"ntlm", "nt"},
+        "john_base": "NT",
+        "pot_re": re.compile(r"^(?:\$NT\$)?" + _HEX32 + r":(.*)$"),
+    },
+}
+DEFAULT_ALGO_ID = 0            # founds-upload fallback when a job omits its id
+
+
+def classify_job(job: dict) -> str | None:
+    """Return the ALGOS key for a board job (by algorithmId, else algorithmName),
+    or None if it is not a type we support."""
+    aid = job.get("algorithmId")
+    name = str(job.get("algorithmName", "")).strip().lower()
+    for key, spec in ALGOS.items():
+        if aid in spec["ids"] or name in spec["names"]:
+            return key
+    return None
+
+
+def john_format_for(htype: str) -> str:
+    """John OpenCL format label for a hash-type key (e.g. md5 -> raw-md5-opencl)."""
+    return ALGOS[htype]["john_base"] + "-opencl"
 
 log = logging.getLogger("escrow")
 
@@ -233,7 +285,7 @@ def upload_founds_file(session: requests.Session, api_key: str, algo_id: int,
 # Founds + upload
 # --------------------------------------------------------------------------- #
 
-def read_founds_from_pot(pot_file: Path) -> list[str]:
+def read_founds_from_pot(pot_file: Path, pot_re: re.Pattern) -> list[str]:
     """'hash:plaintext' lines straight from the per-job pot, normalised to the
     bare lowercase 32-hex hash the escrow board expects.
 
@@ -241,15 +293,27 @@ def read_founds_from_pot(pot_file: Path) -> list[str]:
     username-less hash file `--show` prints '?:plaintext' with no hash, and it
     needs no subprocess or GPU. The per-job pot only ever holds this job's cracks
     (it is wiped on a fresh start), so no intersection with the left list is
-    needed."""
+    needed. `pot_re` is the per-format matcher (see ALGOS)."""
     if not pot_file.exists():
         return []
     out = []
     for ln in pot_file.read_text(errors="replace").splitlines():
-        m = POT_LINE_RE.match(ln.strip())
+        m = pot_re.match(ln.strip())
         if m:
             out.append(f"{m.group(1).lower()}:{m.group(2)}")
     return out
+
+
+def local_cracked_count(job_dir: Path) -> int:
+    """How many keys we have cracked locally for this job (non-blank per-job pot
+    lines). Used by the 'cracked' crack order. 0 for a job never worked."""
+    pot = job_dir / "job.pot"
+    if not pot.exists():
+        return 0
+    try:
+        return sum(1 for l in pot.read_text(errors="replace").splitlines() if l.strip())
+    except Exception:
+        return 0
 
 
 def flush_new_founds(session, api_key: str, algo_id: int, lines: list[str],
@@ -315,7 +379,33 @@ def _newest_key(job: dict):
     return (_created_key(job), jid)
 
 
-def choose_next(candidates: list[dict], served: dict) -> dict | None:
+def _left_hashes(job: dict) -> int:
+    try:
+        return int(job.get("leftHashes", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def make_order_key(order: str, workdir: Path):
+    """Build the ranking key used to pick the next list. The scheduler always
+    takes the candidate with the GREATEST key, so each key is shaped so that
+    'most preferred' compares highest. Ties fall back to newest-first for a
+    deterministic, stable choice.
+
+      date    - newest created first (the original behaviour)
+      left    - most hashes still left first (largest crackable opportunity)
+      cracked - most keys cracked locally (by us) first (favour productive lists)
+    """
+    if order == "left":
+        return lambda j: (_left_hashes(j), _newest_key(j))
+    if order == "cracked":
+        return lambda j: (local_cracked_count(_job_dir(workdir, j["id"])),
+                          _newest_key(j))
+    # default / "date"
+    return _newest_key
+
+
+def choose_next(candidates: list[dict], served: dict, order_key) -> dict | None:
     """Pick the next list so the daemon sweeps newest -> oldest, one slice each,
     then repeats from the top.
 
@@ -334,16 +424,17 @@ def choose_next(candidates: list[dict], served: dict) -> dict | None:
         return None
     least = min(served.get(j["id"], 0.0) for j in candidates)
     waiting = [j for j in candidates if served.get(j["id"], 0.0) <= least + 1e-6]
-    return max(waiting, key=_newest_key)
+    return max(waiting, key=order_key)
 
 
-def check_newer_job(session, api_key: str, watermark,
-                    state: State, min_hashes: int,
-                    current_job_id: int) -> dict | None:
-    """Return the newest eligible job whose newest-key is strictly greater than
-    the watermark (= newest list known when the current slice began), i.e. a
-    list that *appeared after* we started. Only such a genuinely-new list
-    preempts; already-known open lists are left for the normal sweep."""
+def check_newer_job(session, api_key: str, watermark, state: State,
+                    min_hashes: int, current_job_id: int,
+                    selected: set[str], order_key) -> dict | None:
+    """Return the eligible job that out-ranks the watermark (= the best order_key
+    among the candidates known when the current slice began), i.e. a list that
+    *appeared after* we started and that the chosen crack order prefers over
+    everything we already knew. Only such a genuinely-better newcomer preempts;
+    already-known open lists are left for the normal sweep."""
     try:
         jobs = fetch_jobs(session, api_key)
     except Exception as exc:
@@ -351,14 +442,14 @@ def check_newer_job(session, api_key: str, watermark,
         return None
     newer = [
         j for j in jobs
-        if j.get("algorithmId") == MD5_ALGO_ID
-        and j.get("leftHashes", 0) >= min_hashes
+        if classify_job(j) in selected
+        and _left_hashes(j) >= min_hashes
         and j["id"] not in state
         and j["id"] != current_job_id
         and j.get("createdAt")
-        and _newest_key(j) > watermark
+        and order_key(j) > watermark
     ]
-    return max(newer, key=_newest_key) if newer else None
+    return max(newer, key=order_key) if newer else None
 
 
 # --------------------------------------------------------------------------- #
@@ -366,15 +457,25 @@ def check_newer_job(session, api_key: str, watermark,
 # --------------------------------------------------------------------------- #
 
 def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
-                attack: list[str], fmt: str, slice_seconds: int,
+                attack: list[str], slice_seconds: int,
                 upload_interval: int, preempt_interval: int, dry_run: bool,
-                state: State, min_hashes: int, watermark=("", 0)) -> bool:
-    """Work one list for up to `slice_seconds` seconds.
+                state: State, min_hashes: int, selected: set[str], order_key,
+                watermark=("", 0)) -> bool:
+    """Work one list for up to `slice_seconds` seconds. The John OpenCL format
+    and pot matcher are chosen automatically from the job's hash type.
     Returns True  if John exhausted its keyspace (retire the job),
             False if the slice expired mid-attack or a newer job appeared."""
     global _current_john
 
     job_id = job["id"]
+    htype = classify_job(job)
+    if htype is None:
+        log.info("job %s has unsupported hash type %r, skipping", job_id,
+                 job.get("algorithmName"))
+        return True
+    fmt = john_format_for(htype)
+    pot_re = ALGOS[htype]["pot_re"]
+
     left = job.get("leftList")
     if not left:
         log.info("job %s has no leftList, skipping", job_id)
@@ -388,7 +489,7 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
     uploaded_file = job_dir / "uploaded_hashes.txt"
     sess = job_dir / "sess"            # John session base
     rec_file = job_dir / "sess.rec"    # John restore file (present == incomplete)
-    algo_id = job.get("algorithmId", MD5_ALGO_ID)
+    algo_id = job.get("algorithmId", DEFAULT_ALGO_ID)
 
     # Clean up any orphaned John from a previous run.
     reap_stale_john(job_dir, sess)
@@ -439,7 +540,7 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
         # retried on the next flush, so swallowing here is safe and resilient.
         try:
             got = flush_new_founds(session, api_key, algo_id,
-                                   read_founds_from_pot(pot_file),
+                                   read_founds_from_pot(pot_file, pot_re),
                                    uploaded, delta_file, uploaded_file, dry_run)
         except Exception as exc:
             log.warning("job %s: founds upload failed (will retry next flush): %s",
@@ -458,8 +559,8 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
             # Preempt for a genuinely newer list (every preempt_interval seconds).
             if preempt_interval > 0 and time.time() - last_check >= preempt_interval:
                 last_check = time.time()
-                newer = check_newer_job(session, api_key, watermark,
-                                        state, min_hashes, job_id)
+                newer = check_newer_job(session, api_key, watermark, state,
+                                        min_hashes, job_id, selected, order_key)
                 if newer:
                     log.info("job %s: newer list %s appeared (created %s), aborting current",
                              job_id, newer["id"], newer["createdAt"])
@@ -509,14 +610,17 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
 # --------------------------------------------------------------------------- #
 
 def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
-              attack: list[str], fmt: str, min_hashes: int, slice_seconds: int,
-              upload_interval: int, preempt_interval: int, idle_interval: int,
-              once: bool, dry_run: bool) -> None:
+              attack: list[str], selected: set[str], order: str, min_hashes: int,
+              slice_seconds: int, upload_interval: int, preempt_interval: int,
+              idle_interval: int, once: bool, dry_run: bool) -> None:
     """Work one list at a time. After every slice (or early abort) re-poll the
-    board and pick the next list per choose_next: a newest-first sweep that
-    advances to the next-older list each slice and restarts at the top once all
-    have been served (new arrivals jump to the front)."""
+    board and pick the next list per choose_next: a fair sweep (least-recently-
+    served this run) that, within that, picks the most-preferred list under the
+    chosen --order, advancing each slice and restarting once all are served
+    (a newcomer that out-ranks everything known at slice start jumps in)."""
     global _shutdown
+
+    order_key = make_order_key(order, workdir)
 
     # Crash backoff: a job that returns without completing AND without leaving a
     # resumable .rec made no progress; after a few such passes quarantine it for
@@ -540,22 +644,23 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
 
         candidates = [
             j for j in jobs
-            if j.get("algorithmId") == MD5_ALGO_ID
-            and j.get("leftHashes", 0) >= min_hashes
+            if classify_job(j) in selected
+            and _left_hashes(j) >= min_hashes
             and j["id"] not in state
             and j["id"] not in quarantined
         ]
         if not candidates:
             if _shutdown:
                 return
-            log.info("no MD5 work available")
+            log.info("no work available for hash type(s): %s",
+                     ", ".join(sorted(selected)))
             if once:
                 return
             time.sleep(idle_interval)
             continue
 
-        watermark = max((_newest_key(c) for c in candidates), default=("", 0))
-        job = choose_next(candidates, served)
+        watermark = max((order_key(c) for c in candidates), default=("", 0))
+        job = choose_next(candidates, served, order_key)
         served[job["id"]] = time.time()   # slice start: so the next pick advances
                                           # to the next-older list, not this one
         is_resume = _job_dir(workdir, job["id"]).is_dir()
@@ -564,9 +669,9 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
                  "RESUME" if is_resume else "NEW", len(candidates))
         try:
             completed = process_job(job, session, api_key, workdir, john_bin,
-                                    attack, fmt, slice_seconds, upload_interval,
+                                    attack, slice_seconds, upload_interval,
                                     preempt_interval, dry_run, state, min_hashes,
-                                    watermark=watermark)
+                                    selected, order_key, watermark=watermark)
             jid = job["id"]
             resumable = (_job_dir(workdir, jid) / "sess.rec").exists()
             if completed:
@@ -605,9 +710,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--workdir", default="./escrow_work", type=Path,
                    help="scratch + state directory (per-job sessions live here)")
 
-    # --- attack ---------------------------------------------------------- #
-    p.add_argument("--format", dest="fmt", default=DEFAULT_JOHN_FORMAT,
-                   help=f"John --format (default: {DEFAULT_JOHN_FORMAT})")
+    # --- selection / attack ---------------------------------------------- #
+    p.add_argument("--hash-type", dest="hash_type", default="both",
+                   choices=["md5", "ntlm", "both"],
+                   help="which escrow hash type(s) to work; the John OpenCL "
+                        "format is then chosen automatically per job "
+                        "(md5 -> raw-md5-opencl, ntlm -> NT-opencl). "
+                        "(default: both)")
+    p.add_argument("--order", default="date",
+                   choices=["date", "left", "cracked"],
+                   help="crack order for picking the next list: "
+                        "'date' = newest first; "
+                        "'left' = most hashes still left first; "
+                        "'cracked' = most keys WE cracked locally (our own pot) "
+                        "first. (default: date)")
     p.add_argument("--attack",
                    default="--wordlist=/usr/share/wordlists/rockyou.txt --rules=best64",
                    help="space-separated John attack flags for a fresh start "
@@ -669,6 +785,7 @@ def main(argv=None) -> int:
     state = State(retired_path)
     session = get_session()
     attack = args.attack.split()
+    selected = {"md5", "ntlm"} if args.hash_type == "both" else {args.hash_type}
 
     _install_signal_handlers()
 
@@ -683,14 +800,20 @@ def main(argv=None) -> int:
         if job is None:
             log.error("job %s not found on the escrow board", args.job_id)
             return 1
-        log.info("single-job mode: job %s (created %s, %s left)",
-                 job["id"], job.get("createdAt", "?"), job.get("leftHashes", "?"))
+        if classify_job(job) is None:
+            log.error("job %s has unsupported hash type %r",
+                      args.job_id, job.get("algorithmName"))
+            return 1
+        log.info("single-job mode: job %s (%s, created %s, %s left)",
+                 job["id"], job.get("algorithmName", "?"),
+                 job.get("createdAt", "?"), job.get("leftHashes", "?"))
         try:
             completed = process_job(
                 job, session, args.api_key, args.workdir, args.john, attack,
-                args.fmt, args.slice_seconds, args.upload_interval,
+                args.slice_seconds, args.upload_interval,
                 preempt_interval=0, dry_run=args.dry_run, state=state,
-                min_hashes=args.min_hashes)
+                min_hashes=args.min_hashes, selected=selected,
+                order_key=make_order_key(args.order, args.workdir))
             if completed and not args.dry_run:
                 state.mark(job["id"])
         except KeyboardInterrupt:
@@ -701,11 +824,12 @@ def main(argv=None) -> int:
         return 0
 
     if not args.once:
-        log.info("daemon: newest-first sweep, re-pick after each slice "
-                 "(idle re-poll every %ds, ctrl-c to stop)", args.idle_interval)
+        log.info("daemon: %s sweep over hash type(s) [%s], re-pick after each "
+                 "slice (idle re-poll every %ds, ctrl-c to stop)", args.order,
+                 ", ".join(sorted(selected)), args.idle_interval)
     try:
         scheduler(session, args.api_key, state, args.workdir, args.john, attack,
-                  args.fmt, args.min_hashes, args.slice_seconds,
+                  selected, args.order, args.min_hashes, args.slice_seconds,
                   args.upload_interval, args.preempt_interval, args.idle_interval,
                   args.once, args.dry_run)
     except KeyboardInterrupt:

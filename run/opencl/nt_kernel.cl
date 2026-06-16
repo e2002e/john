@@ -560,3 +560,395 @@ __kernel void nt(__global uint *keys,
 			cmp(gid, i, hash, BITMAPS, offset_table, hash_table, out_hash_ids, bitmap_dupe);
 	}
 }
+
+#ifdef GPU_GEN
+/*
+ * K-ordered GPU password generator for NTLM (single MD4 block, len <= 27).
+ *
+ * Direct port of md5_kernel.cl:md5_gen - the segment location, simplex unrank
+ * and Markov materialization are hash-independent and bit-exact mirrors of
+ * mask.c:mask_gpu_unrank_key()/simplex_next_state(). Two things differ from the
+ * MD5 generator:
+ *   1. Args. NTLM uses the 64-bit hash check (opencl_hash_check_64), which has
+ *      no return_hashes buffer, so the hash-check args occupy slots 0..8 and the
+ *      generator inputs start at arg 9 (MD5/128 starts at 10).
+ *   2. Message packing. Instead of packing 4 raw key[] bytes per uint into W[],
+ *      we build the UTF-16 nt_buffer: two CP_LUT-encoded chars per uint (mirror
+ *      of prepare_key's codepage path), drop the 0x80 terminator at char index
+ *      len, and place the bit length at nt_buffer[14]. key[] stays raw bytes so
+ *      the Markov key[kp-1] dependency is unaffected.
+ *
+ * See md5_gen for the full commentary on the per-segment template, the
+ * register-resident (GEN_REGS) variant and the virtual index space.
+ */
+#ifndef GEN_MAX_POS
+#define GEN_MAX_POS 64
+#endif
+#ifndef GEN_NDW
+#define GEN_NDW 14
+#endif
+#ifndef GEN_REG_MAX
+#define GEN_REG_MAX 16
+#endif
+
+/* Device mirror of one mask_gpu_plan segment (must match gen_seg in the format). */
+typedef struct {
+	ulong vbase;
+	ulong vcnt;
+	ulong lstart;
+	ulong suf_off;
+	uint  limit;
+	uint  len;
+	uint  max_k;
+	uint  ksize;
+} gen_seg;
+
+__kernel void nt_gen(__global uint *keys_unused,
+		  __global uint *index_unused,
+		  __global uint *int_key_loc_unused,
+		  __global uint *int_keys_unused,
+		  __global uint *bitmaps,
+		  __global uint *offset_table,
+		  __global uint *hash_table,
+		  volatile __global uint *out_hash_ids,
+		  volatile __global uint *bitmap_dupe,
+		  __global ulong *suf,
+		  __global uint *g_table_packed,
+		  __constant uchar *g_startv,
+		  __constant uchar *g_rowcnt,
+		  __global   uchar *g_littmpl,
+		  __constant int   *g_keypos,
+		  __constant int   *g_count,
+		  __constant uchar *g_cstart,
+		  __constant uchar *g_chars0,
+		  __global gen_seg *segs,
+		  uint nseg,
+		  ulong gbase,
+		  uint gcount,
+		  uint gR)
+{
+	uint i, j;
+	uint gid = get_global_id(0);
+
+#if USE_LOCAL_BITMAPS
+	uint lid = get_local_id(0);
+	uint lws = get_local_size(0);
+	__local uint s_bitmaps[BITMAP_SHIFT * SELECT_CMP_STEPS];
+
+	for (i = lid; i < BITMAP_SHIFT * SELECT_CMP_STEPS; i += lws)
+		s_bitmaps[i] = bitmaps[i];
+
+	barrier(CLK_LOCAL_MEM_FENCE);
+#endif
+
+	{
+		uint nt_buffer[(PLAINTEXT_LENGTH + 5 + 31) / 32 * 16] = { 0 };
+		uint hash[4];
+		uchar key[GEN_MAX_POS];
+#ifdef GEN_REGS
+		uchar iter[GEN_REG_MAX];
+#else
+		uchar iter[GEN_MAX_POS];
+#endif
+		ulong gl0 = (ulong)gid * gR;
+
+		uint cur_seg = 0xffffffff;
+		ulong seg_vbase = 0, seg_vend = 0, seg_lstart = 0, seg_suf_off = 0;
+		uint glimit = 0, glen = 0, gmax_k = 0, gksize = 0;
+		uint len = 0, cur_k = 0, md4_size = 0;
+
+		for (j = 0; j < gR; j++) {
+			ulong gl = gl0 + j;
+			ulong V, g;
+			uint mfrom;
+			int full;
+
+			if (gl >= gcount)
+				break;
+			V = gbase + gl;
+
+			if (cur_seg == 0xffffffff || V < seg_vbase || V >= seg_vend) {
+				uint lo = 0, hi = nseg - 1, s = 0;
+
+				while (lo <= hi) {
+					uint mid = (lo + hi) >> 1;
+
+					if (segs[mid].vbase <= V) {
+						s = mid;
+						lo = mid + 1;
+					} else {
+						if (mid == 0)
+							break;
+						hi = mid - 1;
+					}
+				}
+
+				cur_seg     = s;
+				seg_vbase   = segs[s].vbase;
+				seg_vend    = seg_vbase + segs[s].vcnt;
+				seg_lstart  = segs[s].lstart;
+				seg_suf_off = segs[s].suf_off;
+				glimit      = segs[s].limit;
+				glen        = segs[s].len;
+				gmax_k      = segs[s].max_k;
+				gksize      = segs[s].ksize;
+
+				/* Rebuild the raw-byte key[] template for this length: literals
+				 * where defined, zero padding elsewhere. No 0x80 goes into key[]
+				 * (the NTLM terminator lives in the UTF-16 domain and is applied
+				 * to nt_buffer below). nt_buffer[14] holds the single-block bit
+				 * length, set once per segment. */
+				len = glen;
+#pragma unroll
+				for (i = 0; i < GEN_MAX_POS; i++)
+					key[i] = (i < len) ? g_littmpl[i] : 0;
+				md4_size = len << 4;
+				nt_buffer[14] = md4_size;
+				full = 1;
+			} else {
+				full = 0;
+			}
+
+			g = seg_lstart + (V - seg_vbase);
+
+#ifdef GEN_REGS
+			if (full) {
+				ulong fw = g, rank;
+				uint remaining_k;
+
+				cur_k = 0;
+				while (cur_k <= gmax_k && fw >= suf[seg_suf_off + cur_k]) {
+					fw -= suf[seg_suf_off + cur_k];
+					cur_k++;
+				}
+				remaining_k = cur_k;
+				rank = fw;
+#pragma unroll
+				for (i = 0; i < GEN_REG_MAX; i++) {
+					if (i < glimit) {
+						int C = g_count[i];
+						int vmax = (remaining_k < (uint)(C - 1)) ? (int)remaining_k : (C - 1);
+						int vv;
+
+						for (vv = vmax; vv >= 0; vv--) {
+							ulong cnt = suf[seg_suf_off + (i + 1) * gksize + (remaining_k - vv)];
+							if (rank < cnt)
+								break;
+							rank -= cnt;
+						}
+						iter[i] = (uchar)vv;
+						remaining_k -= vv;
+					}
+				}
+				mfrom = 0;
+			} else {
+				int pivot = -1;
+				#pragma unroll
+				for (i = 0; i < GEN_REG_MAX; i++) {
+					int is_valid = ((int)i + 1 < (int)glimit) && (iter[i] > 0) && (iter[i + 1] < g_count[i + 1] - 1);
+					pivot = is_valid ? (int)i : pivot;
+				}
+
+				int has_pivot    = (pivot >= 0);
+				int is_exhausted = !has_pivot;
+
+				cur_k += is_exhausted;
+
+				int w = 0;
+#pragma unroll
+				for (i = 0; i < GEN_REG_MAX; i++) {
+					int mask_w = (i < glimit) && ((int)i >= pivot + 2);
+					w += iter[i] * mask_w;
+				}
+
+				int r_weight = has_pivot ? w : (int)cur_k;
+
+#pragma unroll
+				for (i = 0; i < GEN_REG_MAX; i++) {
+					int cond_glimit = (i < glimit);
+					int lookup_idx  = cond_glimit ? i : 0;
+
+					int is_before_pivot = has_pivot && ((int)i < pivot);
+					int is_pivot        = has_pivot && ((int)i == pivot);
+					int is_after_pivot  = is_exhausted || ((int)i > pivot);
+
+					int val_before = iter[i];
+					int val_pivot  = iter[i] - 1;
+
+					int base = (has_pivot && ((int)i == pivot + 1)) ? (iter[i] + 1) : 0;
+					int cap  = g_count[lookup_idx] - 1 - base;
+
+					int add       = min(r_weight, cap);
+					int val_after = base + add;
+
+					r_weight -= add * (cond_glimit && is_after_pivot);
+
+					int next_val = (is_before_pivot * val_before) +
+					               (is_pivot        * val_pivot)  +
+					               (is_after_pivot  * val_after);
+
+					iter[i] = cond_glimit ? (uchar)next_val : iter[i];
+				}
+
+				mfrom = has_pivot ? (uint)pivot : 0;
+			}
+
+#pragma unroll
+			for (i = 0; i < GEN_REG_MAX; i++) {
+				if (i >= mfrom && i < glimit) {
+					int kp = g_keypos[i];
+					uchar cs = g_cstart[i];
+
+					if (cs) {
+						key[kp] = cs + iter[i];
+					} else if (i == 0) {
+						key[kp] = g_startv[iter[0]];
+					} else {
+						uchar prev = key[kp - 1];
+						int avail = g_rowcnt[i * 256 + prev];
+						int ti = iter[i];
+
+						if (avail > 0) {
+							if (ti >= avail)
+								ti = avail - 1;
+							int block_idx = (i * 256 + prev) * 64 + (ti >> 2);
+							uint packed_chars = g_table_packed[block_idx];
+							uint shift_amount = (ti & 3) << 3;
+							key[kp] = (uchar)(packed_chars >> shift_amount);
+						} else {
+							key[kp] = g_chars0[i];
+						}
+					}
+				}
+			}
+#else
+			if (full) {
+				ulong fw = g, rank;
+				uint remaining_k;
+
+				cur_k = 0;
+				while (cur_k <= gmax_k && fw >= suf[seg_suf_off + cur_k]) {
+					fw -= suf[seg_suf_off + cur_k];
+					cur_k++;
+				}
+				remaining_k = cur_k;
+				rank = fw;
+				for (i = 0; i < glimit; i++) {
+					int C = g_count[i];
+					int vmax = (remaining_k < (uint)(C - 1)) ? (int)remaining_k : (C - 1);
+					int vv;
+
+					for (vv = vmax; vv >= 0; vv--) {
+						ulong cnt = suf[seg_suf_off + (i + 1) * gksize + (remaining_k - vv)];
+						if (rank < cnt)
+							break;
+						rank -= cnt;
+					}
+					iter[i] = (uchar)vv;
+					remaining_k -= vv;
+				}
+				mfrom = 0;
+			} else {
+				int p, q, advanced = 0;
+
+				for (p = (int)glimit - 2; p >= 0; p--) {
+					if (iter[p] > 0 && iter[p + 1] < g_count[p + 1] - 1) {
+						int w = 0;
+
+						iter[p]--;
+						iter[p + 1]++;
+						for (q = p + 2; q < (int)glimit; q++) {
+							w += iter[q];
+							iter[q] = 0;
+						}
+						q = p + 1;
+						while (w > 0 && q < (int)glimit) {
+							int max_allowed = g_count[q] - 1 - iter[q];
+							int add = (w > max_allowed) ? max_allowed : w;
+
+							iter[q] += add;
+							w -= add;
+							q++;
+						}
+						mfrom = (uint)p;
+						advanced = 1;
+						break;
+					}
+				}
+				if (!advanced) {
+					int rem;
+
+					cur_k++;
+					rem = (int)cur_k;
+					for (p = 0; p < (int)glimit; p++) {
+						int mx = g_count[p] - 1;
+
+						if (rem <= mx) {
+							iter[p] = (uchar)rem;
+							rem = 0;
+						} else {
+							iter[p] = (uchar)mx;
+							rem -= mx;
+						}
+					}
+					mfrom = 0;
+				}
+			}
+
+			for (i = mfrom; i < glimit; i++) {
+				int kp = g_keypos[i];
+				uchar cs = g_cstart[i];
+
+				if (cs) {
+					key[kp] = cs + iter[i];
+				} else if (i == 0) {
+					key[kp] = g_startv[iter[0]];
+				} else {
+					uchar prev = key[kp - 1];
+					int avail = g_rowcnt[i * 256 + prev];
+					int ti = iter[i];
+
+					if (avail > 0) {
+						if (ti >= avail)
+							ti = avail - 1;
+						int block_idx = (i * 256 + prev) * 64 + (ti >> 2);
+						uint packed_chars = g_table_packed[block_idx];
+						uint shift_amount = (ti & 3) << 3;
+						key[kp] = (uchar)(packed_chars >> shift_amount);
+					} else {
+						key[kp] = g_chars0[i];
+					}
+				}
+			}
+#endif /* GEN_REGS */
+
+			/* Pack the UTF-16 message words with COMPILE-TIME indices (mirror of
+			 * prepare_key's codepage path): two CP_LUT-encoded chars per uint.
+			 * key[] padding past len is 0, so words beyond the last char come out
+			 * 0; the single 0x80 terminator at char index len is OR'd in after.
+			 * nt_buffer[14] (bit length) and any words >= GEN_NDW stay as set/zero
+			 * across candidates. */
+#pragma unroll
+			for (i = 0; i < GEN_NDW; i++)
+				nt_buffer[i] = CP_LUT(key[2 * i]) |
+				               (CP_LUT(key[2 * i + 1]) << 16);
+			nt_buffer[len >> 1] |= (uint)0x80 << ((len & 1) << 4);
+
+			if (nt_crypt(hash, nt_buffer, md4_size,
+#if USE_LOCAL_BITMAPS
+			    s_bitmaps
+#else
+			    bitmaps
+#endif
+			    ))
+				cmp(gid, j, hash,
+#if USE_LOCAL_BITMAPS
+				    s_bitmaps
+#else
+				    bitmaps
+#endif
+				    , offset_table, hash_table, out_hash_ids, bitmap_dupe);
+		}
+	}
+}
+#endif /* GPU_GEN */
