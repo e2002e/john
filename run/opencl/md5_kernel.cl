@@ -662,10 +662,19 @@ __kernel void md5_gen(__global uint *keys_unused,
 					// Apply loop-carried dependency to the weight pool using arithmetic subtraction
 					r_weight -= add * (cond_glimit && is_after_pivot);
 
+					/*
 					// Combine distinct execution branches into a single arithmetic multiplexer
 					int next_val = (is_before_pivot * val_before) +
 					               (is_pivot        * val_pivot)  +
 					               (is_after_pivot  * val_after);
+					*/
+					// OpenCL select(a, b, condition) returns 'b' if condition is true (MSB set), else 'a'.
+					// Note: OpenCL relational operators return -1 (all bits 1) for true.
+					int cond_pivot = is_pivot ? -1 : 0;
+					int cond_after = is_after_pivot ? -1 : 0;
+
+					int next_val = select(val_before, val_pivot, cond_pivot);
+					next_val     = select(next_val, val_after, cond_after);
 
 					// Write back to private registers only if the loop index is valid for this segment
 					iter[i] = cond_glimit ? (uchar)next_val : iter[i];
@@ -704,7 +713,7 @@ __kernel void md5_gen(__global uint *keys_unused,
 							/* Same coalesced packed-table read as the runtime
 							 * path: fetch the uint32 holding 4 chars, extract
 							 * the ti%4 byte. */
-							int block_idx = (i * 256 + prev) * 64 + (ti >> 2);
+							int block_idx = (((i << 8) + prev) << 6) + (ti >> 2);
 							uint packed_chars = g_table_packed[block_idx];
 							uint shift_amount = (ti & 3) << 3;
 							key[kp] = (uchar)(packed_chars >> shift_amount);
@@ -833,20 +842,11 @@ __kernel void md5_gen(__global uint *keys_unused,
 			}
 #endif /* GEN_REGS */
 
-			/* Pack the message words with COMPILE-TIME indices so W[0..15] stay
-			 * in registers across md5_encrypt. (A dynamic W[] index, e.g. a
-			 * length-dependent loop bound, forces the whole array to local
-			 * memory and md5 then reloads each word from local every round.)
-			 * key[0..GEN_NDW*4) is fully defined - literals/Markov chars, the
-			 * 0x80 terminator and zero padding; W[GEN_NDW..13] stay 0 from the
-			 * W initializer and W[14]/W[15] were set on the segment change, so
-			 * packing exactly GEN_NDW words covers every message of this run. */
 #pragma unroll
-			for (i = 0; i < GEN_NDW; i++)
-				W[i] = (uint)key[4 * i] |
-				       ((uint)key[4 * i + 1] << 8) |
-				       ((uint)key[4 * i + 2] << 16) |
-				       ((uint)key[4 * i + 3] << 24);
+			for (i = 0; i < GEN_NDW; i++) {
+				// Cast the private array pointer to a uchar4 vector, then directly to uint
+				W[i] = as_uint(*(__private uchar4*)&key[4 * i]);
+			}
 
 			md5_encrypt(hash, W, len);
 			cmp(gid, j, hash,
