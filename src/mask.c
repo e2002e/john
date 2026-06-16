@@ -1590,11 +1590,11 @@ static char *generate_template_key(char *mask, const char *key, int key_len,
 		} else
 			template_key[k++] = mask[i++];
 
-			if (!mask_increments_len && k >= (unsigned int)mask_cur_len) {
-				truncate_mask(cpu_mask_ctx, j - 1, template_len - 1);
-				k = mask_cur_len;
-				break;
-			}
+		if (!mask_increments_len && k >= (unsigned int)mask_cur_len) {
+			truncate_mask(cpu_mask_ctx, j - 1, template_len - 1);
+			k = mask_cur_len;
+			break;
+		}
 	}
 
 	/*
