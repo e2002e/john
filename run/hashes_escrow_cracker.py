@@ -460,7 +460,7 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
                 attack: list[str], slice_seconds: int,
                 upload_interval: int, preempt_interval: int, dry_run: bool,
                 state: State, min_hashes: int, selected: set[str], order_key,
-                watermark=("", 0)) -> bool:
+                flush_recovery: bool = False, watermark=("", 0)) -> bool:
     """Work one list for up to `slice_seconds` seconds. The John OpenCL format
     and pot matcher are chosen automatically from the job's hash type.
     Returns True  if John exhausted its keyspace (retire the job),
@@ -494,13 +494,34 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
     # Clean up any orphaned John from a previous run.
     reap_stale_john(job_dir, sess)
 
+    # --flush-recovery: drop John's restore/session state so this list restarts
+    # its keyspace from scratch, but NEVER touch the pot - already-cracked hashes
+    # stay recorded (John skips them on load and we re-report them), so nothing is
+    # lost. This forces the fresh-start path below (resuming becomes False).
+    if flush_recovery:
+        for f in sorted(job_dir.glob("sess.rec*")) + [job_dir / "sess.log"]:
+            f.unlink(missing_ok=True)
+
     resuming = rec_file.exists() and hash_file.exists()
     if resuming:
         n = sum(1 for l in hash_file.read_text().splitlines() if l.strip())
     else:
-        # Fresh start: (re)download and clear any stale session/pot for this id.
+        # Fresh start: pull the FRESHEST left list for this job - re-fetch its
+        # current leftList so hashes cracked recently (by us or anyone on the
+        # board) are dropped - then clear stale session state. A normal fresh
+        # start also wipes the pot + uploaded record; --flush-recovery keeps both
+        # (only the restore state was dropped, the pot is preserved).
+        try:
+            fresh = fetch_job(session, api_key, job_id)
+            if fresh and fresh.get("leftList"):
+                left = fresh["leftList"]
+        except Exception as exc:
+            log.debug("job %s: left-list refresh failed, using scheduled list: %s",
+                      job_id, exc)
         n = download_left_list(session, left, hash_file)
-        for stale in (rec_file, pot_file, uploaded_file):
+        stale_files = [rec_file] if flush_recovery else [rec_file, pot_file,
+                                                         uploaded_file]
+        for stale in stale_files:
             stale.unlink(missing_ok=True)
     log.info("job %s: %d hashes (%s)%s", job_id, n, job["algorithmName"],
              " [resuming]" if resuming else "")
@@ -612,7 +633,8 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
 def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
               attack: list[str], selected: set[str], order: str, min_hashes: int,
               slice_seconds: int, upload_interval: int, preempt_interval: int,
-              idle_interval: int, once: bool, dry_run: bool) -> None:
+              idle_interval: int, once: bool, dry_run: bool,
+              flush_recovery: bool = False) -> None:
     """Work one list at a time. After every slice (or early abort) re-poll the
     board and pick the next list per choose_next: a fair sweep (least-recently-
     served this run) that, within that, picks the most-preferred list under the
@@ -671,7 +693,9 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
             completed = process_job(job, session, api_key, workdir, john_bin,
                                     attack, slice_seconds, upload_interval,
                                     preempt_interval, dry_run, state, min_hashes,
-                                    selected, order_key, watermark=watermark)
+                                    selected, order_key,
+                                    flush_recovery=flush_recovery,
+                                    watermark=watermark)
             jid = job["id"]
             resumable = (_job_dir(workdir, jid) / "sess.rec").exists()
             if completed:
@@ -730,6 +754,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "(a resumed list continues its saved attack)")
     p.add_argument("--min-hashes", type=int, default=1,
                    help="skip jobs with fewer than N left hashes (default: 1)")
+    p.add_argument("--flush-recovery", action="store_true",
+                   help="when a list is (re)selected, delete John's restore files "
+                        "(sess.rec*/sess.log) first and start it from scratch "
+                        "instead of --restore. The pot is NEVER deleted, so "
+                        "already-cracked hashes are kept (skipped + re-reported).")
 
     # --- timing: three distinct knobs ----------------------------------- #
     p.add_argument("--slice", dest="slice_seconds", type=int, default=900,
@@ -813,7 +842,8 @@ def main(argv=None) -> int:
                 args.slice_seconds, args.upload_interval,
                 preempt_interval=0, dry_run=args.dry_run, state=state,
                 min_hashes=args.min_hashes, selected=selected,
-                order_key=make_order_key(args.order, args.workdir))
+                order_key=make_order_key(args.order, args.workdir),
+                flush_recovery=args.flush_recovery)
             if completed and not args.dry_run:
                 state.mark(job["id"])
         except KeyboardInterrupt:
@@ -831,7 +861,7 @@ def main(argv=None) -> int:
         scheduler(session, args.api_key, state, args.workdir, args.john, attack,
                   selected, args.order, args.min_hashes, args.slice_seconds,
                   args.upload_interval, args.preempt_interval, args.idle_interval,
-                  args.once, args.dry_run)
+                  args.once, args.dry_run, flush_recovery=args.flush_recovery)
     except KeyboardInterrupt:
         log.info("bye")
     return 0
