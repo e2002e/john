@@ -660,12 +660,22 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
 # hash->job map is still kept, but only to retire jobs we've fully cracked.
 # --------------------------------------------------------------------------- #
 
+# Degenerate sentinel "hashes" that some left lists carry. The all-ff value in
+# particular breaks John's 128-bit perfect-hash table builder: add128() in
+# bt_hash_type_128.c overflows on every offset probe ("128 bit add overflow"),
+# so the bt builder can never place it collision-free and aborts the whole run
+# with "Error building tables ... No. of collisions:1". They are never real
+# password hashes, so drop them before they poison the union.
+_BOGUS_HASHES = {"f" * 32, "0" * 32}
+
+
 def _hashes_from_text(text: str) -> set[str]:
     """Bare lowercase 32-hex hashes from a downloaded left list (one per line)."""
     out = set()
     for ln in text.splitlines():
         h = ln.strip().lower()
-        if len(h) == 32 and all(c in "0123456789abcdef" for c in h):
+        if (len(h) == 32 and all(c in "0123456789abcdef" for c in h)
+                and h not in _BOGUS_HASHES):
             out.add(h)
     return out
 
@@ -848,7 +858,7 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
               attack: list[str], selected: set[str], order: str, min_hashes: int,
               slice_seconds: int, upload_interval: int, preempt_interval: int,
               idle_interval: int, once: bool, dry_run: bool,
-              flush_recovery: bool = False) -> None:
+              flush_recovery: bool = False, max_lists: int = 0) -> None:
     """Work one list at a time. After every slice (or early abort) re-poll the
     board and pick the next list per choose_next: a fair sweep (least-recently-
     served this run) that, within that, picks the most-preferred list under the
@@ -895,7 +905,15 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
             time.sleep(idle_interval)
             continue
 
+        # Watermark (for preemption) is the best of the FULL candidate set, so
+        # only a list better than everything on the board can preempt - capping
+        # below must not let a lesser list cut in.
         watermark = max((order_key(c) for c in candidates), default=("", 0))
+        # --max-lists: confine the rotation to the N most-preferred lists. The
+        # set is recomputed each poll; once all N are served choose_next finds
+        # them equally-stale and restarts the loop at the most-preferred one.
+        if max_lists and len(candidates) > max_lists:
+            candidates = sorted(candidates, key=order_key, reverse=True)[:max_lists]
         job = choose_next(candidates, served, order_key)
         served[job["id"]] = time.time()   # slice start: so the next pick advances
                                           # to the next-older list, not this one
@@ -935,7 +953,7 @@ def scheduler_combine(session, api_key: str, state: State, workdir: Path,
                       john_bin: str, attack: list[str], selected: set[str],
                       min_hashes: int, slice_seconds: int, upload_interval: int,
                       idle_interval: int, once: bool, dry_run: bool,
-                      flush_recovery: bool = False) -> None:
+                      flush_recovery: bool = False, max_lists: int = 0) -> None:
     """Union scheduler: each cycle re-polls the board and gives each selected hash
     type one time-slice as a single merged John run (process_algo_union), so all
     of a type's jobs are cracked in one keyspace sweep. New/finished jobs are
@@ -966,6 +984,9 @@ def scheduler_combine(session, api_key: str, state: State, workdir: Path,
                      and j["id"] not in state]
             if not cands:
                 continue
+            # --max-lists: union only the N newest lists of this type.
+            if max_lists and len(cands) > max_lists:
+                cands = sorted(cands, key=_newest_key, reverse=True)[:max_lists]
             worked = True
             total_left = sum(_left_hashes(j) for j in cands)
             log.info("union %s: %d job(s), %d hashes left on board", htype,
@@ -1029,6 +1050,12 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "(a resumed list continues its saved attack)")
     p.add_argument("--min-hashes", type=int, default=1,
                    help="skip jobs with fewer than N left hashes (default: 1)")
+    p.add_argument("--max-lists", type=int, default=0, metavar="N",
+                   help="confine the sweep to the N most-preferred lists (per "
+                        "--order; newest-first in --combine): loop over just those "
+                        "N, then restart looping from the start. The top-N set is "
+                        "recomputed each poll, so genuinely newer lists still enter "
+                        "(0 = no limit, sweep every list; default: 0)")
     p.add_argument("--flush-recovery", action="store_true",
                    help="when a list is (re)selected, delete John's restore files "
                         "(sess.rec*/sess.log) first and start it from scratch "
@@ -1149,7 +1176,8 @@ def main(argv=None) -> int:
             scheduler_combine(session, args.api_key, state, args.workdir, args.john,
                               attack, selected, args.min_hashes, args.slice_seconds,
                               args.upload_interval, args.idle_interval, args.once,
-                              args.dry_run, flush_recovery=args.flush_recovery)
+                              args.dry_run, flush_recovery=args.flush_recovery,
+                              max_lists=args.max_lists)
         except KeyboardInterrupt:
             log.info("bye")
         return 0
@@ -1162,7 +1190,8 @@ def main(argv=None) -> int:
         scheduler(session, args.api_key, state, args.workdir, args.john, attack,
                   selected, args.order, args.min_hashes, args.slice_seconds,
                   args.upload_interval, args.preempt_interval, args.idle_interval,
-                  args.once, args.dry_run, flush_recovery=args.flush_recovery)
+                  args.once, args.dry_run, flush_recovery=args.flush_recovery,
+                  max_lists=args.max_lists)
     except KeyboardInterrupt:
         log.info("bye")
     return 0
