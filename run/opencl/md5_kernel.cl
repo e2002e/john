@@ -428,11 +428,16 @@ __kernel void md5_gen(__global uint *keys_unused,
 		  __global uint *g_table_packed,
 		  /*
 		   * The small per-position tables are uniform across all work-items and
-		   * read every candidate (g_count in the odometer; keypos/cstart/chars0
-		   * and the Markov startv/rowcnt in materialization), so they live in
-		   * __constant for broadcast via the hardware constant cache. suf and the
-		   * big [npos][256][256] g_table can exceed the 64 KiB constant limit, so
-		   * they stay __global; g_littmpl is written once per work-item.
+		   * read every candidate (g_count in the odometer; keypos/cstart and the
+		   * Markov startv in materialization), so they live in __constant for
+		   * broadcast via the hardware constant cache. suf and the big
+		   * [npos][256][256] g_table can exceed the 64 KiB constant limit, so they
+		   * stay __global; g_littmpl is written once per work-item. g_rowcnt and
+		   * g_chars0 are no longer read by the kernel (the table is host-saturated
+		   * past each prev-row's valid length, so the rank indexes it directly,
+		   * folding in both the clamp and the empty-row fallback) - they are kept
+		   * in the arg list for a stable layout and because the CPU get_key path
+		   * still uses them.
 		   */
 		  __constant uchar *g_startv,
 		  __constant uchar *g_rowcnt,
@@ -703,23 +708,14 @@ __kernel void md5_gen(__global uint *keys_unused,
 					} else if (i == 0) {
 						key[kp] = g_startv[iter[0]];
 					} else {
+						/* Host-saturated table: index directly by the simplex
+						 * rank (see the runtime-indexed path for details). */
 						uchar prev = key[kp - 1];
-						int avail = g_rowcnt[i * 256 + prev];
 						int ti = iter[i];
+						int block_idx = (((i << 8) + prev) << 6) + (ti >> 2);
+						uint packed_chars = g_table_packed[block_idx];
 
-						if (avail > 0) {
-							if (ti >= avail)
-								ti = avail - 1;
-							/* Same coalesced packed-table read as the runtime
-							 * path: fetch the uint32 holding 4 chars, extract
-							 * the ti%4 byte. */
-							int block_idx = (((i << 8) + prev) << 6) + (ti >> 2);
-							uint packed_chars = g_table_packed[block_idx];
-							uint shift_amount = (ti & 3) << 3;
-							key[kp] = (uchar)(packed_chars >> shift_amount);
-						} else {
-							key[kp] = g_chars0[i];
-						}
+						key[kp] = (uchar)(packed_chars >> ((ti & 3) << 3));
 					}
 				}
 			}
@@ -817,27 +813,16 @@ __kernel void md5_gen(__global uint *keys_unused,
 				} else if (i == 0) {
 					key[kp] = g_startv[iter[0]];
 				} else {
+					/* The packed table is host-saturated past each prev-row's
+					 * valid length (slots [rowcnt,256) hold the clamp fallback),
+					 * so index it directly by the simplex rank - no row-count
+					 * read, no clamp, no empty-row branch. */
 					uchar prev = key[kp - 1];
-					int avail = g_rowcnt[i * 256 + prev];
 					int ti = iter[i];
+					int block_idx = (i * 256 + prev) * 64 + (ti >> 2);
+					uint packed_chars = g_table_packed[block_idx];
 
-					if (avail > 0) {
-						if (ti >= avail)
-							ti = avail - 1;
-
-						// 1. Calculate the 32-bit block index (ti / 4)
-						int block_idx = (i * 256 + prev) * 64 + (ti >> 2);
-
-						// 2. Fetch the 32-bit block (hardware aligned, highly coalesced)
-						uint packed_chars = g_table_packed[block_idx];
-
-						// 3. Extract the specific 8-bit character (ti % 4 * 8)
-						uint shift_amount = (ti & 3) << 3;
-						key[kp] = (uchar)(packed_chars >> shift_amount);
-
-					} else {
-						key[kp] = g_chars0[i];
-					}
+					key[kp] = (uchar)(packed_chars >> ((ti & 3) << 3));
 				}
 			}
 #endif /* GEN_REGS */

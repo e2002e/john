@@ -2561,6 +2561,29 @@ static void mask_gpu_build_tables(mask_cpu_context *ctx)
 		memcpy(gpu_tabs.rowcnt + (size_t)i * 256,
 		       pos_markov_row_counts[ri], 256);
 
+		/*
+		 * Saturate each prev-row's tail so the GPU kernel can index the table
+		 * directly by the simplex rank without a separate row-count read+clamp.
+		 * The simplex ranks iter[] in [0, count-1], but a given prev may have
+		 * fewer valid Markov transitions (rowcnt <= count). The kernel used to
+		 * read gpu_tabs.rowcnt and clamp (rank -> rowcnt-1, or chars0 when the
+		 * row is empty); pre-filling slots [rowcnt, 256) with that exact fallback
+		 * value makes table[rank] correct for every rank, dropping one divergent
+		 * read per Markov position in the hot materialize. CPU consumers still
+		 * clamp first, so they read the same value and are unaffected.
+		 */
+		for (int prev = 0; prev < 256; prev++) {
+			size_t row = ((size_t)i * 256 + prev) * 256;
+			int rc = pos_markov_row_counts[ri][prev];
+			unsigned char fill = (rc > 0)
+			    ? gpu_tabs.table[row + (rc - 1)]
+			    : r->chars[0];
+			int t;
+
+			for (t = rc; t < 256; t++)
+				gpu_tabs.table[row + t] = fill;
+		}
+
 		/* Pack this position's [256][256] prev,rank->char table into
 		 * [256][64] uint32s (4 chars/word) for coalesced GPU reads. */
 		for (int prev = 0; prev < 256; prev++) {
