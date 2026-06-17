@@ -26,6 +26,12 @@ Behaviour
                     than anything known when the current slice began appears
                     mid-crack, the running John is aborted (saving its session)
                     so the newcomer is attacked straight away.
+  * COMBINE       - with --combine the per-job sweep is replaced by a per-hash-type
+                    UNION: every open job of a type is merged into one hash file and
+                    cracked in a SINGLE John run, so the keyspace is swept once for
+                    all of them instead of once per job. Founds upload per algo (the
+                    board routes each hash to its job); a job is retired once all its
+                    hashes are cracked. See process_algo_union().
 
 A list is retired (recorded in state, never revisited) only when John actually
 finishes its keyspace. Detection: John keeps a <session>.rec restore file while a
@@ -55,6 +61,11 @@ Usage
   # Both MD5 and NTLM, favouring lists we've already cracked the most of
   ./hashes_escrow_cracker.py --hash-type both --order cracked
 
+  # COMBINE: crack every open MD5 job in one merged run (one keyspace sweep for
+  # all of them), re-merging the union after each slice as jobs come and go.
+  ./hashes_escrow_cracker.py --hash-type md5 --combine \
+      --attack "--mask=?a --min-length=1 --max-length=8" --slice 1800
+
   # Single-job override: crack ONLY one job by id and exit (no sweep/scheduling).
   # The OpenCL format is auto-selected from the job's hash type.
   ./hashes_escrow_cracker.py --job-id 123456
@@ -66,6 +77,7 @@ The John OpenCL format is always chosen automatically from each job's hash type
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -136,6 +148,14 @@ def classify_job(job: dict) -> str | None:
 def john_format_for(htype: str) -> str:
     """John OpenCL format label for a hash-type key (e.g. md5 -> raw-md5-opencl)."""
     return ALGOS[htype]["john_base"] + "-opencl"
+
+
+def algo_upload_id(htype: str) -> int:
+    """Canonical algorithmId to POST founds under for a hash-type key. The founds
+    endpoint is keyed by algo (not job), so one upload covers every job of the type
+    and the board routes each hash:plaintext to whatever open job(s) contain it."""
+    ids = ALGOS[htype]["ids"]
+    return min(ids) if ids else DEFAULT_ALGO_ID
 
 log = logging.getLogger("escrow")
 
@@ -627,6 +647,200 @@ def process_job(job: dict, session, api_key: str, workdir: Path, john_bin: str,
 
 
 # --------------------------------------------------------------------------- #
+# Combine mode: one big per-algo union list, one John run per hash type
+#
+# The GPU spends ~all its time generating+hashing candidates; checking them
+# against the loaded hashes is an O(1) probe whose cost barely moves with the
+# number of hashes. Per-job runs therefore re-sweep the identical keyspace once
+# per job. Merging every open job of a type into one hash file sweeps the
+# keyspace ONCE and cracks them all together (~N x less GPU work for N jobs).
+#
+# Submission needs no per-job mapping: POST /api/founds is keyed by algo, so we
+# upload the whole per-algo pot and the board routes each hash to its job(s). A
+# hash->job map is still kept, but only to retire jobs we've fully cracked.
+# --------------------------------------------------------------------------- #
+
+def _hashes_from_text(text: str) -> set[str]:
+    """Bare lowercase 32-hex hashes from a downloaded left list (one per line)."""
+    out = set()
+    for ln in text.splitlines():
+        h = ln.strip().lower()
+        if len(h) == 32 and all(c in "0123456789abcdef" for c in h):
+            out.add(h)
+    return out
+
+
+def collect_job_hashes(jobs: list[dict], session, api_key: str, lists_dir: Path,
+                       download: bool) -> dict[int, set[str]]:
+    """Map each job id -> set of its still-left hashes, caching per-job downloads.
+
+    A cached list is reused when its line count already matches the board's
+    leftHashes (the left list IS one bare hash per unfound entry), so a stable
+    board re-poll costs no downloads. With download=False (a --restore cycle, job
+    set unchanged) we only read existing caches and never hit the network."""
+    lists_dir.mkdir(parents=True, exist_ok=True)
+    job_hashes: dict[int, set[str]] = {}
+    for job in jobs:
+        jid = job["id"]
+        cache = lists_dir / f"{jid}.txt"
+        want = _left_hashes(job)
+        fresh_enough = False
+        if cache.exists():
+            try:
+                have = sum(1 for l in cache.read_text().splitlines() if l.strip())
+                fresh_enough = (want == 0) or (have == want)
+            except Exception:
+                fresh_enough = False
+        if download and not fresh_enough and job.get("leftList"):
+            try:
+                download_left_list(session, job["leftList"], cache)
+            except Exception as exc:
+                log.warning("union: download job %s failed: %s", jid, exc)
+        if cache.exists():
+            job_hashes[jid] = _hashes_from_text(cache.read_text(errors="replace"))
+    return job_hashes
+
+
+def process_algo_union(htype: str, jobs: list[dict], session, api_key: str,
+                       workdir: Path, john_bin: str, attack: list[str],
+                       slice_seconds: int, upload_interval: int, dry_run: bool,
+                       state: State, flush_recovery: bool) -> None:
+    """Crack the union of all `jobs` (already filtered to one hash type) in a
+    single John run for up to `slice_seconds`, streaming founds to the board under
+    the type's algo id. Retires any job whose every hash is now in the pot.
+
+    Restore vs fresh start is decided on the candidate JOB-ID SET, not the exact
+    hashes: while the set is unchanged we --restore so the keyspace keeps
+    advancing (we tolerate an existing list shrinking as others crack it - at
+    worst we re-offer an already-found hash, which the board simply ignores). When
+    a job appears or disappears the union is rebuilt and John fresh-starts (the pot
+    is kept, so cracked hashes stay skipped+reported)."""
+    global _current_john
+
+    fmt = john_format_for(htype)
+    pot_re = ALGOS[htype]["pot_re"]
+    algo_id = algo_upload_id(htype)
+
+    algo_dir = (workdir / f"_union_{htype}").resolve()
+    lists_dir = algo_dir / "lists"
+    algo_dir.mkdir(parents=True, exist_ok=True)
+    hash_file = algo_dir / "left.txt"
+    pot_file = algo_dir / "union.pot"
+    delta_file = algo_dir / "delta.txt"
+    uploaded_file = algo_dir / "uploaded_hashes.txt"
+    digest_file = algo_dir / "jobset.txt"
+    sess = algo_dir / "sess"
+    rec_file = algo_dir / "sess.rec"
+
+    reap_stale_john(algo_dir, sess)
+
+    jobset_digest = hashlib.sha1(
+        ",".join(str(j["id"]) for j in sorted(jobs, key=lambda x: x["id"]))
+        .encode()).hexdigest()
+    prev_digest = digest_file.read_text().strip() if digest_file.exists() else ""
+    resuming = (not flush_recovery and rec_file.exists()
+                and jobset_digest == prev_digest and hash_file.exists())
+
+    # job->hashes for the retire check (and the union build on a fresh start).
+    # On resume the set is unchanged, so just read caches - no downloads.
+    job_hashes = collect_job_hashes(jobs, session, api_key, lists_dir,
+                                    download=not resuming)
+    union = set().union(*job_hashes.values()) if job_hashes else set()
+    n = len(union)
+    if n == 0:
+        log.info("union %s: no hashes across %d job(s)", htype, len(jobs))
+        return
+
+    if not resuming:
+        # Fresh start: write the new union, keep the pot (already-cracked stay
+        # skipped+reported), drop stale restore state so John reloads the union.
+        hash_file.write_text("\n".join(sorted(union)) + "\n")
+        for f in sorted(algo_dir.glob("sess.rec*")) + [algo_dir / "sess.log"]:
+            f.unlink(missing_ok=True)
+        digest_file.write_text(jobset_digest)
+
+    log.info("union %s: %d hashes from %d job(s)%s", htype, n, len(job_hashes),
+             " [resuming]" if resuming else "")
+
+    uploaded: set[str] = set()
+    if uploaded_file.exists():
+        uploaded = {l.strip().lower()
+                    for l in uploaded_file.read_text().splitlines() if l.strip()}
+
+    if resuming:
+        cmd = [john_bin, f"--restore={sess}"]
+    else:
+        cmd = [john_bin, f"--format={fmt}", f"--pot={pot_file}",
+               f"--session={sess}", *attack, str(hash_file)]
+    log.info("union %s: %s", htype, " ".join(cmd))
+
+    john_log = algo_dir / "john.log"
+    errlog = john_log.open("w")
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=errlog)
+    _current_john = proc
+    pidfile = algo_dir / "john.pid"
+    pidfile.write_text(str(proc.pid))
+
+    deadline = time.time() + slice_seconds if slice_seconds > 0 else None
+
+    def flush():
+        try:
+            got = flush_new_founds(session, api_key, algo_id,
+                                   read_founds_from_pot(pot_file, pot_re),
+                                   uploaded, delta_file, uploaded_file, dry_run)
+        except Exception as exc:
+            log.warning("union %s: founds upload failed (retry next flush): %s",
+                        htype, exc)
+            return
+        if got:
+            verb = "would upload" if dry_run else "uploaded"
+            log.info("union %s: %s +%d (uploaded %d/%d)", htype, verb,
+                     got, len(uploaded), n)
+
+    try:
+        while proc.poll() is None:
+            time.sleep(upload_interval)
+            flush()
+            if (deadline and time.time() > deadline) or _shutdown:
+                why = "slice up" if (deadline and time.time() > deadline) else "shutdown"
+                log.warning("union %s: %s, SIGINT (John saves session)", htype, why)
+                proc.send_signal(signal.SIGINT)
+                try:
+                    proc.wait(timeout=KILL_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    log.warning("union %s: John ignored SIGINT, killing", htype)
+                    proc.kill()
+                break
+        proc.wait()
+    finally:
+        _current_john = None
+        pidfile.unlink(missing_ok=True)
+        errlog.close()
+        flush()
+
+    try:
+        err = john_log.read_text(errors="replace")[-1000:]
+    except Exception:
+        err = ""
+    if proc.returncode not in (0, None) and err.strip():
+        log.warning("union %s: John rc=%s stderr tail: %s", htype, proc.returncode, err)
+
+    # Retire jobs whose every hash is now cracked (trims them from future unions).
+    cracked = {ln.split(":", 1)[0].lower()
+               for ln in read_founds_from_pot(pot_file, pot_re)}
+    completed = not rec_file.exists()
+    retired = 0
+    if not dry_run:
+        for jid, hs in job_hashes.items():
+            if hs and hs <= cracked and jid not in state:
+                state.mark(jid)
+                retired += 1
+    log.info("union %s: %s; %d/%d cracked this run, retired %d job(s)", htype,
+             "COMPLETE" if completed else "sliced",
+             len(cracked & union), n, retired)
+
+
+# --------------------------------------------------------------------------- #
 # Main scheduler
 # --------------------------------------------------------------------------- #
 
@@ -717,6 +931,67 @@ def scheduler(session, api_key: str, state: State, workdir: Path, john_bin: str,
         # Loop straight back - no idle wait when work is present.
 
 
+def scheduler_combine(session, api_key: str, state: State, workdir: Path,
+                      john_bin: str, attack: list[str], selected: set[str],
+                      min_hashes: int, slice_seconds: int, upload_interval: int,
+                      idle_interval: int, once: bool, dry_run: bool,
+                      flush_recovery: bool = False) -> None:
+    """Union scheduler: each cycle re-polls the board and gives each selected hash
+    type one time-slice as a single merged John run (process_algo_union), so all
+    of a type's jobs are cracked in one keyspace sweep. New/finished jobs are
+    picked up at the next slice boundary (the union is rebuilt then).
+
+    --order and --preempt-interval do not apply here (there is nothing to choose
+    between or preempt - every job of a type is worked at once). --flush-recovery
+    only forces a from-scratch restart on the FIRST cycle; later cycles --restore
+    while the job set is unchanged so the keyspace keeps advancing."""
+    first_flush = flush_recovery
+    while not _shutdown:
+        try:
+            jobs = fetch_jobs(session, api_key)
+        except Exception as exc:
+            log.error("board poll failed: %s", exc)
+            if once or _shutdown:
+                return
+            time.sleep(idle_interval)
+            continue
+
+        worked = False
+        for htype in sorted(selected):
+            if _shutdown:
+                break
+            cands = [j for j in jobs
+                     if classify_job(j) == htype
+                     and _left_hashes(j) >= min_hashes
+                     and j["id"] not in state]
+            if not cands:
+                continue
+            worked = True
+            total_left = sum(_left_hashes(j) for j in cands)
+            log.info("union %s: %d job(s), %d hashes left on board", htype,
+                     len(cands), total_left)
+            try:
+                process_algo_union(htype, cands, session, api_key, workdir,
+                                   john_bin, attack, slice_seconds,
+                                   upload_interval, dry_run, state,
+                                   flush_recovery=first_flush)
+            except requests.HTTPError as exc:
+                log.error("union %s HTTP error: %s", htype, exc)
+            except Exception as exc:
+                log.exception("union %s failed: %s", htype, exc)
+        first_flush = False   # only the first cycle honours --flush-recovery
+
+        if not worked:
+            if _shutdown or once:
+                return
+            log.info("no work available for hash type(s): %s",
+                     ", ".join(sorted(selected)))
+            time.sleep(idle_interval)
+            continue
+        if once:
+            return   # one slice per type, then stop (use --slice 0 to drain fully)
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -777,6 +1052,16 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "board is re-polled after every slice (default: 300)")
 
     # --- modes ----------------------------------------------------------- #
+    p.add_argument("--combine", action="store_true",
+                   help="UNION mode: merge ALL open jobs of each hash type into "
+                        "one big list and crack them in a single John run per type "
+                        "(one keyspace sweep for every hash of that type, instead "
+                        "of one sweep per job). Founds are uploaded per algo (the "
+                        "board routes each hash to its job), and a job is retired "
+                        "once we've cracked all of its hashes. --order and "
+                        "--preempt-interval are ignored in this mode. Overrides "
+                        "the per-job newest-first sweep; ignored when --job-id is "
+                        "given.")
     p.add_argument("--job-id", type=int, default=None,
                    help="crack ONLY this one escrow job (fetched by id) and exit; "
                         "overrides the default newest-first board sweep (no "
@@ -851,6 +1136,22 @@ def main(argv=None) -> int:
         except Exception as exc:
             log.exception("job %s failed: %s", args.job_id, exc)
             return 1
+        return 0
+
+    # Union mode: one merged John run per hash type instead of the per-job sweep.
+    if args.combine:
+        if not args.once:
+            log.info("daemon: COMBINE union mode over hash type(s) [%s], one "
+                     "merged run per type, %ds slice each (idle re-poll every %ds, "
+                     "ctrl-c to stop)", ", ".join(sorted(selected)),
+                     args.slice_seconds, args.idle_interval)
+        try:
+            scheduler_combine(session, args.api_key, state, args.workdir, args.john,
+                              attack, selected, args.min_hashes, args.slice_seconds,
+                              args.upload_interval, args.idle_interval, args.once,
+                              args.dry_run, flush_recovery=args.flush_recovery)
+        except KeyboardInterrupt:
+            log.info("bye")
         return 0
 
     if not args.once:
