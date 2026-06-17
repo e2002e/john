@@ -388,6 +388,22 @@ __kernel void md5(__global uint *keys,
 #endif
 
 /*
+ * Local-memory Markov table (build with -D GEN_LOCALTAB plus GEN_LTAB_POS /
+ * GEN_LTAB_NC / GEN_LTAB_BASE). When the run is a single contiguous-range
+ * charset (?l/?d/?u/contiguous custom), all-Markov, with contiguous active
+ * positions, the host enables this and the kernel stages a compact
+ * [npos][nc][nc] prev,rank->char table into local memory once per work-group.
+ * The hot materialize read then hits local (~tens of cycles) instead of the
+ * global packed table (L2, hundreds of cycles in the serial Markov chain). The
+ * prev char is mapped to its dense row by (prev - GEN_LTAB_BASE), valid because
+ * every prev is a charset byte in [BASE, BASE+NC). The host only sets this when
+ * npos*nc*nc fits the local budget, so e.g. ?a (nc=95) falls back to global.
+ */
+#ifdef GEN_LOCALTAB
+#define GEN_LTAB_SIZE (GEN_LTAB_POS * GEN_LTAB_NC * GEN_LTAB_NC)
+#endif
+
+/*
  * Register-resident generator variant (build with -D GEN_REGS). The per-candidate
  * state machine (full-unrank, simplex advance, materialize) is rewritten as
  * fully-unrolled, compile-time-indexed sweeps of width GEN_REG_MAX, so iter[]
@@ -463,6 +479,25 @@ __kernel void md5_gen(__global uint *keys_unused,
 	for (i = lid; i < BITMAP_SHIFT * SELECT_CMP_STEPS; i += lws)
 		s_bitmaps[i] = bitmaps[i];
 
+	barrier(CLK_LOCAL_MEM_FENCE);
+#endif
+
+#ifdef GEN_LOCALTAB
+	/* Stage the compact [npos][nc][nc] Markov table into local memory. Each
+	 * entry (pos, pidx, ti) is table[pos][BASE+pidx][ti], read from the packed
+	 * global table (4 chars/word) and unpacked to a byte. Cooperative fill +
+	 * barrier, paid once per work-group. */
+	uint plid = get_local_id(0), plws = get_local_size(0);
+	__local uchar Ltab[GEN_LTAB_SIZE];
+	for (uint t = plid; t < GEN_LTAB_SIZE; t += plws) {
+		uint pos = t / (GEN_LTAB_NC * GEN_LTAB_NC);
+		uint rem = t - pos * (GEN_LTAB_NC * GEN_LTAB_NC);
+		uint pidx = rem / GEN_LTAB_NC;
+		uint tti = rem - pidx * GEN_LTAB_NC;
+		uchar prevc = (uchar)(GEN_LTAB_BASE + pidx);
+		uint pk = g_table_packed[(pos * 256 + prevc) * 64 + (tti >> 2)];
+		Ltab[t] = (uchar)(pk >> ((tti & 3) << 3));
+	}
 	barrier(CLK_LOCAL_MEM_FENCE);
 #endif
 
@@ -819,10 +854,15 @@ __kernel void md5_gen(__global uint *keys_unused,
 					 * read, no clamp, no empty-row branch. */
 					uchar prev = key[kp - 1];
 					int ti = iter[i];
+#ifdef GEN_LOCALTAB
+					/* Local compact table: dense prev row = prev - BASE. */
+					key[kp] = Ltab[(i * GEN_LTAB_NC + (prev - GEN_LTAB_BASE)) * GEN_LTAB_NC + ti];
+#else
 					int block_idx = (i * 256 + prev) * 64 + (ti >> 2);
 					uint packed_chars = g_table_packed[block_idx];
 
 					key[kp] = (uchar)(packed_chars >> ((ti & 3) << 3));
+#endif
 				}
 			}
 #endif /* GEN_REGS */

@@ -93,6 +93,10 @@ static void gen_release_all(void);
  * (releases+recreates) crypt_kernel mid-launch when the hash table shrinks -
  * a rebuild wipes all kernel args and the generic re-bind only covers 0-9. */
 static int      g_cur_gen = 0;       /* a gen launch is in flight */
+/* mask_gpu_serial the gen kernel was last (re)built for. The reset() build
+ * predates mask_gpu_build(), so the GEN_LOCALTAB decision is redone here once
+ * the tables exist. ~0u forces the first gen launch to rebuild. */
+static unsigned g_built_serial = ~0u;
 static cl_ulong g_cur_gbase;
 static cl_uint  g_cur_gcount;
 static void set_kernel_args_gen(void);
@@ -330,6 +334,35 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 
 		snprintf(ro, sizeof(ro), " -D GEN_REGS -D GEN_REG_MAX=%u", gen_reg_max);
 		strcat(build_opts, ro);
+	}
+
+	/*
+	 * Stage the compact Markov table in local memory when the mask is eligible
+	 * (mask.c sets ltab_ok: single contiguous-range charset, all-Markov,
+	 * contiguous positions) and the [npos][nc][nc] table fits a conservative
+	 * local budget. Not combined with the (slower) register-resident generator.
+	 * Eligibility comes from gpu_tabs, which is finalized once the mask template
+	 * is built; on a build that precedes that (npos==0) it simply stays off and
+	 * the kernel uses the global table.
+	 */
+	if (gen_active && !gen_reg_max) {
+		const mask_gpu_tables *t = mask_gpu_get_tables();
+		size_t bytes = t->ltab_ok
+		    ? (size_t)t->npos * t->ltab_nc * t->ltab_nc : 0;
+
+		if (getenv("GEN_LTAB_DBG"))
+			fprintf(stderr, "[GEN_LTAB] ltab_ok=%d npos=%d nc=%d base=%d "
+			    "bytes=%zu\n", t->ltab_ok, t->npos, t->ltab_nc,
+			    t->ltab_base, bytes);
+
+		if (t->ltab_ok && bytes > 0 && bytes <= 16384 && !getenv("JOHN_NO_LTAB")) {
+			char lo[112];
+
+			snprintf(lo, sizeof(lo), " -D GEN_LOCALTAB -D GEN_LTAB_POS=%d"
+			    " -D GEN_LTAB_NC=%d -D GEN_LTAB_BASE=%d",
+			    t->npos, t->ltab_nc, t->ltab_base);
+			strcat(build_opts, lo);
+		}
 	}
 
 	opencl_build_kernel("$JOHN/opencl/md5_kernel.cl", gpu_id, build_opts, 0);
@@ -700,6 +733,37 @@ static int gen_crypt(int *pcount, struct db_salt *salt)
 
 	gen_upload_tables();
 	gen_upload_plan();
+
+	/*
+	 * The kernel built in reset() predates mask_gpu_build(), so its GEN_LOCALTAB
+	 * decision was made with an empty table (npos==0 -> off). Now that gpu_tabs
+	 * is finalized, rebuild once per mask config so an eligible mask actually
+	 * gets the local-table kernel. This mirrors reset()'s build+arm sequence:
+	 * prepare_table() regenerates the host bitmap/offset/hash arrays that
+	 * create_clobj() re-uploads and rebinds (args 3-9); the kpc key buffers from
+	 * auto_tune stay valid and are rebound via set_kernel_args_kpc(); the gen
+	 * args (10-23) are set below. Guarded on npos>0 so the no-op auto-tune passes
+	 * (tables not built yet, salt NULL) don't churn the kernel.
+	 */
+	if (salt && mask_gpu_get_tables()->npos > 0 &&
+	    g_built_serial != mask_gpu_serial) {
+		/*
+		 * Same order as reset(): release first so create_clobj()'s internal
+		 * release is a no-op and the bitmaps select_bitmap() allocates below
+		 * survive to crobj's upload. Keep the kpc key buffers (rebound, not
+		 * released) so set_kernel_args_kpc() re-binds them to the new kernel.
+		 */
+		release_clobj();
+		ocl_hc_128_prepare_table(salt);
+		init_kernel(ocl_hc_num_loaded_hashes,
+		            ocl_hc_128_select_bitmap(ocl_hc_num_loaded_hashes));
+		create_clobj();
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 3,
+		    sizeof(buffer_int_keys), &buffer_int_keys), "rebuild arg3");
+		set_kernel_args_kpc();
+		g_built_serial = mask_gpu_serial;
+	}
+
 	/* Remember this launch so set_kernel_args() can re-bind the gen args if
 	 * extract_info rebuilds the kernel mid-launch. */
 	g_cur_gen = 1;

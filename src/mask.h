@@ -170,6 +170,17 @@ typedef struct {
 	unsigned char *rowcnt;                 /* [npos][256] prev->#valid          */
 	unsigned char *littmpl;                /* literal template (max length)     */
 	int littmpl_len;                       /* == eff_maxlength template length  */
+	/*
+	 * Local-memory Markov table eligibility (consumed by the GPU format to set
+	 * -D GEN_LOCALTAB). Set when every active position is Markov (cstart==0),
+	 * shares one charset that is a contiguous byte range [ltab_base,
+	 * ltab_base+ltab_nc), and the active positions are contiguous in the key so
+	 * each Markov prev char is a charset byte. The format additionally checks
+	 * the compact npos*nc*nc table fits the device local budget.
+	 */
+	int ltab_ok;
+	int ltab_base;                         /* min charset byte (dense prev base) */
+	int ltab_nc;                           /* charset size (== count, all pos)   */
 } mask_gpu_tables;
 
 /* Per-length-loop unranking context (suffix-DP over the simplex). */

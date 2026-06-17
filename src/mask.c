@@ -2546,6 +2546,9 @@ static void mask_gpu_build_tables(mask_cpu_context *ctx)
 	gpu_tabs.startv = mem_alloc((size_t)npos * 256);
 	gpu_tabs.rowcnt = mem_alloc((size_t)npos * 256);
 
+	/* Local-table eligibility, accumulated across positions (see mask.h). */
+	int ltab_ok = (npos >= 1), ltab_base = -1, ltab_nc = -1;
+
 	for (i = 0; i < npos; i++) {
 		int ri = ctx->active_idx[i];
 		mask_range *r = &ctx->ranges[ri];
@@ -2554,6 +2557,33 @@ static void mask_gpu_build_tables(mask_cpu_context *ctx)
 		gpu_tabs.count[i]  = r->count;
 		gpu_tabs.cstart[i] = r->start;
 		gpu_tabs.chars0[i] = r->chars[0];
+
+		/*
+		 * Eligible only on the Markov path (r->start==0, the one that reads the
+		 * table) with a charset whose VALUES form a contiguous range, identical
+		 * across every position, and with contiguous active positions so each
+		 * Markov prev char is a charset byte. r->chars[] is probability-sorted,
+		 * so derive the range from its min/max, not chars[0].
+		 */
+		{
+			int cmin = 255, cmax = 0, c;
+
+			for (c = 0; c < r->count; c++) {
+				if (r->chars[c] < cmin) cmin = r->chars[c];
+				if (r->chars[c] > cmax) cmax = r->chars[c];
+			}
+			if (r->start != 0 || cmax - cmin + 1 != r->count)
+				ltab_ok = 0;
+			if (i == 0) {
+				ltab_base = cmin;
+				ltab_nc = r->count;
+			} else {
+				if (cmin != ltab_base || r->count != ltab_nc)
+					ltab_ok = 0;
+				if (gpu_tabs.keypos[i] != gpu_tabs.keypos[i - 1] + 1)
+					ltab_ok = 0;
+			}
+		}
 		memcpy(gpu_tabs.table  + (size_t)i * 256 * 256,
 		       pos_markov_table[ri], 256 * 256);
 		memcpy(gpu_tabs.startv + (size_t)i * 256,
@@ -2602,6 +2632,10 @@ static void mask_gpu_build_tables(mask_cpu_context *ctx)
 			}
 		}
 	}
+
+	gpu_tabs.ltab_ok   = ltab_ok;
+	gpu_tabs.ltab_base = ltab_base;
+	gpu_tabs.ltab_nc   = ltab_nc;
 
 	gpu_tabs.littmpl_len = maxL;
 	gpu_tabs.littmpl = mem_calloc(maxL > 0 ? maxL : 1, 1);
