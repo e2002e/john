@@ -841,30 +841,34 @@ __kernel void md5_gen(__global uint *keys_unused,
 			 * left of mfrom are unchanged, so key[kp-1] feeding mfrom is valid. */
 			for (i = mfrom; i < glimit; i++) {
 				int kp = g_keypos[i];
-#ifdef GEN_MARGINAL
-				/* Marginal-Markov materialize: each position draws from its own
-				 * probability-sorted charset (g_startv[i]) independent of the
-				 * previous char, so positions materialize in parallel from the
-				 * broadcast __constant startv instead of walking the serial
-				 * conditional-table chain (key[kp-1] -> prev-row read) - the main
-				 * throughput lever. iter[] still arrives in exact rank-sum (K)
-				 * order, so candidates stay best-first by K; only the per-position
-				 * probabilities drop from conditional P(c|prev) to marginal P(c).
-				 * startv[i] is an injective rank->char over the full charset, so
-				 * this covers the whole keyspace with no dup/saturation fallback. */
-				key[kp] = g_startv[(i << 8) + iter[i]];
-#else
 				uchar cs = g_cstart[i];
 
 				if (cs) {
 					key[kp] = cs + iter[i];
 				} else if (i == 0) {
 					key[kp] = g_startv[iter[0]];
+#ifdef GEN_HEAD
+				/* Hybrid head/tail materialize (JOHN_GEN_HEAD=H; marginal == H 0):
+				 * positions i >= H draw from their own probability-sorted charset
+				 * g_startv[i] independent of the previous char, dropping the serial
+				 * conditional-table read (key[kp-1] -> prev-row) on the tail - the
+				 * hot re-materialize path, since the simplex carry changes the
+				 * rightmost wheels most often, and the main throughput lever.
+				 * Positions 1..H-1 keep the full conditional bigram model P(c|prev).
+				 * iter[] still arrives in exact rank-sum (K) order, so candidates
+				 * stay best-first by K; H trades tail bigram precision for a shorter
+				 * dependent-read chain. startv[i] is an injective rank->char over the
+				 * full charset, so the keyspace is fully covered with no
+				 * dup/saturation fallback. */
+				} else if (i >= GEN_HEAD) {
+					key[kp] = g_startv[(i << 8) + iter[i]];
+#endif
 				} else {
-					/* The packed table is host-saturated past each prev-row's
-					 * valid length (slots [rowcnt,256) hold the clamp fallback),
-					 * so index it directly by the simplex rank - no row-count
-					 * read, no clamp, no empty-row branch. */
+					/* Conditional bigram materialize. The packed table is
+					 * host-saturated past each prev-row's valid length (slots
+					 * [rowcnt,256) hold the clamp fallback), so index it directly by
+					 * the simplex rank - no row-count read, no clamp, no empty-row
+					 * branch. */
 					uchar prev = key[kp - 1];
 					int ti = iter[i];
 #ifdef GEN_LOCALTAB
@@ -877,7 +881,6 @@ __kernel void md5_gen(__global uint *keys_unused,
 					key[kp] = (uchar)(packed_chars >> ((ti & 3) << 3));
 #endif
 				}
-#endif /* GEN_MARGINAL */
 			}
 #endif /* GEN_REGS */
 
