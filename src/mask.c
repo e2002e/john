@@ -2280,6 +2280,11 @@ static uint64_t divide_work(mask_cpu_context *cpu_mask_ctx)
  * generator, used by the format's get_key() to reconstruct cracked plaintext.
  */
 int mask_gpu_gen = 0;
+/* Marginal-Markov materialize (JOHN_GEN_MARGINAL): mirror of the GPU kernel's
+ * -D GEN_MARGINAL path. The iter[] simplex point is still K-ordered, but each
+ * position is materialized from its own probability-sorted charset (startv[i])
+ * independent of the previous char. Set in mask_gpu_build_tables(). */
+static int mask_gpu_marginal = 0;
 int mask_gpu_max_loop = -1;
 /* Bumped whenever the upload-ready tables are rebuilt; the format re-uploads
  * when it sees a new value. */
@@ -2533,6 +2538,8 @@ static void mask_gpu_build_tables(mask_cpu_context *ctx)
 	int npos = ctx->active_count;
 	int i, p, maxL = options.eff_maxlength;
 
+	mask_gpu_marginal = (getenv("JOHN_GEN_MARGINAL") != NULL);
+
 	MEM_FREE(gpu_tabs.table);
 	MEM_FREE(gpu_tabs.uint_table);
 	MEM_FREE(gpu_tabs.startv);
@@ -2754,6 +2761,18 @@ void mask_gpu_unrank_key(int loop, uint64_t g, char *out, int *out_len)
 		}
 		iter[i] = vv;
 		remaining_k -= vv;
+	}
+
+	/* Materialize left-to-right. In marginal mode each position draws from its
+	 * own probability-sorted charset (startv[i]) independent of the previous
+	 * char - the exact mirror of the kernel's -D GEN_MARGINAL path. */
+	if (mask_gpu_marginal) {
+		for (i = 0; i < limit; i++) {
+			int kp = gpu_tabs.keypos[i];
+
+			out[kp] = (char)gpu_tabs.startv[(size_t)i * 256 + iter[i]];
+		}
+		return;
 	}
 
 	/* Materialize left-to-right through the Markov tables. */

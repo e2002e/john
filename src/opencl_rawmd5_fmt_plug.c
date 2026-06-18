@@ -86,6 +86,14 @@ static cl_uint gen_R = 256;
  * (compile-time GEN_REG_MAX). Set from JOHN_GEN_REGS in reset(). The host then
  * refuses any length-loop whose position count exceeds it (gen_upload_plan). */
 static cl_uint gen_reg_max = 0;
+/* >0 (set from JOHN_GEN_MARGINAL in reset()) builds the marginal-Markov gen kernel
+ * (-D GEN_MARGINAL): the suffix-DP unrank + simplex carry still emit candidates in
+ * exact rank-sum (K) order, but each position is materialized from its own
+ * probability-sorted charset (g_startv[i]) independent of the previous char,
+ * dropping the serial conditional-table dependency chain for throughput. Mutually
+ * exclusive with the register-resident (GEN_REGS) and local-table (GEN_LOCALTAB)
+ * builds, which both exist only to speed up the conditional table read. */
+static int gen_marginal = 0;
 static void gen_release_all(void);
 
 /* Parameters of the gen launch currently in flight. Stored so set_kernel_args()
@@ -329,7 +337,10 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 		strcat(build_opts, go);
 	}
 
-	if (gen_active && gen_reg_max) {
+	if (gen_active && gen_marginal)
+		strcat(build_opts, " -D GEN_MARGINAL");
+
+	if (gen_active && gen_reg_max && !gen_marginal) {
 		char ro[64];
 
 		snprintf(ro, sizeof(ro), " -D GEN_REGS -D GEN_REG_MAX=%u", gen_reg_max);
@@ -345,7 +356,7 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 	 * is built; on a build that precedes that (npos==0) it simply stays off and
 	 * the kernel uses the global table.
 	 */
-	if (gen_active && !gen_reg_max) {
+	if (gen_active && !gen_reg_max && !gen_marginal) {
 		const mask_gpu_tables *t = mask_gpu_get_tables();
 		size_t bytes = t->ltab_ok
 		    ? (size_t)t->npos * t->ltab_nc * t->ltab_nc : 0;
@@ -1055,6 +1066,13 @@ static void reset(struct db_main *db)
 
 		gen_reg_max = e ? (cl_uint)(v >= 2 ? v : 16) : 0;
 	}
+
+	/* JOHN_GEN_MARGINAL selects the marginal-Markov generator (throughput over
+	 * conditional-Markov ordering). It owns the materialize, so force off the
+	 * regs/localtab variants that only accelerate the conditional table. */
+	gen_marginal = (getenv("JOHN_GEN_MARGINAL") != NULL);
+	if (gen_marginal)
+		gen_reg_max = 0;
 
 	ocl_hc_num_loaded_hashes = db->salts->count;
 	ocl_hc_128_prepare_table(db->salts);

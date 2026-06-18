@@ -841,6 +841,19 @@ __kernel void md5_gen(__global uint *keys_unused,
 			 * left of mfrom are unchanged, so key[kp-1] feeding mfrom is valid. */
 			for (i = mfrom; i < glimit; i++) {
 				int kp = g_keypos[i];
+#ifdef GEN_MARGINAL
+				/* Marginal-Markov materialize: each position draws from its own
+				 * probability-sorted charset (g_startv[i]) independent of the
+				 * previous char, so positions materialize in parallel from the
+				 * broadcast __constant startv instead of walking the serial
+				 * conditional-table chain (key[kp-1] -> prev-row read) - the main
+				 * throughput lever. iter[] still arrives in exact rank-sum (K)
+				 * order, so candidates stay best-first by K; only the per-position
+				 * probabilities drop from conditional P(c|prev) to marginal P(c).
+				 * startv[i] is an injective rank->char over the full charset, so
+				 * this covers the whole keyspace with no dup/saturation fallback. */
+				key[kp] = g_startv[(i << 8) + iter[i]];
+#else
 				uchar cs = g_cstart[i];
 
 				if (cs) {
@@ -864,6 +877,7 @@ __kernel void md5_gen(__global uint *keys_unused,
 					key[kp] = (uchar)(packed_chars >> ((ti & 3) << 3));
 #endif
 				}
+#endif /* GEN_MARGINAL */
 			}
 #endif /* GEN_REGS */
 
