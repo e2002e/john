@@ -31,6 +31,16 @@
 #include "mask_ext.h"
 #include "markov_tables.h"
 
+/* Fallbacks in case an older markov_tables.h (without quantized levels) is in
+ * use. The magnitude-threshold feature additionally needs markov_start_level[]
+ * and markov_table_level[][] which only a regenerated header provides. */
+#ifndef MARKOV_MAXLEVEL
+#define MARKOV_MAXLEVEL 255
+#endif
+#ifndef MARKOV_LEVEL_SCALE
+#define MARKOV_LEVEL_SCALE 16
+#endif
+
 //#define MASK_DEBUG
 
 extern void wordlist_hybrid_fix_state(void);
@@ -63,6 +73,16 @@ static unsigned char pos_markov_start[MAX_NUM_MASK_PLHDR][256];
 /* Valid transitions per (range, prev) never exceeds the range's char count
  * (<= 255), so a byte is enough; quarters the footprint of this table. */
 static unsigned char pos_markov_row_counts[MAX_NUM_MASK_PLHDR][256];
+
+/* Thresholded simplex wheel ceiling per position (see JOHN_GEN_MAXLEVEL /
+ * JOHN_GEN_MINP). Without a threshold both equal the range char count, so the
+ * simplex enumerates the full keyspace exactly as before. With a threshold the
+ * ceiling shrinks to the largest number of above-cutoff chars any context keeps
+ * at that position, which is what actually contracts the keyspace and the
+ * advance scan. _start applies to the leftmost (start-node) position, _trans to
+ * interior (transition) positions. */
+static unsigned char pos_markov_start_ceiling[MAX_NUM_MASK_PLHDR];
+static unsigned char pos_markov_trans_ceiling[MAX_NUM_MASK_PLHDR];
 
 /*
  * Per-length-loop hoisted ("struct of arrays") view of the active ranges.
@@ -1444,6 +1464,40 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 	}
 	cpu_mask_ctx->cpu_count = cpu_mask_ctx->active_count;
 
+	/* Probability-magnitude threshold (OMEN-style level cutoff), applied as a
+	 * UNIFORM per-position char count so the GPU gen simplex stays dup-free.
+	 *
+	 * Each Markov char carries a quantized -log2(P) "level" (low = probable).
+	 * A naive per-CONTEXT cutoff (keep chars with level<=cutoff given prev_char)
+	 * makes the fan-out jagged, which a fixed-wheel simplex can only cover by
+	 * clamping the unused top ranks -> 50-70% duplicate keys (measured). So we
+	 * instead derive a single per-position count T = how many chars clear the
+	 * cutoff in the MARGINAL (position-0 / start) distribution, and cap every
+	 * context's wheel to T (<= the smallest in-charset fan-out, so rank<rowcnt
+	 * always -> no clamp -> zero duplicates). Within the kept top-T the
+	 * conditional best-first order is preserved. This is the only magnitude
+	 * threshold a product-space simplex can enumerate dup-free on-GPU; a true
+	 * per-context (jagged) cutoff needs a variable-radix trie / capped unrank
+	 * (~100x slower here) and is left to the host-banded B_EXACT path.
+	 * Default = MARKOV_MAXLEVEL: no pruning, byte-identical to before.
+	 *   JOHN_GEN_MAXLEVEL=<0..255>  direct level cutoff
+	 *   JOHN_GEN_MINP=<prob>        marginal probability floor -> level */
+	int gen_level_cutoff = MARKOV_MAXLEVEL;
+	{
+		const char *ml = getenv("JOHN_GEN_MAXLEVEL");
+		const char *mp = getenv("JOHN_GEN_MINP");
+		if (ml && *ml) {
+			int v = atoi(ml);
+			gen_level_cutoff = v < 0 ? 0 : (v > MARKOV_MAXLEVEL ? MARKOV_MAXLEVEL : v);
+		} else if (mp && *mp) {
+			double tau = atof(mp);
+			if (tau > 0.0 && tau <= 1.0) {
+				int v = (int)(-log2(tau) * MARKOV_LEVEL_SCALE + 0.5);
+				gen_level_cutoff = v < 0 ? 0 : (v > MARKOV_MAXLEVEL ? MARKOV_MAXLEVEL : v);
+			}
+		}
+	}
+
 	/* Precompute filtered Markov tables for O(1) lookup in the hot loop */
 	for (i = 0; i < cpu_mask_ctx->active_count; i++) {
 		int ri = cpu_mask_ctx->active_idx[i];
@@ -1451,26 +1505,44 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 		int valid_idx;
 		int m, prev;
 
-		// 1. Build filtered start nodes for this position
+		// 1. Build filtered start nodes for this position (level-thresholded).
+		//    valid_idx > 0 guard keeps the single most probable in-charset char
+		//    even if it exceeds the cutoff, so a position is never left empty.
 		valid_idx = 0;
 		for (m = 0; m < 256; m++) {
 			unsigned char cand = markov_start_nodes[m];
-			if (memchr((const char*)r->chars, cand, r->count)) {
-				pos_markov_start[ri][valid_idx++] = cand;
-			}
+			if (!memchr((const char*)r->chars, cand, r->count))
+				continue;
+			if (markov_start_level[m] > gen_level_cutoff && valid_idx > 0)
+				break;
+			pos_markov_start[ri][valid_idx++] = cand;
 		}
+		pos_markov_start_ceiling[ri] = valid_idx;
 
-		// 2. Build filtered transition table AND track row counts for this position
+		// 2. Build the FULL in-charset transition table (conditional order, NOT
+		//    per-context pruned) and track the minimum in-charset fan-out over
+		//    all contexts. Leaving the table full keeps every context's rowcnt
+		//    uniform, so the uniform wheel cap below never clamps -> dup-free.
+		int min_rowcnt = 256;
 		for (prev = 0; prev < 256; prev++) {
 			valid_idx = 0;
 			for (m = 0; m < 256; m++) {
 				unsigned char cand = markov_table[prev][m];
-				if (memchr((const char*)r->chars, cand, r->count)) {
+				if (memchr((const char*)r->chars, cand, r->count))
 					pos_markov_table[ri][prev][valid_idx++] = cand;
-				}
 			}
-			// Store the exact count of valid options available for this specific 'prev' context
 			pos_markov_row_counts[ri][prev] = valid_idx;
+			if (valid_idx < min_rowcnt)
+				min_rowcnt = valid_idx;
+		}
+		/* Uniform dup-free wheel ceiling: T = marginal-level kept count, capped
+		 * to the smallest in-charset fan-out so rank < rowcnt in EVERY context
+		 * (no clamp, no duplicates). T < 1 can't happen (start guard keeps >=1). */
+		{
+			int T = pos_markov_start_ceiling[ri];
+			if (T > min_rowcnt) T = min_rowcnt;
+			if (T < 1) T = 1;
+			pos_markov_trans_ceiling[ri] = T;
 		}
 	}
 }
@@ -1717,7 +1789,14 @@ static inline void prepare_loop_cache(mask_cpu_context * __restrict__ ctx, int l
 		mask_range *r = &ranges[ri];
 		lc_kp[i]        = r->pos + r->offset;
 		lc_start[i]     = r->start;
-		lc_count[i]     = r->count;
+		/* Arithmetic ranges (r->start != 0) aren't Markov, so keep the full
+		 * count. Markov positions use the level-thresholded wheel ceiling: the
+		 * leftmost active position (i == 0) is materialized from the start-node
+		 * table, the rest from the transition table — match each path's ceiling.
+		 * With no threshold both ceilings equal r->count (identical behavior). */
+		lc_count[i]     = r->start ? r->count
+		                  : (i == 0 ? pos_markov_start_ceiling[ri]
+		                            : pos_markov_trans_ceiling[ri]);
 		lc_chars0[i]    = r->chars[0];
 		lc_iter[i]      = &r->iter[loop];
 		lc_table[i]     = pos_markov_table[ri];
