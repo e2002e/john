@@ -240,6 +240,17 @@ typedef struct {
 	uint64_t total;            /* node-local candidates, all lengths */
 	uint64_t suf_total;        /* elements in the concatenated suf   */
 	const mask_gpu_seg *seg;   /* nseg segments in virtual order      */
+	/*
+	 * Odometer-shell deepening mode (JOHN_GEN_DEEPEN). When set, each segment is
+	 * a magnitude-threshold "sub-box": a plain mixed-radix odometer over per-
+	 * position rank ranges [lo,lo+radix) instead of a rank-sum simplex slice.
+	 * seg->suf_off is reused as the element offset of that segment's bounds into
+	 * boxbounds, laid out per segment as lo[0..limit) then radix[0..limit) (uchar,
+	 * ranks < 256). suf/max_k/ksize are unused in this mode.
+	 */
+	int odometer;
+	const unsigned char *boxbounds; /* [boxbounds_n] lo/radix pairs, see above */
+	uint64_t boxbounds_n;
 } mask_gpu_plan;
 
 extern const mask_gpu_plan *mask_gpu_get_plan(void);

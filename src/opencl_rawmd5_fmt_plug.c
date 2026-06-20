@@ -59,7 +59,8 @@ static int static_gpu_locations[MASK_FMT_INT_PLHDR];
 
 /* GPU K-ordered generation state */
 static cl_mem g_buf_suf, g_buf_table, g_buf_startv, g_buf_rowcnt, g_buf_littmpl,
-              g_buf_keypos, g_buf_count, g_buf_cstart, g_buf_chars0, g_buf_segs;
+              g_buf_keypos, g_buf_count, g_buf_cstart, g_buf_chars0, g_buf_segs,
+              g_buf_boxbounds;   /* odometer-shell per-seg lo/radix bounds (arg 24) */
 static unsigned g_uploaded_serial;       /* mask_gpu_serial of last table upload  */
 static unsigned g_uploaded_plan_serial;  /* mask_gpu_serial of last plan upload    */
 static cl_uint g_nseg;                    /* segments in the uploaded plan          */
@@ -96,6 +97,12 @@ static cl_uint gen_reg_max = 0;
  * register-resident (GEN_REGS) and local-table (GEN_LOCALTAB) builds, which both
  * exist only to speed up the conditional table read. */
 static int gen_head = -1;
+/* >0 (JOHN_GEN_DEEPEN) builds the odometer-shell deepening gen kernel
+ * (-D GEN_ODOMETER): each segment is a magnitude-threshold sub-box enumerated by a
+ * plain mixed-radix odometer over per-position rank ranges instead of the rank-sum
+ * simplex, so the GPU runs divergence-free (~odometer speed) while the host emits
+ * the sub-boxes most-probable-band first. Mutually exclusive with GEN_REGS. */
+static int gen_deepen = 0;
 static void gen_release_all(void);
 
 /* Parameters of the gen launch currently in flight. Stored so set_kernel_args()
@@ -346,12 +353,18 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 		strcat(build_opts, ho);
 	}
 
-	if (gen_active && gen_reg_max && gen_head < 0) {
+	if (gen_active && gen_reg_max && gen_head < 0 && !gen_deepen) {
 		char ro[64];
 
 		snprintf(ro, sizeof(ro), " -D GEN_REGS -D GEN_REG_MAX=%u", gen_reg_max);
 		strcat(build_opts, ro);
 	}
+
+	/* Odometer-shell deepening: divergence-free mixed-radix enumeration of
+	 * magnitude sub-boxes (see gen_deepen). Owns the index->iter step, so it sits
+	 * in the non-REGS materialize path; force GEN_REGS off (done in reset). */
+	if (gen_active && gen_deepen)
+		strcat(build_opts, " -D GEN_ODOMETER");
 
 	/*
 	 * Stage the compact Markov table in local memory when the mask is eligible
@@ -362,7 +375,7 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 	 * is built; on a build that precedes that (npos==0) it simply stays off and
 	 * the kernel uses the global table.
 	 */
-	if (gen_active && !gen_reg_max && gen_head < 0) {
+	if (gen_active && !gen_reg_max && gen_head < 0 && !gen_deepen) {
 		const mask_gpu_tables *t = mask_gpu_get_tables();
 		size_t bytes = t->ltab_ok
 		    ? (size_t)t->npos * t->ltab_nc * t->ltab_nc : 0;
@@ -623,6 +636,7 @@ static void gen_release_all(void)
 	gen_release_buf(&g_buf_cstart);
 	gen_release_buf(&g_buf_chars0);
 	gen_release_buf(&g_buf_segs);
+	gen_release_buf(&g_buf_boxbounds);
 	g_uploaded_serial = 0;
 	g_uploaded_plan_serial = 0;
 }
@@ -667,6 +681,7 @@ static void gen_upload_plan(void)
 	gen_seg *segs;
 	cl_ulong *suf;
 	char seen[MASK_MAX_INC_LEN + 2];
+	unsigned char dummy_zero = 0;
 	int s;
 
 	if (g_buf_segs && g_uploaded_plan_serial == mask_gpu_serial)
@@ -674,6 +689,15 @@ static void gen_upload_plan(void)
 
 	gen_release_buf(&g_buf_segs);
 	gen_release_buf(&g_buf_suf);
+	gen_release_buf(&g_buf_boxbounds);
+
+	/* Odometer-shell mode: no suffix-DP; upload the per-segment lo/radix bounds
+	 * (seg->suf_off indexes into them) instead. */
+	if (plan->odometer) {
+		g_buf_boxbounds = gen_copy_buf(
+		    plan->boxbounds_n ? plan->boxbounds_n : 1,
+		    plan->boxbounds_n ? (void *)plan->boxbounds : (void *)&dummy_zero);
+	}
 
 	/* Concatenated suf holds one copy of each loop's (limit+1)*ksize ulongs at
 	 * its suf_off; the many round-robin segments of a loop share that copy. */
@@ -693,7 +717,7 @@ static void gen_upload_plan(void)
 			error();
 		}
 
-		if (!seen[sg->loop]) {
+		if (!plan->odometer && !seen[sg->loop]) {
 			const mask_gpu_loop *gl = mask_gpu_get_loop(sg->loop);
 
 			memcpy(suf + sg->suf_off, gl->suf,
@@ -734,6 +758,10 @@ static void set_kernel_args_gen(void)
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 18, sizeof(g_buf_chars0), &g_buf_chars0), "arg18");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 19, sizeof(g_buf_segs), &g_buf_segs), "arg19");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 20, sizeof(cl_uint), &g_nseg), "arg20");
+	/* Odometer-shell bounds buffer (kernel arg 24, only present under
+	 * -D GEN_ODOMETER). Args 21-23 (gbase/gcount/gR) are set per launch. */
+	if (gen_deepen)
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 24, sizeof(g_buf_boxbounds), &g_buf_boxbounds), "arg24");
 }
 
 static int gen_crypt(int *pcount, struct db_salt *salt)
@@ -1089,6 +1117,13 @@ static void reset(struct db_main *db)
 			gen_head = -1;
 	}
 	if (gen_head >= 0)
+		gen_reg_max = 0;
+
+	/* JOHN_GEN_DEEPEN selects the odometer-shell deepening generator. It owns the
+	 * index->iter step (mixed-radix odometer) so it lives in the non-REGS path;
+	 * force GEN_REGS off. mask.c reads the same env to build the matching plan. */
+	gen_deepen = (getenv("JOHN_GEN_DEEPEN") != NULL);
+	if (gen_deepen)
 		gen_reg_max = 0;
 
 	ocl_hc_num_loaded_hashes = db->salts->count;

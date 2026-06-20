@@ -84,6 +84,17 @@ static unsigned char pos_markov_row_counts[MAX_NUM_MASK_PLHDR][256];
 static unsigned char pos_markov_start_ceiling[MAX_NUM_MASK_PLHDR];
 static unsigned char pos_markov_trans_ceiling[MAX_NUM_MASK_PLHDR];
 
+/* Per-position data for the odometer-shell deepening plan (JOHN_GEN_DEEPEN).
+ * markov_ceiling_at(ri, cutoff) returns the dup-free wheel size kept at that
+ * cutoff using the MARGINAL (start-node) levels capped to the smallest in-charset
+ * fan-out - the same uniform-ceiling rule the static threshold above uses, but as
+ * a function of the cutoff so the host can sweep it (deepen). _lvl holds each kept
+ * start char's quantized level in rank order (non-decreasing, so the count of
+ * level<=cutoff is a prefix), _n the number kept, _minrow the min row fan-out. */
+static unsigned char pos_markov_start_lvl[MAX_NUM_MASK_PLHDR][256];
+static int           pos_markov_start_n[MAX_NUM_MASK_PLHDR];
+static unsigned char pos_markov_minrow[MAX_NUM_MASK_PLHDR];
+
 /*
  * Per-length-loop hoisted ("struct of arrays") view of the active ranges.
  * Rebuilt once whenever the generator (re)enters a length-loop, so the
@@ -1505,19 +1516,27 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 		int valid_idx;
 		int m, prev;
 
-		// 1. Build filtered start nodes for this position (level-thresholded).
-		//    valid_idx > 0 guard keeps the single most probable in-charset char
-		//    even if it exceeds the cutoff, so a position is never left empty.
+		// 1. Build filtered start nodes for this position, keeping the FULL
+		//    in-charset list in probability (rank) order plus each char's level,
+		//    so the deepening plan can recompute the kept count at any cutoff.
+		//    The static ceiling for THIS run's cutoff is derived afterwards.
 		valid_idx = 0;
 		for (m = 0; m < 256; m++) {
 			unsigned char cand = markov_start_nodes[m];
 			if (!memchr((const char*)r->chars, cand, r->count))
 				continue;
-			if (markov_start_level[m] > gen_level_cutoff && valid_idx > 0)
-				break;
+			pos_markov_start_lvl[ri][valid_idx] = markov_start_level[m];
 			pos_markov_start[ri][valid_idx++] = cand;
 		}
-		pos_markov_start_ceiling[ri] = valid_idx;
+		pos_markov_start_n[ri] = valid_idx;
+		/* Static ceiling = #kept start chars with level <= cutoff, but always >= 1
+		 * (keep the single most probable even if it exceeds the cutoff). */
+		{
+			int t = (valid_idx > 0) ? 1 : 0;
+			while (t < valid_idx && pos_markov_start_lvl[ri][t] <= gen_level_cutoff)
+				t++;
+			pos_markov_start_ceiling[ri] = t;
+		}
 
 		// 2. Build the FULL in-charset transition table (conditional order, NOT
 		//    per-context pruned) and track the minimum in-charset fan-out over
@@ -1544,7 +1563,24 @@ static void init_cpu_mask(const char *mask, mask_parsed_ctx *parsed_mask,
 			if (T < 1) T = 1;
 			pos_markov_trans_ceiling[ri] = T;
 		}
+		pos_markov_minrow[ri] = (min_rowcnt > 255) ? 255 : min_rowcnt;
 	}
+}
+
+/* Dup-free wheel size kept at probability-magnitude cutoff 'c' for position ri,
+ * mirroring the static uniform-ceiling rule (marginal kept count capped to the
+ * min in-charset fan-out, floored to 1). Used by the odometer-shell deepening
+ * plan to size each sub-box per position as the cutoff sweeps. */
+static int markov_ceiling_at(int ri, int c)
+{
+	int n = pos_markov_start_n[ri], mr = pos_markov_minrow[ri];
+	int t = (n > 0) ? 1 : 0;
+
+	while (t < n && pos_markov_start_lvl[ri][t] <= c)
+		t++;
+	if (t > mr) t = mr;
+	if (t < 1) t = 1;
+	return t;
 }
 
 #undef check_n_insert
@@ -2366,6 +2402,13 @@ int mask_gpu_gen = 0;
  * of the previous char, while positions 1..H-1 keep the conditional bigram model.
  * Set in mask_gpu_build_tables(). */
 static int mask_gpu_head = -1;
+/* Odometer-shell deepening mode (JOHN_GEN_DEEPEN). Set in mask_gpu_build_tables
+ * from the env; the format reads the same env to add -D GEN_ODOMETER. */
+static int mask_gpu_odometer = 0;
+/* Per-segment per-position [lo, radix) bounds, laid out lo[0..limit) then
+ * radix[0..limit) per segment; seg->suf_off is the element offset into this. */
+static unsigned char *gpu_boxbounds;
+static uint64_t gpu_boxbounds_n, gpu_boxbounds_cap;
 int mask_gpu_max_loop = -1;
 /* Bumped whenever the upload-ready tables are rebuilt; the format re-uploads
  * when it sees a new value. */
@@ -2421,6 +2464,8 @@ static mask_gpu_seg *plan_push(int *nseg)
  * one big segment each once only a single length is left (nothing to interleave
  * with) or the segment budget MASK_GPU_NSEG_MAX is reached (the deep tail beyond
  * that point is unreachable in practice, so it need not be finely sliced). */
+static void mask_gpu_build_plan_odometer(mask_cpu_context *ctx);
+
 static void mask_gpu_build_plan(void)
 {
 	int max_loop = mask_gpu_max_loop, loop, nseg = 0, n_active = 0;
@@ -2428,6 +2473,11 @@ static void mask_gpu_build_plan(void)
 	uint64_t suf_off[MASK_MAX_INC_LEN + 1], stride[MASK_MAX_INC_LEN + 1];
 	int active[MASK_MAX_INC_LEN + 1], loop_stride[MASK_MAX_INC_LEN];
 	uint64_t vbase = 0, soff = 0;
+
+	if (mask_gpu_odometer) {
+		mask_gpu_build_plan_odometer(&cpu_mask_ctx);
+		return;
+	}
 
 	compute_loop_strides(max_loop, loop_stride);
 
@@ -2557,6 +2607,9 @@ static void mask_gpu_build_plan(void)
 	gpu_plan.seg = gpu_segs;
 	gpu_plan.nseg = nseg;
 	gpu_plan.total = vbase;
+	gpu_plan.odometer = 0;
+	gpu_plan.boxbounds = NULL;
+	gpu_plan.boxbounds_n = 0;
 
 	if (getenv("MASK_GPU_PLAN")) {
 		int l, s, segcnt[MASK_MAX_INC_LEN + 1] = {0};
@@ -2587,6 +2640,157 @@ static void mask_gpu_build_plan(void)
 	}
 }
 
+static unsigned char *boxbounds_reserve(uint64_t need)
+{
+	if (gpu_boxbounds_n + need > gpu_boxbounds_cap) {
+		while (gpu_boxbounds_n + need > gpu_boxbounds_cap)
+			gpu_boxbounds_cap = gpu_boxbounds_cap ? gpu_boxbounds_cap * 2 : 4096;
+		gpu_boxbounds = mem_realloc(gpu_boxbounds, gpu_boxbounds_cap);
+	}
+	return &gpu_boxbounds[gpu_boxbounds_n];
+}
+
+/* Wheel size kept at cutoff c for length-loop position i (active range index). */
+static int odo_pos_ceiling(mask_cpu_context *ctx, int i, int c)
+{
+	int ri = ctx->active_idx[i];
+	mask_range *r = &ctx->ranges[ri];
+
+	if (r->start)            /* arithmetic range: no Markov order, always full */
+		return r->count;
+	return markov_ceiling_at(ri, c);
+}
+
+/*
+ * Build the odometer-shell deepening plan. The candidate space of each length is
+ * covered as a sequence of magnitude bands: band 0 is the tiny base box (each
+ * Markov position at its single most-probable char, arithmetic positions full);
+ * band s>0 is the onion-peel shell box(c_s) \ box(c_{s-1}), split into 'limit'
+ * disjoint odometer sub-boxes (peel position k uses the new rank slice
+ * [T_prev_k, T_cur_k), positions left of k the full new range, right of k the old
+ * range). Bands are emitted most-probable-first and interleaved across lengths,
+ * so the virtual order is magnitude best-first while every sub-box is a plain
+ * mixed-radix odometer (divergence-free, dup-free - see the disjoint-tiling proof
+ * in the header comment). The cutoff sweeps c0=-1 (T=1) up to FINAL in STEP-level
+ * increments. JOHN_GEN_DEEPEN_STEP sets STEP (default MARKOV_LEVEL_SCALE ~= 1 bit);
+ * JOHN_GEN_MAXLEVEL sets FINAL (default MARKOV_MAXLEVEL = full dup-free keyspace).
+ */
+static void mask_gpu_build_plan_odometer(mask_cpu_context *ctx)
+{
+	int max_loop = mask_gpu_max_loop, loop, nseg = 0;
+	uint64_t vbase = 0;
+	int step = MARKOV_LEVEL_SCALE, final_c = MARKOV_MAXLEVEL;
+	int c_prev, c_cur, band, done;
+	const char *e;
+
+	if ((e = getenv("JOHN_GEN_DEEPEN_STEP")) && atoi(e) >= 1)
+		step = atoi(e);
+	if ((e = getenv("JOHN_GEN_MAXLEVEL")) && *e) {
+		int v = atoi(e);
+		final_c = v < 0 ? 0 : (v > MARKOV_MAXLEVEL ? MARKOV_MAXLEVEL : v);
+	}
+
+	gpu_boxbounds_n = 0;
+
+	/* --- band 0: base box per active length (lo=0, radix=T_p(c0=-1)) --- */
+	for (loop = 0; loop <= max_loop; loop++) {
+		const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
+		mask_gpu_seg *sg;
+		unsigned char *b;
+		uint64_t vcnt = 1, off;
+		int i, ok = 1;
+
+		if (!gl || gl->total == 0)
+			continue;
+		off = gpu_boxbounds_n;
+		b = boxbounds_reserve((uint64_t)2 * gl->limit);
+		for (i = 0; i < gl->limit; i++) {
+			int T = odo_pos_ceiling(ctx, i, -1);
+			b[i] = 0;                 /* lo  */
+			b[gl->limit + i] = (unsigned char)T;  /* radix */
+			vcnt *= (uint64_t)T;
+			if (T <= 0) ok = 0;
+		}
+		if (!ok || vcnt == 0)
+			continue;
+		gpu_boxbounds_n += (uint64_t)2 * gl->limit;
+		sg = plan_push(&nseg);
+		sg->vbase = vbase; sg->vcnt = vcnt; sg->lstart = 0;
+		sg->suf_off = off; sg->loop = loop; sg->limit = gl->limit;
+		sg->len = gl->len; sg->max_k = 0; sg->ksize = 0;
+		vbase += vcnt;
+	}
+
+	/* --- bands 1..M: onion-peel shells, interleaved across lengths --- */
+	c_prev = -1;
+	done = 0;
+	for (band = 1; !done && nseg < MASK_GPU_NSEG_MAX; band++) {
+		c_cur = c_prev + step;
+		if (c_cur >= final_c) { c_cur = final_c; done = 1; }
+
+		for (loop = 0; loop <= max_loop; loop++) {
+			const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
+			int limit, k, i;
+
+			if (!gl || gl->total == 0)
+				continue;
+			limit = gl->limit;
+			for (k = 0; k < limit; k++) {
+				mask_gpu_seg *sg;
+				unsigned char *b;
+				uint64_t vcnt = 1, off;
+				int ok = 1, slice;
+
+				/* peel position k must admit at least one new char this band */
+				slice = odo_pos_ceiling(ctx, k, c_cur) -
+				        odo_pos_ceiling(ctx, k, c_prev);
+				if (slice <= 0)
+					continue;
+
+				off = gpu_boxbounds_n;
+				b = boxbounds_reserve((uint64_t)2 * limit);
+				for (i = 0; i < limit; i++) {
+					int lo, rad;
+					if (i < k) {            /* full new range */
+						lo = 0; rad = odo_pos_ceiling(ctx, i, c_cur);
+					} else if (i == k) {    /* the new slice */
+						lo = odo_pos_ceiling(ctx, i, c_prev);
+						rad = slice;
+					} else {                /* old range */
+						lo = 0; rad = odo_pos_ceiling(ctx, i, c_prev);
+					}
+					b[i] = (unsigned char)lo;
+					b[limit + i] = (unsigned char)rad;
+					vcnt *= (uint64_t)rad;
+					if (rad <= 0) ok = 0;
+				}
+				if (!ok || vcnt == 0)
+					continue;
+				gpu_boxbounds_n += (uint64_t)2 * limit;
+				sg = plan_push(&nseg);
+				sg->vbase = vbase; sg->vcnt = vcnt; sg->lstart = 0;
+				sg->suf_off = off; sg->loop = loop; sg->limit = limit;
+				sg->len = gl->len; sg->max_k = 0; sg->ksize = 0;
+				vbase += vcnt;
+			}
+		}
+		c_prev = c_cur;
+	}
+
+	gpu_plan.seg = gpu_segs;
+	gpu_plan.nseg = nseg;
+	gpu_plan.total = vbase;
+	gpu_plan.suf_total = 0;
+	gpu_plan.odometer = 1;
+	gpu_plan.boxbounds = gpu_boxbounds;
+	gpu_plan.boxbounds_n = gpu_boxbounds_n;
+
+	if (getenv("MASK_GPU_PLAN"))
+		fprintf(stderr, "[PLAN-ODO] nseg=%d total=%"PRIu64" bounds=%"PRIu64
+			" step=%d final=%d\n", nseg, gpu_plan.total,
+			gpu_boxbounds_n, step, final_c);
+}
+
 void mask_gpu_virt_to_loop(uint64_t v, int *loop, uint64_t *g)
 {
 	int lo = 0, hi = gpu_plan.nseg - 1, s = 0;
@@ -2603,7 +2807,11 @@ void mask_gpu_virt_to_loop(uint64_t v, int *loop, uint64_t *g)
 	}
 	if (gpu_plan.nseg) {
 		*loop = gpu_plan.seg[s].loop;
-		*g = gpu_plan.seg[s].lstart + (v - gpu_plan.seg[s].vbase);
+		/* Odometer mode: pass the virtual index straight through so
+		 * mask_gpu_unrank_key can re-find the sub-box (a loop-local index
+		 * would not identify which of the loop's many sub-boxes it is). */
+		*g = mask_gpu_odometer ? v
+		     : gpu_plan.seg[s].lstart + (v - gpu_plan.seg[s].vbase);
 	} else {
 		*loop = 0;
 		*g = 0;
@@ -2629,6 +2837,11 @@ static void mask_gpu_build_tables(mask_cpu_context *ctx)
 		else
 			mask_gpu_head = -1;          /* full conditional */
 	}
+
+	/* Odometer-shell deepening plan (JOHN_GEN_DEEPEN). Read here (before
+	 * mask_gpu_build_plan dispatches) so the host builds the matching plan; the
+	 * format reads the same env to add -D GEN_ODOMETER to the kernel. */
+	mask_gpu_odometer = (getenv("JOHN_GEN_DEEPEN") != NULL);
 
 	MEM_FREE(gpu_tabs.table);
 	MEM_FREE(gpu_tabs.uint_table);
@@ -2829,28 +3042,52 @@ void mask_gpu_unrank_key(int loop, uint64_t g, char *out, int *out_len)
 	if (limit == 0)
 		return;
 
-	/* Skip whole K-layers, then unrank within the target layer (descending-
-	 * lexicographic, matching simplex_next_state). */
-	fw = g;
-	target_k = 0;
-	while (target_k <= gl->max_k && fw >= suf[target_k]) {
-		fw -= suf[target_k];
-		target_k++;
-	}
-	remaining_k = target_k;
-	rank = fw;
-	for (i = 0; i < limit; i++) {
-		int C = gpu_tabs.count[i];
-		int vmax = remaining_k < (C - 1) ? remaining_k : (C - 1);
-		int vv;
-		for (vv = vmax; vv >= 0; vv--) {
-			uint64_t cnt = suf[(i + 1) * ksize + (remaining_k - vv)];
-			if (rank < cnt)
-				break;
-			rank -= cnt;
+	if (mask_gpu_odometer) {
+		/* Odometer mode: g is the virtual index. Find its sub-box (mirror of the
+		 * kernel's segment search) and mixed-radix decode the local index into
+		 * iter[], rightmost position least significant (matches the kernel). */
+		uint64_t V = g, gloc;
+		int lo = 0, hi = gpu_plan.nseg - 1, s = 0;
+		const mask_gpu_seg *sg;
+		const unsigned char *b;
+
+		while (lo <= hi) {
+			int mid = (lo + hi) >> 1;
+			if (gpu_plan.seg[mid].vbase <= V) { s = mid; lo = mid + 1; }
+			else hi = mid - 1;
 		}
-		iter[i] = vv;
-		remaining_k -= vv;
+		sg = &gpu_plan.seg[s];
+		b = gpu_boxbounds + sg->suf_off;
+		gloc = V - sg->vbase;
+		for (i = limit - 1; i >= 0; i--) {
+			int rad = b[limit + i];
+			iter[i] = (int)b[i] + (int)(gloc % (uint64_t)rad);
+			gloc /= (uint64_t)rad;
+		}
+	} else {
+		/* Skip whole K-layers, then unrank within the target layer (descending-
+		 * lexicographic, matching simplex_next_state). */
+		fw = g;
+		target_k = 0;
+		while (target_k <= gl->max_k && fw >= suf[target_k]) {
+			fw -= suf[target_k];
+			target_k++;
+		}
+		remaining_k = target_k;
+		rank = fw;
+		for (i = 0; i < limit; i++) {
+			int C = gpu_tabs.count[i];
+			int vmax = remaining_k < (C - 1) ? remaining_k : (C - 1);
+			int vv;
+			for (vv = vmax; vv >= 0; vv--) {
+				uint64_t cnt = suf[(i + 1) * ksize + (remaining_k - vv)];
+				if (rank < cnt)
+					break;
+				rank -= cnt;
+			}
+			iter[i] = vv;
+			remaining_k -= vv;
+		}
 	}
 
 	/* Materialize left-to-right through the Markov tables - the exact mirror of
