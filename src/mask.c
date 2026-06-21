@@ -2661,6 +2661,27 @@ static int odo_pos_ceiling(mask_cpu_context *ctx, int i, int c)
 	return markov_ceiling_at(ri, c);
 }
 
+/* One odometer sub-box: a contiguous [0,vcnt) odometer over the per-position rank
+ * ranges stored at boxbounds element offset off. A length's full magnitude-ordered
+ * candidate stream is the concatenation of its sub-boxes in band order (band 0 base
+ * box, then each band's onion-peel sub-boxes). */
+typedef struct {
+	uint64_t off;   /* element offset of this sub-box's bounds in boxbounds */
+	uint64_t vcnt;  /* full odometer size                                   */
+} odo_box;
+
+static odo_box *odo_boxes;
+static int odo_boxes_cap;
+
+static odo_box *odo_box_push(int *nbox)
+{
+	if (*nbox >= odo_boxes_cap) {
+		odo_boxes_cap = odo_boxes_cap ? odo_boxes_cap * 2 : 1024;
+		odo_boxes = mem_realloc(odo_boxes, (size_t)odo_boxes_cap * sizeof(*odo_boxes));
+	}
+	return &odo_boxes[(*nbox)++];
+}
+
 /*
  * Build the odometer-shell deepening plan. The candidate space of each length is
  * covered as a sequence of magnitude bands: band 0 is the tiny base box (each
@@ -2677,10 +2698,19 @@ static int odo_pos_ceiling(mask_cpu_context *ctx, int i, int c)
  */
 static void mask_gpu_build_plan_odometer(mask_cpu_context *ctx)
 {
-	int max_loop = mask_gpu_max_loop, loop, nseg = 0;
+	int max_loop = mask_gpu_max_loop, loop, nseg = 0, nbox = 0, n_active = 0;
 	uint64_t vbase = 0;
 	int step = MARKOV_LEVEL_SCALE, final_c = MARKOV_MAXLEVEL;
-	int c_prev, c_cur, band, done;
+	int loop_stride[MASK_MAX_INC_LEN];
+	/* Per-length walk over its own magnitude-ordered sub-box stream
+	 * [box_start, box_start+box_count): box_cur is the current sub-box and
+	 * box_used the linear index already emitted from it. */
+	int box_start[MASK_MAX_INC_LEN + 1], box_count[MASK_MAX_INC_LEN + 1];
+	int box_cur[MASK_MAX_INC_LEN + 1], active[MASK_MAX_INC_LEN + 1];
+	int loop_limit[MASK_MAX_INC_LEN + 1], loop_len[MASK_MAX_INC_LEN + 1];
+	uint64_t box_used[MASK_MAX_INC_LEN + 1], stride[MASK_MAX_INC_LEN + 1];
+	uint64_t grow;
+	int coarsen = 0;
 	const char *e;
 
 	if ((e = getenv("JOHN_GEN_DEEPEN_STEP")) && atoi(e) >= 1)
@@ -2689,66 +2719,66 @@ static void mask_gpu_build_plan_odometer(mask_cpu_context *ctx)
 		int v = atoi(e);
 		final_c = v < 0 ? 0 : (v > MARKOV_MAXLEVEL ? MARKOV_MAXLEVEL : v);
 	}
+	e = getenv("JOHN_TAIL_GROW");
+	grow = (e && atoi(e) >= 2) ? (uint64_t)atoi(e) : 2;
 
+	compute_loop_strides(max_loop, loop_stride);
 	gpu_boxbounds_n = 0;
 
-	/* --- band 0: base box per active length (lo=0, radix=T_p(c0=-1)) --- */
+	/*
+	 * Build each active length's magnitude-ordered sub-box STREAM: band 0 base box
+	 * (each Markov position at its single most-probable char, arithmetic positions
+	 * full), then for each deepening band the onion-peel shell box(c)\box(c_prev)
+	 * split into 'limit' disjoint sub-boxes (peel position k takes the new rank
+	 * slice [T_prev,T_cur), positions left of k the full new range, right of k the
+	 * old range). The cutoff sweeps c0=-1 (T=1) to FINAL in STEP-level increments.
+	 */
 	for (loop = 0; loop <= max_loop; loop++) {
 		const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
-		mask_gpu_seg *sg;
+		int limit, c_prev, c_cur, band, done, i, k, ok;
 		unsigned char *b;
-		uint64_t vcnt = 1, off;
-		int i, ok = 1;
+		odo_box *bx;
+		uint64_t vcnt, off;
 
+		box_start[loop] = nbox;
+		box_count[loop] = 0;
+		active[loop] = 0;
 		if (!gl || gl->total == 0)
 			continue;
+		limit = gl->limit;
+
+		/* band 0: base box */
 		off = gpu_boxbounds_n;
-		b = boxbounds_reserve((uint64_t)2 * gl->limit);
-		for (i = 0; i < gl->limit; i++) {
+		b = boxbounds_reserve((uint64_t)2 * limit);
+		vcnt = 1; ok = 1;
+		for (i = 0; i < limit; i++) {
 			int T = odo_pos_ceiling(ctx, i, -1);
-			b[i] = 0;                 /* lo  */
-			b[gl->limit + i] = (unsigned char)T;  /* radix */
+			b[i] = 0;
+			b[limit + i] = (unsigned char)T;
 			vcnt *= (uint64_t)T;
 			if (T <= 0) ok = 0;
 		}
-		if (!ok || vcnt == 0)
-			continue;
-		gpu_boxbounds_n += (uint64_t)2 * gl->limit;
-		sg = plan_push(&nseg);
-		sg->vbase = vbase; sg->vcnt = vcnt; sg->lstart = 0;
-		sg->suf_off = off; sg->loop = loop; sg->limit = gl->limit;
-		sg->len = gl->len; sg->max_k = 0; sg->ksize = 0;
-		vbase += vcnt;
-	}
+		if (ok && vcnt) {
+			gpu_boxbounds_n += (uint64_t)2 * limit;
+			bx = odo_box_push(&nbox);
+			bx->off = off; bx->vcnt = vcnt;
+			box_count[loop]++;
+		}
 
-	/* --- bands 1..M: onion-peel shells, interleaved across lengths --- */
-	c_prev = -1;
-	done = 0;
-	for (band = 1; !done && nseg < MASK_GPU_NSEG_MAX; band++) {
-		c_cur = c_prev + step;
-		if (c_cur >= final_c) { c_cur = final_c; done = 1; }
+		/* bands 1..M: onion-peel shells */
+		c_prev = -1; done = 0;
+		for (band = 1; !done; band++) {
+			c_cur = c_prev + step;
+			if (c_cur >= final_c) { c_cur = final_c; done = 1; }
 
-		for (loop = 0; loop <= max_loop; loop++) {
-			const mask_gpu_loop *gl = mask_gpu_get_loop(loop);
-			int limit, k, i;
-
-			if (!gl || gl->total == 0)
-				continue;
-			limit = gl->limit;
 			for (k = 0; k < limit; k++) {
-				mask_gpu_seg *sg;
-				unsigned char *b;
-				uint64_t vcnt = 1, off;
-				int ok = 1, slice;
-
-				/* peel position k must admit at least one new char this band */
-				slice = odo_pos_ceiling(ctx, k, c_cur) -
-				        odo_pos_ceiling(ctx, k, c_prev);
+				int slice = odo_pos_ceiling(ctx, k, c_cur) -
+				            odo_pos_ceiling(ctx, k, c_prev);
 				if (slice <= 0)
 					continue;
-
 				off = gpu_boxbounds_n;
 				b = boxbounds_reserve((uint64_t)2 * limit);
+				vcnt = 1; ok = 1;
 				for (i = 0; i < limit; i++) {
 					int lo, rad;
 					if (i < k) {            /* full new range */
@@ -2767,14 +2797,76 @@ static void mask_gpu_build_plan_odometer(mask_cpu_context *ctx)
 				if (!ok || vcnt == 0)
 					continue;
 				gpu_boxbounds_n += (uint64_t)2 * limit;
+				bx = odo_box_push(&nbox);
+				bx->off = off; bx->vcnt = vcnt;
+				box_count[loop]++;
+			}
+			c_prev = c_cur;
+		}
+
+		if (box_count[loop] > 0) {
+			active[loop] = 1;
+			n_active++;
+			box_cur[loop] = box_start[loop];
+			box_used[loop] = 0;
+			loop_limit[loop] = limit;
+			loop_len[loop] = gl->len;
+			stride[loop] = loop_stride[loop] < 1 ? 1 : (uint64_t)loop_stride[loop];
+		}
+	}
+
+	/*
+	 * Zip the per-length streams together in weighted round-robin order: each round
+	 * gives every active length a candidate budget of stride[loop] = its Markov
+	 * length weight (compute_loop_strides, from markov_len_count[] in markov_tables.h),
+	 * so common lengths get proportionally MORE candidates per round - the exact same
+	 * length weighting the simplex plan uses. A length spends its budget walking its
+	 * own magnitude-ordered stream, emitting a segment per sub-box span (a segment
+	 * can't cross a sub-box boundary because it maps to one bounds record; lstart
+	 * carries the chunk's linear offset, kernel: gloc = lstart + (V - vbase), so all
+	 * chunks of a sub-box share its single bounds record). Near the segment budget the
+	 * strides grow geometrically so the deep tail stays interleaved but is covered in
+	 * O(log) rounds.
+	 */
+	while (n_active > 0) {
+		if (!coarsen && nseg + n_active > MASK_GPU_NSEG_MAX - MASK_GPU_NSEG_MAX / 8)
+			coarsen = 1;
+
+		for (loop = 0; loop <= max_loop; loop++) {
+			uint64_t budget;
+
+			if (!active[loop])
+				continue;
+			budget = stride[loop];
+			while (budget > 0 && active[loop]) {
+				odo_box *bx = &odo_boxes[box_cur[loop]];
+				mask_gpu_seg *sg;
+				uint64_t left = bx->vcnt - box_used[loop];
+				uint64_t chunk = left < budget ? left : budget;
+
 				sg = plan_push(&nseg);
-				sg->vbase = vbase; sg->vcnt = vcnt; sg->lstart = 0;
-				sg->suf_off = off; sg->loop = loop; sg->limit = limit;
-				sg->len = gl->len; sg->max_k = 0; sg->ksize = 0;
-				vbase += vcnt;
+				sg->vbase = vbase; sg->vcnt = chunk; sg->lstart = box_used[loop];
+				sg->suf_off = bx->off; sg->loop = loop; sg->limit = loop_limit[loop];
+				sg->len = loop_len[loop]; sg->max_k = 0; sg->ksize = 0;
+				vbase += chunk;
+				box_used[loop] += chunk;
+				budget -= chunk;
+
+				if (box_used[loop] >= bx->vcnt) {  /* sub-box done, advance stream */
+					box_cur[loop]++;
+					box_used[loop] = 0;
+					if (box_cur[loop] >= box_start[loop] + box_count[loop]) {
+						active[loop] = 0;
+						n_active--;
+					}
+				}
 			}
 		}
-		c_prev = c_cur;
+
+		if (coarsen)
+			for (loop = 0; loop <= max_loop; loop++)
+				if (active[loop] && stride[loop] <= UINT64_MAX / grow)
+					stride[loop] *= grow;
 	}
 
 	gpu_plan.seg = gpu_segs;
@@ -2785,10 +2877,26 @@ static void mask_gpu_build_plan_odometer(mask_cpu_context *ctx)
 	gpu_plan.boxbounds = gpu_boxbounds;
 	gpu_plan.boxbounds_n = gpu_boxbounds_n;
 
-	if (getenv("MASK_GPU_PLAN"))
+	if (getenv("MASK_GPU_PLAN")) {
+		int l, s, segcnt[MASK_MAX_INC_LEN + 1] = {0};
+
 		fprintf(stderr, "[PLAN-ODO] nseg=%d total=%"PRIu64" bounds=%"PRIu64
 			" step=%d final=%d\n", nseg, gpu_plan.total,
 			gpu_boxbounds_n, step, final_c);
+		fprintf(stderr, "[PLAN-ODO] length weights (len:stride):");
+		for (l = 0; l <= max_loop; l++)
+			fprintf(stderr, " %d:%d", mask_cur_len + l, loop_stride[l]);
+		fprintf(stderr, "\n[PLAN-ODO] first segs (len @vbase x vcnt): ");
+		for (s = 0; s < nseg && s < 24; s++)
+			fprintf(stderr, "[%d @%"PRIu64" x%"PRIu64"] ",
+				gpu_segs[s].len, gpu_segs[s].vbase, gpu_segs[s].vcnt);
+		for (s = 0; s < nseg; s++)
+			segcnt[gpu_segs[s].loop]++;
+		fprintf(stderr, "\n[PLAN-ODO] per-length (len:nseg):");
+		for (l = 0; l <= max_loop; l++)
+			fprintf(stderr, " %d:%d", mask_cur_len + l, segcnt[l]);
+		fprintf(stderr, "\n");
+	}
 }
 
 void mask_gpu_virt_to_loop(uint64_t v, int *loop, uint64_t *g)
@@ -3058,7 +3166,9 @@ void mask_gpu_unrank_key(int loop, uint64_t g, char *out, int *out_len)
 		}
 		sg = &gpu_plan.seg[s];
 		b = gpu_boxbounds + sg->suf_off;
-		gloc = V - sg->vbase;
+		/* lstart is this chunk's linear offset into the (possibly sliced) sub-box
+		 * odometer; matches the kernel's gloc = seg_lstart + (V - seg_vbase). */
+		gloc = (V - sg->vbase) + sg->lstart;
 		for (i = limit - 1; i >= 0; i--) {
 			int rad = b[limit + i];
 			iter[i] = (int)b[i] + (int)(gloc % (uint64_t)rad);
