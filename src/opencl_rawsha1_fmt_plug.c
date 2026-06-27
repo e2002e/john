@@ -55,6 +55,55 @@ static cl_mem buffer_keys, buffer_idx, buffer_int_keys, buffer_int_key_loc;
 static cl_uint *saved_plain, *saved_idx, *saved_int_key_loc;
 static int static_gpu_locations[MASK_FMT_INT_PLHDR];
 
+/* GPU K-ordered generation state (port of the raw-md5-opencl generator). */
+static cl_mem g_buf_suf, g_buf_table, g_buf_startv, g_buf_rowcnt, g_buf_littmpl,
+              g_buf_keypos, g_buf_count, g_buf_cstart, g_buf_chars0, g_buf_segs,
+              g_buf_boxbounds;   /* odometer-shell per-seg lo/radix bounds (arg 24) */
+static unsigned g_uploaded_serial;       /* mask_gpu_serial of last table upload  */
+static unsigned g_uploaded_plan_serial;  /* mask_gpu_serial of last plan upload    */
+static cl_uint g_nseg;                    /* segments in the uploaded plan          */
+
+/* Device mirror of one mask_gpu_plan segment (must match gen_seg in the kernel).
+ * Four ulongs then four uints = 48 bytes, naturally 8-aligned. */
+typedef struct {
+	cl_ulong vbase;
+	cl_ulong vcnt;
+	cl_ulong lstart;
+	cl_ulong suf_off;
+	cl_uint  limit;
+	cl_uint  len;
+	cl_uint  max_k;
+	cl_uint  ksize;
+} gen_seg;
+/* Candidates generated per work-item in the gen kernel. Tunable via JOHN_GEN_R. */
+static cl_uint gen_R = 256;
+/* >0 builds the register-resident gen kernel (-D GEN_REGS) with this unroll width
+ * (compile-time GEN_REG_MAX). Set from JOHN_GEN_REGS in reset(). */
+static cl_uint gen_reg_max = 0;
+/* >=0 (JOHN_GEN_HEAD=H / JOHN_GEN_MARGINAL) builds the hybrid head/tail kernel
+ * (-D GEN_HEAD=H). -1 = disabled (full conditional). */
+static int gen_head = -1;
+/* >0 (JOHN_GEN_DEEPEN) builds the odometer-shell deepening gen kernel
+ * (-D GEN_ODOMETER): each segment is a magnitude-threshold sub-box enumerated by a
+ * plain mixed-radix odometer over per-position rank ranges instead of the rank-sum
+ * simplex, so the GPU runs divergence-free while the host emits the sub-boxes
+ * most-probable-band first. Mutually exclusive with GEN_REGS. */
+static int gen_deepen = 0;
+static void gen_release_all(void);
+
+/* Parameters of the gen launch in flight, so set_kernel_args() can re-bind the
+ * gen-kernel args (10-24) if the kernel is rebuilt mid-launch (a rebuild wipes all
+ * kernel args; the generic re-bind covers only 0-9). */
+static int      g_cur_gen = 0;
+static cl_ulong g_cur_gbase;
+static cl_uint  g_cur_gcount;
+static void set_kernel_args_gen(void);
+
+/* True when the GPU actually generates candidates. mask_gpu_gen EXCEPT in
+ * MASK_GPU_CPU validation, where mask mode streams host-materialized candidates
+ * through the normal crypt path. Set in reset() before the kernel is built. */
+static int gen_active = 0;
+
 static cl_mem buffer_offset_table, buffer_hash_table, buffer_return_hashes, buffer_hash_ids, buffer_bitmap_dupe, buffer_bitmaps;
 static OFFSET_TABLE_WORD *offset_table = NULL;
 static cl_uint *loaded_hashes = NULL, num_loaded_hashes, *hash_ids = NULL, *bitmaps = NULL;
@@ -87,6 +136,15 @@ static void set_kernel_args()
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 7, sizeof(buffer_return_hashes), (void *) &buffer_return_hashes), "Error setting argument 8.");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 8, sizeof(buffer_hash_ids), (void *) &buffer_hash_ids), "Error setting argument 9.");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 9, sizeof(buffer_bitmap_dupe), (void *) &buffer_bitmap_dupe), "Error setting argument 10.");
+
+	/* If a gen launch is in flight and the kernel was just rebuilt, re-bind the
+	 * gen args (10-24) too; the bindings above only cover the hash-check args. */
+	if (gen_active && g_cur_gen) {
+		set_kernel_args_gen();
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 21, sizeof(cl_ulong), &g_cur_gbase), "arg21");
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 22, sizeof(cl_uint), &g_cur_gcount), "arg22");
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 23, sizeof(cl_uint), &gen_R), "arg23");
+	}
 }
 
 static void release_clobj_kpc(void);
@@ -215,6 +273,7 @@ static void done(void)
 {
 	release_clobj_kpc();
 	release_clobj();
+	gen_release_all();
 
 	if (crypt_kernel) {
 		HANDLE_CLERROR(clReleaseKernel(crypt_kernel), "Release kernel.");
@@ -296,8 +355,73 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 #endif
 	);
 
+	if (gen_active) {
+		/*
+		 * Size the gen kernel's per-work-item arrays and message-word pack to
+		 * this run's max candidate length. GEN_NDW = data words spanning
+		 * [0, maxlen] (incl. the 0x80); the SHA1 bit length lives in W[15] and
+		 * W[14], both beyond GEN_NDW (<=14). GEN_MAX_POS = GEN_NDW*4 covers
+		 * key[len] and the iter[] index range.
+		 */
+		int maxlen = options.eff_maxlength;
+		int gen_ndw, gen_max_pos;
+		char go[64];
+
+		if (maxlen < 1 || maxlen > PLAINTEXT_LENGTH)
+			maxlen = PLAINTEXT_LENGTH;
+		gen_ndw = (maxlen + 4) / 4;
+		if (gen_ndw > 14)
+			gen_ndw = 14;
+		gen_max_pos = gen_ndw * 4;
+		snprintf(go, sizeof(go), " -D GPU_GEN -D GEN_NDW=%d -D GEN_MAX_POS=%d",
+		         gen_ndw, gen_max_pos);
+		strcat(build_opts, go);
+	}
+
+	if (gen_active && gen_head >= 0) {
+		char ho[32];
+
+		snprintf(ho, sizeof(ho), " -D GEN_HEAD=%d", gen_head);
+		strcat(build_opts, ho);
+	}
+
+	if (gen_active && gen_reg_max && gen_head < 0 && !gen_deepen) {
+		char ro[64];
+
+		snprintf(ro, sizeof(ro), " -D GEN_REGS -D GEN_REG_MAX=%u", gen_reg_max);
+		strcat(build_opts, ro);
+	}
+
+	/* Odometer-shell deepening: divergence-free mixed-radix enumeration of
+	 * magnitude sub-boxes (see gen_deepen). Owns the index->iter step, so it sits
+	 * in the non-REGS materialize path; force GEN_REGS off (done in reset). */
+	if (gen_active && gen_deepen)
+		strcat(build_opts, " -D GEN_ODOMETER");
+
+	/*
+	 * Stage the compact Markov table in local memory when the mask is eligible
+	 * (mask.c sets ltab_ok). Finalized once the mask template is built; on a build
+	 * that precedes that (npos==0) it stays off and the kernel uses the global
+	 * table.
+	 */
+	if (gen_active && !gen_reg_max && gen_head < 0 && !gen_deepen) {
+		const mask_gpu_tables *t = mask_gpu_get_tables();
+		size_t bytes = t->ltab_ok
+		    ? (size_t)t->npos * t->ltab_nc * t->ltab_nc : 0;
+
+		if (t->ltab_ok && bytes > 0 && bytes <= 16384 && !getenv("JOHN_NO_LTAB")) {
+			char lo[112];
+
+			snprintf(lo, sizeof(lo), " -D GEN_LOCALTAB -D GEN_LTAB_POS=%d"
+			    " -D GEN_LTAB_NC=%d -D GEN_LTAB_BASE=%d",
+			    t->npos, t->ltab_nc, t->ltab_base);
+			strcat(build_opts, lo);
+		}
+	}
+
 	opencl_build_kernel("$JOHN/opencl/sha1_kernel.cl", gpu_id, build_opts, 0);
-	crypt_kernel = clCreateKernel(program[gpu_id], "sha1", &ret_code);
+	crypt_kernel = clCreateKernel(program[gpu_id],
+	                              gen_active ? "sha1_gen" : "sha1", &ret_code);
 	HANDLE_CLERROR(ret_code, "Error creating kernel. Double-check kernel name?");
 }
 
@@ -373,6 +497,27 @@ static char *get_key(int index)
 	static char out[PLAINTEXT_LENGTH + 1];
 	int i, len, int_index, t;
 	char *key;
+
+	if (gen_active) {
+		int kl, loop;
+		uint64_t off, g;
+
+		/* Each work-item gid produced gen_R contiguous candidates; the kernel
+		 * stored gid in the id slot and the sub-index j in the int_index slot,
+		 * so the candidate's offset within the block is gid*gen_R + j. The block
+		 * covers virtual indices [mask_gpu_cur_base, +count) of the multi-length
+		 * plan, so map the virtual index to its length-loop before unranking. */
+		if (hash_ids == NULL || hash_ids[0] == 0 ||
+		    index >= hash_ids[0] || hash_ids[0] > num_loaded_hashes)
+			off = (uint64_t)index;
+		else
+			off = (uint64_t)hash_ids[1 + 3 * index] * gen_R +
+			      hash_ids[2 + 3 * index];
+
+		mask_gpu_virt_to_loop(mask_gpu_cur_base + off, &loop, &g);
+		mask_gpu_unrank_key(loop, g, out, &kl);
+		return out;
+	}
 
 	if (hash_ids == NULL || hash_ids[0] == 0 ||
 	    index >= hash_ids[0] || hash_ids[0] > num_loaded_hashes) {
@@ -663,11 +808,246 @@ static char* select_bitmap(unsigned int num_ld_hashes)
 	return kernel_params;
 }
 
+static cl_mem gen_copy_buf(size_t sz, const void *host)
+{
+	cl_mem m = clCreateBuffer(context[gpu_id],
+	    CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sz ? sz : 1,
+	    (void *)host, &ret_code);
+	HANDLE_CLERROR(ret_code, "Error creating GPU-gen buffer.");
+	return m;
+}
+
+static void gen_release_buf(cl_mem *m)
+{
+	if (*m) {
+		HANDLE_CLERROR(clReleaseMemObject(*m), "Error releasing GPU-gen buffer.");
+		*m = 0;
+	}
+}
+
+static void gen_release_all(void)
+{
+	gen_release_buf(&g_buf_suf);
+	gen_release_buf(&g_buf_table);
+	gen_release_buf(&g_buf_startv);
+	gen_release_buf(&g_buf_rowcnt);
+	gen_release_buf(&g_buf_littmpl);
+	gen_release_buf(&g_buf_keypos);
+	gen_release_buf(&g_buf_count);
+	gen_release_buf(&g_buf_cstart);
+	gen_release_buf(&g_buf_chars0);
+	gen_release_buf(&g_buf_segs);
+	gen_release_buf(&g_buf_boxbounds);
+	g_uploaded_serial = 0;
+	g_uploaded_plan_serial = 0;
+}
+
+/* Upload the per-mask Markov tables once per mask config (tracked by serial). */
+static void gen_upload_tables(void)
+{
+	const mask_gpu_tables *t = mask_gpu_get_tables();
+	size_t npos = t->npos;
+
+	if (g_buf_table && g_uploaded_serial == mask_gpu_serial)
+		return;
+
+	gen_release_buf(&g_buf_table);
+	gen_release_buf(&g_buf_startv);
+	gen_release_buf(&g_buf_rowcnt);
+	gen_release_buf(&g_buf_littmpl);
+	gen_release_buf(&g_buf_keypos);
+	gen_release_buf(&g_buf_count);
+	gen_release_buf(&g_buf_cstart);
+	gen_release_buf(&g_buf_chars0);
+
+	size_t table_bytes = npos * 256 * 64 * sizeof(cl_uint);
+	g_buf_table   = gen_copy_buf(table_bytes, t->uint_table);
+	g_buf_startv  = gen_copy_buf(npos * 256, t->startv);
+	g_buf_rowcnt  = gen_copy_buf(npos * 256, t->rowcnt);
+	g_buf_littmpl = gen_copy_buf(t->littmpl_len, t->littmpl);
+	g_buf_keypos  = gen_copy_buf(npos * sizeof(cl_int), t->keypos);
+	g_buf_count   = gen_copy_buf(npos * sizeof(cl_int), t->count);
+	g_buf_cstart  = gen_copy_buf(npos, t->cstart);
+	g_buf_chars0  = gen_copy_buf(npos, t->chars0);
+
+	g_uploaded_serial = mask_gpu_serial;
+}
+
+/* Upload the multi-length plan: per-segment metadata + concatenated suffix-DP
+ * tables (or odometer lo/radix bounds). Tracked by serial. */
+static void gen_upload_plan(void)
+{
+	const mask_gpu_plan *plan = mask_gpu_get_plan();
+	gen_seg *segs;
+	cl_ulong *suf;
+	char seen[MASK_MAX_INC_LEN + 2];
+	unsigned char dummy_zero = 0;
+	int s;
+
+	if (g_buf_segs && g_uploaded_plan_serial == mask_gpu_serial)
+		return;
+
+	gen_release_buf(&g_buf_segs);
+	gen_release_buf(&g_buf_suf);
+	gen_release_buf(&g_buf_boxbounds);
+
+	/* Odometer-shell mode: no suffix-DP; upload the per-segment lo/radix bounds
+	 * (seg->suf_off indexes into them) instead. */
+	if (plan->odometer) {
+		g_buf_boxbounds = gen_copy_buf(
+		    plan->boxbounds_n ? plan->boxbounds_n : 1,
+		    plan->boxbounds_n ? (void *)plan->boxbounds : (void *)&dummy_zero);
+	}
+
+	suf = mem_alloc((plan->suf_total ? plan->suf_total : 1) * sizeof(cl_ulong));
+	segs = mem_alloc((plan->nseg ? plan->nseg : 1) * sizeof(gen_seg));
+	memset(seen, 0, sizeof(seen));
+	for (s = 0; s < plan->nseg; s++) {
+		const mask_gpu_seg *sg = &plan->seg[s];
+
+		if (gen_reg_max && (cl_uint)sg->limit > gen_reg_max) {
+			fprintf(stderr, "Error: JOHN_GEN_REGS width %u too small for a "
+			    "mask length-loop with %d generated positions; rebuild with "
+			    "JOHN_GEN_REGS=%d or larger.\n",
+			    gen_reg_max, sg->limit, sg->limit);
+			error();
+		}
+
+		if (!plan->odometer && !seen[sg->loop]) {
+			const mask_gpu_loop *gl = mask_gpu_get_loop(sg->loop);
+
+			memcpy(suf + sg->suf_off, gl->suf,
+			       (size_t)(gl->limit + 1) * gl->ksize * sizeof(cl_ulong));
+			seen[sg->loop] = 1;
+		}
+		segs[s].vbase   = sg->vbase;
+		segs[s].vcnt    = sg->vcnt;
+		segs[s].lstart  = sg->lstart;
+		segs[s].suf_off = sg->suf_off;
+		segs[s].limit   = sg->limit;
+		segs[s].len     = sg->len;
+		segs[s].max_k   = sg->max_k;
+		segs[s].ksize   = sg->ksize;
+	}
+
+	g_buf_suf  = gen_copy_buf((plan->suf_total ? plan->suf_total : 1) *
+	                          sizeof(cl_ulong), suf);
+	g_buf_segs = gen_copy_buf((plan->nseg ? plan->nseg : 1) * sizeof(gen_seg),
+	                          segs);
+	g_nseg = plan->nseg;
+
+	MEM_FREE(suf);
+	MEM_FREE(segs);
+	g_uploaded_plan_serial = mask_gpu_serial;
+}
+
+static void set_kernel_args_gen(void)
+{
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 10, sizeof(g_buf_suf), &g_buf_suf), "arg10");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 11, sizeof(g_buf_table), &g_buf_table), "arg11");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 12, sizeof(g_buf_startv), &g_buf_startv), "arg12");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 13, sizeof(g_buf_rowcnt), &g_buf_rowcnt), "arg13");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 14, sizeof(g_buf_littmpl), &g_buf_littmpl), "arg14");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 15, sizeof(g_buf_keypos), &g_buf_keypos), "arg15");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 16, sizeof(g_buf_count), &g_buf_count), "arg16");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 17, sizeof(g_buf_cstart), &g_buf_cstart), "arg17");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 18, sizeof(g_buf_chars0), &g_buf_chars0), "arg18");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 19, sizeof(g_buf_segs), &g_buf_segs), "arg19");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 20, sizeof(cl_uint), &g_nseg), "arg20");
+	/* Odometer-shell bounds buffer (kernel arg 24, only present under
+	 * -D GEN_ODOMETER). Args 21-23 (gbase/gcount/gR) are set per launch. */
+	if (gen_deepen)
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 24, sizeof(g_buf_boxbounds), &g_buf_boxbounds), "arg24");
+}
+
+static int gen_crypt(int *pcount, struct db_salt *salt)
+{
+	const int count = *pcount;
+	size_t *lws = local_work_size ? &local_work_size : NULL;
+	cl_ulong gbase = mask_gpu_cur_base;
+	cl_uint gcount = count;
+	size_t threads;
+
+	(void)salt;
+	if (count <= 0) {
+		*pcount = 0;
+		return 0;
+	}
+
+	gen_upload_tables();
+	gen_upload_plan();
+
+	g_cur_gen = 1;
+	g_cur_gbase = gbase;
+	g_cur_gcount = gcount;
+	set_kernel_args_gen();
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 21, sizeof(cl_ulong), &gbase), "arg21");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 22, sizeof(cl_uint), &gcount), "arg22");
+	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 23, sizeof(cl_uint), &gen_R), "arg23");
+
+	/* gcount candidates spread gen_R per work-item -> ceil(count/gen_R) threads. */
+	threads = ((size_t)count + gen_R - 1) / gen_R;
+	global_work_size = GET_NEXT_MULTIPLE(threads, local_work_size);
+
+	BENCH_CLERROR(clEnqueueNDRangeKernel(queue[gpu_id], crypt_kernel, 1, NULL, &global_work_size, lws, 0, NULL, NULL), "failed in clEnqueueNDRangeKernel");
+	BENCH_CLERROR(clEnqueueReadBuffer(queue[gpu_id], buffer_hash_ids, CL_TRUE, 0, sizeof(cl_uint), hash_ids, 0, NULL, NULL), "failed in reading back num cracked hashes.");
+
+	if (hash_ids[0] > num_loaded_hashes) {
+		fprintf(stderr, "Error, gen_crypt kernel.\n");
+		error();
+	}
+
+	if (hash_ids[0]) {
+		BENCH_CLERROR(clEnqueueReadBuffer(queue[gpu_id], buffer_return_hashes, CL_TRUE, 0, 2 * sizeof(cl_uint) * hash_ids[0], loaded_hashes, 0, NULL, NULL), "failed in reading back return_hashes.");
+		BENCH_CLERROR(clEnqueueReadBuffer(queue[gpu_id], buffer_hash_ids, CL_TRUE, 0, (3 * hash_ids[0] + 1) * sizeof(cl_uint), hash_ids, 0, NULL, NULL), "failed in reading data back hash_ids.");
+		BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], buffer_bitmap_dupe, CL_TRUE, 0, (hash_table_size/32 + 1) * sizeof(cl_uint), zero_buffer, 0, NULL, NULL), "failed in clEnqueueWriteBuffer buffer_bitmap_dupe.");
+		BENCH_CLERROR(clEnqueueWriteBuffer(queue[gpu_id], buffer_hash_ids, CL_TRUE, 0, sizeof(cl_uint), zero_buffer, 0, NULL, NULL), "failed in clEnqueueWriteBuffer buffer_hash_ids.");
+
+		/* GPU mask generation tries candidates in K (Markov) order, but the device
+		 * reports cracks in arbitrary atomic-fire order. Sort this batch by
+		 * work-item id (== ascending global index == ascending K) so cracks are
+		 * reported in exact K order, permuting the id triples and the parallel
+		 * return-hash pairs (loaded_hashes) together. */
+		if (mask_gpu_gen && hash_ids[0] > 1) {
+			cl_uint a, n = hash_ids[0];
+
+			for (a = 1; a < n; a++) {
+				cl_uint g0 = hash_ids[1 + 3 * a];
+				cl_uint g1 = hash_ids[2 + 3 * a];
+				cl_uint g2 = hash_ids[3 + 3 * a];
+				cl_uint h0 = loaded_hashes[2 * a];
+				cl_uint h1 = loaded_hashes[2 * a + 1];
+				int b = (int)a - 1;
+
+				while (b >= 0 && hash_ids[1 + 3 * b] > g0) {
+					hash_ids[1 + 3 * (b + 1)] = hash_ids[1 + 3 * b];
+					hash_ids[2 + 3 * (b + 1)] = hash_ids[2 + 3 * b];
+					hash_ids[3 + 3 * (b + 1)] = hash_ids[3 + 3 * b];
+					loaded_hashes[2 * (b + 1)]     = loaded_hashes[2 * b];
+					loaded_hashes[2 * (b + 1) + 1] = loaded_hashes[2 * b + 1];
+					b--;
+				}
+				hash_ids[1 + 3 * (b + 1)] = g0;
+				hash_ids[2 + 3 * (b + 1)] = g1;
+				hash_ids[3 + 3 * (b + 1)] = g2;
+				loaded_hashes[2 * (b + 1)]     = h0;
+				loaded_hashes[2 * (b + 1) + 1] = h1;
+			}
+		}
+	}
+
+	*pcount *= mask_int_cand.num_int_cand;
+	return hash_ids[0];
+}
+
 static int crypt_all(int *pcount, struct db_salt *salt)
 {
 	const int count = *pcount;
 
 	size_t *lws = local_work_size ? &local_work_size : NULL;
+
+	if (gen_active)
+		return gen_crypt(pcount, salt);
 
 	global_work_size = GET_NEXT_MULTIPLE(count, local_work_size);
 
@@ -776,6 +1156,39 @@ static void auto_tune(struct db_main *db, long double kernel_run_ms)
 	int tune_gws = 1, tune_lws = 1;
 
 	char key[PLAINTEXT_LENGTH + 1];
+
+	/* GPU generation pushes no host keys, so the key-streaming tuner doesn't
+	 * apply. Pick a fixed work size and prepare the (otherwise unused) kpc
+	 * buffers so the arg-0..2 contract is still satisfied. */
+	if (gen_active) {
+		size_t maxlws;
+		const char *renv = getenv("JOHN_GEN_R");
+		const char *genv = getenv("JOHN_GEN_GWS");
+
+		if (renv && atoi(renv) > 0)
+			gen_R = atoi(renv);
+		if (!local_work_size)
+			local_work_size = 8;
+		maxlws = get_kernel_max_lws(gpu_id, crypt_kernel);
+		if (local_work_size > maxlws)
+			local_work_size = maxlws;
+		/* 1<<18 work-items keeps a modern GPU's SMs saturated; override with
+		 * JOHN_GEN_GWS. */
+		global_work_size = GET_NEXT_MULTIPLE(
+		    (genv && atoi(genv) > 0) ? (size_t)atoi(genv) : (1 << 18),
+		    local_work_size);
+
+		release_clobj_kpc();
+		create_clobj_kpc(global_work_size);
+		set_kernel_args_kpc();
+		/* Each of global_work_size work-items emits gen_R candidates, so a block
+		 * (mask mode's per-launch candidate count) is that wide. The kpc key
+		 * buffers stay sized to global_work_size - the gen kernel never reads
+		 * them, and the NDRange only launches ceil(count/gen_R). */
+		self->params.max_keys_per_crypt = global_work_size * gen_R;
+		clear_keys();
+		return;
+	}
 
 	memset(key, 0xF5, PLAINTEXT_LENGTH);
 	key[PLAINTEXT_LENGTH] = 0;
@@ -945,6 +1358,46 @@ static void reset(struct db_main *db)
 {
 	release_clobj();
 	release_clobj_kpc();
+
+	/* Use the K-ordered GPU generator for native (non-stacked) mask mode. */
+	mask_gpu_gen = !self_test_running &&
+	               (options.flags & FLG_MASK_CHK) &&
+	               !(options.flags & FLG_MASK_STACKED);
+
+	/* In MASK_GPU_CPU validation the host streams candidates through the normal
+	 * crypt path, so keep mask_gpu_gen set (mask.c drives the host unrank) but run
+	 * the format as non-gen: normal sha1 kernel, crypt and get_key. */
+	gen_active = mask_gpu_gen && !mask_gpu_cpu_validate;
+
+	/* JOHN_GEN_REGS[=width] selects the register-resident gen kernel. */
+	{
+		const char *e = getenv("JOHN_GEN_REGS");
+		int v = e ? atoi(e) : 0;
+
+		gen_reg_max = e ? (cl_uint)(v >= 2 ? v : 16) : 0;
+	}
+
+	/* JOHN_GEN_HEAD=H (or JOHN_GEN_MARGINAL for H==0) selects the hybrid head/tail
+	 * generator. It owns the materialize, so force off the regs/localtab variants. */
+	{
+		const char *he = getenv("JOHN_GEN_HEAD");
+
+		if (he)
+			gen_head = atoi(he);
+		else if (getenv("JOHN_GEN_MARGINAL"))
+			gen_head = 0;
+		else
+			gen_head = -1;
+	}
+	if (gen_head >= 0)
+		gen_reg_max = 0;
+
+	/* JOHN_GEN_DEEPEN selects the odometer-shell deepening generator. It owns the
+	 * index->iter step (mixed-radix odometer) so it lives in the non-REGS path;
+	 * force GEN_REGS off. mask.c reads the same env to build the matching plan. */
+	gen_deepen = (getenv("JOHN_GEN_DEEPEN") != NULL);
+	if (gen_deepen)
+		gen_reg_max = 0;
 
 	num_loaded_hashes = db->salts->count;
 	prepare_table(db->salts);

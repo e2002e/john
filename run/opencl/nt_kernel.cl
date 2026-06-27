@@ -625,7 +625,11 @@ __kernel void nt_gen(__global uint *keys_unused,
 		  uint nseg,
 		  ulong gbase,
 		  uint gcount,
-		  uint gR)
+		  uint gR
+#ifdef GEN_ODOMETER
+		, __constant uchar *g_boxbounds  /* per-seg lo[limit]+radix[limit] */
+#endif
+		  )
 {
 	uint i, j;
 	uint gid = get_global_id(0);
@@ -822,6 +826,51 @@ __kernel void nt_gen(__global uint *keys_unused,
 				}
 			}
 #else
+#ifdef GEN_ODOMETER
+			/* Odometer-shell decode: this segment is a magnitude sub-box with
+			 * per-position [lo, radix) rank bounds at (g_boxbounds + seg_suf_off):
+			 * lo[0..glimit) then radix[0..glimit). Mixed-radix decode the loop-
+			 * local index g into iter[], rightmost position least significant
+			 * (matches the host mirror), then materialize. Divergence-free; every
+			 * candidate is full-decoded so mfrom = 0. */
+			{
+				__constant uchar *blo  = g_boxbounds + seg_suf_off;
+				__constant uchar *brad = blo + glimit;
+				int p;
+
+				if (full) {
+					/* New sub-box: full mixed-radix decode of the local index g,
+					 * rightmost position least significant. */
+					ulong gloc = g;
+
+					for (p = (int)glimit - 1; p >= 0; p--) {
+						uint rad = brad[p];
+						iter[p] = (uchar)(blo[p] + (uint)(gloc % rad));
+						gloc /= rad;
+					}
+					mfrom = 0;
+				} else {
+					/* Same sub-box, next candidate: odometer +1 with carry. Only
+					 * positions from the carried one rightward changed, so mfrom is
+					 * that position - the materialize re-runs just key[mfrom..glimit)
+					 * (usually one position). The carry is short on average
+					 * (geometric in the radix) and divergence-free in the common
+					 * no-carry case, which is where the speedup over the simplex
+					 * repack comes from. */
+					p = (int)glimit - 1;
+					for (;;) {
+						uint lo = blo[p];
+						if ((uint)iter[p] + 1u < lo + brad[p]) {
+							iter[p]++;
+							break;
+						}
+						iter[p] = (uchar)lo;   /* wrap this wheel, carry left */
+						if (--p < 0) { p = 0; break; }
+					}
+					mfrom = (uint)p;
+				}
+			}
+#else
 			if (full) {
 				ulong fw = g, rank;
 				uint remaining_k;
@@ -894,6 +943,7 @@ __kernel void nt_gen(__global uint *keys_unused,
 					mfrom = 0;
 				}
 			}
+#endif /* GEN_ODOMETER */
 
 			for (i = mfrom; i < glimit; i++) {
 				int kp = g_keypos[i];

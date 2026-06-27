@@ -204,7 +204,8 @@ static struct fmt_main *self;
 
 /* GPU K-ordered generation state (port of the raw-md5-opencl generator). */
 static cl_mem g_buf_suf, g_buf_table, g_buf_startv, g_buf_rowcnt, g_buf_littmpl,
-              g_buf_keypos, g_buf_count, g_buf_cstart, g_buf_chars0, g_buf_segs;
+              g_buf_keypos, g_buf_count, g_buf_cstart, g_buf_chars0, g_buf_segs,
+              g_buf_boxbounds;   /* odometer-shell per-seg lo/radix bounds (arg 23) */
 static unsigned g_uploaded_serial;       /* mask_gpu_serial of last table upload  */
 static unsigned g_uploaded_plan_serial;  /* mask_gpu_serial of last plan upload    */
 static cl_uint g_nseg;                    /* segments in the uploaded plan          */
@@ -226,10 +227,16 @@ static cl_uint gen_R = 256;
 /* >0 builds the register-resident gen kernel (-D GEN_REGS) with this unroll width
  * (compile-time GEN_REG_MAX). Set from JOHN_GEN_REGS in reset(). */
 static cl_uint gen_reg_max = 0;
+/* >0 (JOHN_GEN_DEEPEN) builds the odometer-shell deepening gen kernel
+ * (-D GEN_ODOMETER): each segment is a magnitude-threshold sub-box enumerated by a
+ * plain mixed-radix odometer over per-position rank ranges instead of the rank-sum
+ * simplex, so the GPU runs divergence-free while the host emits the sub-boxes
+ * most-probable-band first. Mutually exclusive with GEN_REGS. */
+static int gen_deepen = 0;
 static void gen_release_all(void);
 
 /* Parameters of the gen launch in flight, so set_kernel_args() can re-bind the
- * gen-kernel args (9-22) if ocl_hc_64_extract_info rebuilds crypt_kernel
+ * gen-kernel args (9-23) if ocl_hc_64_extract_info rebuilds crypt_kernel
  * mid-launch (a rebuild wipes all kernel args and the generic re-bind covers
  * only 0-8). */
 static int      g_cur_gen = 0;
@@ -272,7 +279,7 @@ static void set_kernel_args()
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 3, sizeof(buffer_int_keys), (void *) &buffer_int_keys), "Error setting argument 4.");
 
 	/* If a gen launch is in flight and the kernel was just rebuilt by
-	 * ocl_hc_64_extract_info, re-bind the gen args (9-22) too. */
+	 * ocl_hc_64_extract_info, re-bind the gen args (9-23) too. */
 	if (gen_active && g_cur_gen) {
 		set_kernel_args_gen();
 		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 20, sizeof(cl_ulong), &g_cur_gbase), "arg20");
@@ -454,12 +461,18 @@ static void init_kernel(unsigned int num_ld_hashes, char *bitmap_para)
 		strcat(build_opts, go);
 	}
 
-	if (gen_active && gen_reg_max) {
+	if (gen_active && gen_reg_max && !gen_deepen) {
 		char ro[64];
 
 		snprintf(ro, sizeof(ro), " -D GEN_REGS -D GEN_REG_MAX=%u", gen_reg_max);
 		strcat(build_opts, ro);
 	}
+
+	/* Odometer-shell deepening: divergence-free mixed-radix enumeration of
+	 * magnitude sub-boxes (see gen_deepen). Owns the index->iter step, so it sits
+	 * in the non-REGS materialize path; force GEN_REGS off (done in reset). */
+	if (gen_active && gen_deepen)
+		strcat(build_opts, " -D GEN_ODOMETER");
 
 	opencl_build_kernel("$JOHN/opencl/nt_kernel.cl", gpu_id, build_opts, 0);
 	crypt_kernel = clCreateKernel(program[gpu_id],
@@ -753,6 +766,7 @@ static void gen_release_all(void)
 	gen_release_buf(&g_buf_cstart);
 	gen_release_buf(&g_buf_chars0);
 	gen_release_buf(&g_buf_segs);
+	gen_release_buf(&g_buf_boxbounds);
 	g_uploaded_serial = 0;
 	g_uploaded_plan_serial = 0;
 }
@@ -796,6 +810,7 @@ static void gen_upload_plan(void)
 	gen_seg *segs;
 	cl_ulong *suf;
 	char seen[MASK_MAX_INC_LEN + 2];
+	unsigned char dummy_zero = 0;
 	int s;
 
 	if (g_buf_segs && g_uploaded_plan_serial == mask_gpu_serial)
@@ -803,6 +818,15 @@ static void gen_upload_plan(void)
 
 	gen_release_buf(&g_buf_segs);
 	gen_release_buf(&g_buf_suf);
+	gen_release_buf(&g_buf_boxbounds);
+
+	/* Odometer-shell mode: no suffix-DP; upload the per-segment lo/radix bounds
+	 * (seg->suf_off indexes into them) instead. */
+	if (plan->odometer) {
+		g_buf_boxbounds = gen_copy_buf(
+		    plan->boxbounds_n ? plan->boxbounds_n : 1,
+		    plan->boxbounds_n ? (void *)plan->boxbounds : (void *)&dummy_zero);
+	}
 
 	suf = mem_alloc((plan->suf_total ? plan->suf_total : 1) * sizeof(cl_ulong));
 	segs = mem_alloc((plan->nseg ? plan->nseg : 1) * sizeof(gen_seg));
@@ -820,7 +844,7 @@ static void gen_upload_plan(void)
 			error();
 		}
 
-		if (!seen[sg->loop]) {
+		if (!plan->odometer && !seen[sg->loop]) {
 			const mask_gpu_loop *gl = mask_gpu_get_loop(sg->loop);
 
 			memcpy(suf + sg->suf_off, gl->suf,
@@ -861,6 +885,10 @@ static void set_kernel_args_gen(void)
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 17, sizeof(g_buf_chars0), &g_buf_chars0), "arg17");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 18, sizeof(g_buf_segs), &g_buf_segs), "arg18");
 	HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 19, sizeof(cl_uint), &g_nseg), "arg19");
+	/* Odometer-shell bounds buffer (kernel arg 23, only present under
+	 * -D GEN_ODOMETER). Args 20-22 (gbase/gcount/gR) are set per launch. */
+	if (gen_deepen)
+		HANDLE_CLERROR(clSetKernelArg(crypt_kernel, 23, sizeof(g_buf_boxbounds), &g_buf_boxbounds), "arg23");
 }
 
 static int gen_crypt(int *pcount, struct db_salt *salt)
@@ -950,6 +978,13 @@ static void reset(struct db_main *db)
 
 		gen_reg_max = e ? (cl_uint)(v >= 2 ? v : 16) : 0;
 	}
+
+	/* JOHN_GEN_DEEPEN selects the odometer-shell deepening generator. It owns the
+	 * index->iter step (mixed-radix odometer) so it lives in the non-REGS path;
+	 * force GEN_REGS off. mask.c reads the same env to build the matching plan. */
+	gen_deepen = (getenv("JOHN_GEN_DEEPEN") != NULL);
+	if (gen_deepen)
+		gen_reg_max = 0;
 	{
 		const char *renv = getenv("JOHN_GEN_R");
 
