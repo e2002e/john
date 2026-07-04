@@ -58,10 +58,6 @@ enum {
 static int base64_decode_atom(char *atom, unsigned char *out);
 #endif
 
-typedef struct Filename {
-	char path[4096];
-} Filename;
-
 static char header[40], *b, *encryption, *comment, *mac;
 static const char *putty_error = NULL;
 static int i, is_mac, old_fmt;
@@ -98,8 +94,10 @@ static char *read_body(FILE * fp)
 			MEM_FREE(text);
 			return NULL;
 		}
-		text[len++] = c;
-		text[len] = '\0';
+		if (len < size - 1) {
+			text[len++] = c;
+			text[len] = '\0';
+		}
 	}
 }
 
@@ -175,13 +173,13 @@ static int read_header(FILE * fp, char *header)
 }
 
 
-static int init_LAME(const Filename *filename) {
+static int init_LAME(const char *filename) {
 	FILE *fp;
 
 	encryption = comment = mac = NULL;
 	public_blob = private_blob = NULL;
 
-	fp = fopen(filename->path, "rb" );
+	fp = fopen(filename, "rb");
 	if (!fp) {
 		putty_error = "can't open file";
 		goto error;
@@ -292,7 +290,7 @@ static void print_hex(unsigned char *str, int len)
 		printf("%02x", str[i]);
 }
 
-static void LAME_ssh2_load_userkey(char *path, const char **errorstr)
+static void LAME_ssh2_load_userkey(const char *path, const char **errorstr)
 {
 	const char *ext[] = {".ppk"};
 	char *fname;
@@ -328,26 +326,13 @@ error:
 	MEM_FREE(private_blob);
 }
 
-static FILE *f_open(const Filename *filename, char const *mode, int is_private)
-{
-	if (!is_private) {
-		return fopen(filename->path, mode);
-	} else {
-		int fd;
-		fd = open(filename->path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-		if (fd < 0)
-			return NULL;
-		return fdopen(fd, mode);
-	}
-}
-
 /* ----------------------------------------------------------------------
  * A function to determine the type of a private key file. Returns
  * 0 on failure, 1 or 2 on success.
  */
 #define rsa_signature "SSH PRIVATE KEY FILE FORMAT 1.1\n"
 
-static int key_type(const Filename *filename)
+static int key_type(const char *filename)
 {
 	FILE *fp;
 	char buf[32];
@@ -356,7 +341,7 @@ static int key_type(const Filename *filename)
 	const char openssh_sig[] = "-----BEGIN ";
 	int i;
 
-	fp = f_open(filename, "r", FALSE);
+	fp = fopen(filename, "r");
 	if (!fp)
 		return SSH_KEYTYPE_UNOPENABLE;
 	i = fread(buf, 1, sizeof(buf), fp);
@@ -376,7 +361,7 @@ static int key_type(const Filename *filename)
 	return SSH_KEYTYPE_UNKNOWN;	       /* unrecognised or EOF */
 }
 
-static int ssh2_userkey_encrypted(const Filename *filename, char **commentptr)
+static int ssh2_userkey_encrypted(const char *filename, char **commentptr)
 {
 	FILE *fp;
 	char header[40], *b, *comment;
@@ -385,7 +370,7 @@ static int ssh2_userkey_encrypted(const Filename *filename, char **commentptr)
 	if (commentptr)
 		*commentptr = NULL;
 
-	fp = f_open(filename, "rb", FALSE);
+	fp = fopen(filename, "rb");
 	if (!fp)
 		return 0;
 	if (!read_header(fp, header)
@@ -481,32 +466,29 @@ static int base64_decode_atom(char *atom, unsigned char *out)
 	return len;
 }
 
-static void process_file(const char *fname)
+static void process_file(const char *filename)
 {
 	FILE *fp;
 	int type, realtype;
 	char *comment;
-	Filename filename;
 	int needs_pass = 0;
 	const char *errmsg = NULL;
 
 	/* check if file exists */
-	if ((fp = fopen(fname, "r")) == NULL) {
-		fprintf(stderr, "Error: Cannot open %s.\n", fname);
+	if ((fp = fopen(filename, "r")) == NULL) {
+		fprintf(stderr, "Error: Cannot open %s\n", filename);
 		return;
 	}
 	fclose(fp);
 
-	strcpy(filename.path, fname);
-
 	// src: winpgen.c
-	type = realtype = key_type(&filename);
+	type = realtype = key_type(filename);
 	if (type != SSH_KEYTYPE_SSH1 && type != SSH_KEYTYPE_SSH2) {
-		fprintf(stderr, "Error: Couldn't load private key (%s)\n", filename.path);
+		fprintf(stderr, "Error: Couldn't load private key (%s)\n", filename);
 		return;
 	}
 	if (type == SSH_KEYTYPE_SSH1) {
-		fprintf(stderr, "%s : SSH1 RSA private keys are not supported currently!\n", filename.path);
+		fprintf(stderr, "%s : SSH1 RSA private keys are not supported currently!\n", filename);
 		return;
 
 	}
@@ -516,14 +498,14 @@ static void process_file(const char *fname)
 
 	comment = NULL;
 	if (realtype == SSH_KEYTYPE_SSH2) {
-		needs_pass = ssh2_userkey_encrypted(&filename, &comment);
+		needs_pass = ssh2_userkey_encrypted(filename, &comment);
 		if (needs_pass == 0) {
-			fprintf(stderr, "%s : this private key doesn't need a passphrase!\n", fname);
+			fprintf(stderr, "%s : this private key doesn't need a passphrase!\n", filename);
 			goto out;
 		}
 	}
 
-	if (init_LAME(&filename)==1) {
+	if (init_LAME(filename) == 1) {
 		fprintf(stderr, "error, not valid private key!\n");
 		goto out;
 	}
@@ -532,7 +514,7 @@ static void process_file(const char *fname)
 		goto out;
 	} else { // SSH_KEYTYPE_SSH2
 		if (realtype == type) {
-			LAME_ssh2_load_userkey(filename.path, &errmsg);
+			LAME_ssh2_load_userkey(filename, &errmsg);
 		}
 	}
 

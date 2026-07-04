@@ -42,11 +42,11 @@ john_register_one(&fmt_iterated_sha256);
 #define MAX_KEYS_PER_CRYPT      (NBKEYS * 512)
 #else
 #define MIN_KEYS_PER_CRYPT      1
-#define MAX_KEYS_PER_CRYPT      16
+#define MAX_KEYS_PER_CRYPT      512
 #endif
 
 #ifndef OMP_SCALE
-#define OMP_SCALE               256
+#define OMP_SCALE               1
 #endif
 
 static salt_t *cur_salt;
